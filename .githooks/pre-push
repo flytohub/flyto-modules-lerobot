@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# main changes only through a merged pull request, and nothing else is pushed
-# that the repository's own checks have not passed. install-hooks.sh links
-# this file over the workspace's pre-push hook, so it refuses main itself.
+# This repository's push gate: its own checks, the steps CI runs. The
+# workspace pre-push hook (flyto-workspace hooks/pre-push) refuses a push to
+# main and then runs this file; it is never installed over that hook.
 set -euo pipefail
-
-while read -r _local_ref _local_sha remote_ref _remote_sha; do
-  case "$remote_ref" in
-    refs/heads/main|refs/heads/master)
-      echo "pre-push: refusing a direct push to ${remote_ref#refs/heads/}; merge it through a pull request." >&2
-      exit 1
-      ;;
-  esac
-done
-
 exec "$(git rev-parse --show-toplevel)/scripts/verify.sh"

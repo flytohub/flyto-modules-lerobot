@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Link the pre-push gate into this clone. Leaves core.hooksPath alone, so the
-# flyto-indexer post-commit reindex hook (installed by bootstrap.sh) keeps working.
+# Inside the Flyto2 workspace there is nothing to install: its pre-push hook
+# (bootstrap.sh installs it) refuses main and runs .githooks/pre-push. A clone
+# outside the workspace gets this repository's gate linked only when no
+# pre-push hook is installed; an existing hook is never replaced.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-ln -sf ../../.githooks/pre-push .git/hooks/pre-push
+hook="$(git rev-parse --git-path hooks/pre-push)"
+if [ -e "$hook" ] && [ "$(readlink "$hook" 2>/dev/null)" != "../../.githooks/pre-push" ]; then
+  echo "pre-push hook already installed ($hook); kept. It must run .githooks/pre-push."
+  exit 0
+fi
+mkdir -p "$(dirname "$hook")"
+ln -sf ../../.githooks/pre-push "$hook"
 echo "pre-push -> .githooks/pre-push"
