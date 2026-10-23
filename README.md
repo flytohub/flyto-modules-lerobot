@@ -13,9 +13,10 @@
 ## Quick start
 
 ```bash
+# in the Python environment that runs Flyto2
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
 pip install "lerobot @ git+https://github.com/liyiteng/lerobot_alohamini"
-pip install -e ".[core]"
+pip install -e .
 cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
 ```
@@ -47,7 +48,7 @@ Add the arm to a Flyto2 Space and say:
 ### Installation
 
 ```bash
-pip install -e '.[core]'
+pip install -e .
 # LeRobot (Python 3.12+, pulls in torch). For AM-ARM200 use the fork:
 pip install 'lerobot @ git+https://github.com/liyiteng/lerobot_alohamini'
 ```
