@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.venv/
+.venv-*/
+.env
+
+# Never keep a Cloud export here (it is scanned as part of this repo); see README "Testing".
+.cloud-ref/
+
+# Generated code index. Rebuilt by `flyto-index scan .`, never source of truth.
+.flyto-index/

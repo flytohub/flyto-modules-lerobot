@@ -1,0 +1,64 @@
+{
+  "schema": "flyto.lerobot.arm.v1",
+  "resource_id": "am-arm200-01",
+  "display_name": "AM-ARM200",
+  "notes": "Example for the AM-ARM200 follower (6 joints + gripper) on lerobot_alohamini. Joint names and the am-follower-6dof profile follow that fork's so_follower.py. Every limit below is a conservative PLACEHOLDER, not a measurement, and every pose is untaught (taught: false), so move_joints refuses them until they are taught on the real arm. A physical 12 V cut-off switch on the follower's supply is required for any real run.",
+  "lerobot": {
+    "robot_module": "lerobot.robots.so_follower",
+    "robot_type": "so101_follower",
+    "port": "/dev/ttyACM1",
+    "id": "my_follower",
+    "options": {
+      "arm_profile": "am-follower-6dof",
+      "use_degrees": true
+    }
+  },
+  "unit": "deg",
+  "joints": {
+    "shoulder_pan": {"min": -90.0, "max": 90.0},
+    "shoulder_lift": {"min": -90.0, "max": 90.0},
+    "elbow_flex": {"min": -90.0, "max": 90.0},
+    "wrist_flex": {"min": -90.0, "max": 90.0},
+    "wrist_yaw": {"min": -90.0, "max": 90.0},
+    "wrist_roll": {"min": -150.0, "max": 150.0}
+  },
+  "gripper": {
+    "joint": "gripper",
+    "min": 0.0,
+    "max": 100.0,
+    "open": 60.0,
+    "closed": 2.0,
+    "tolerance": 5.0
+  },
+  "motion": {
+    "max_step": 3.0,
+    "step_interval_s": 0.05,
+    "tolerance": 3.0,
+    "settle_timeout_s": 5.0,
+    "poll_interval_s": 0.05,
+    "still_drift": 0.5
+  },
+  "poses": {
+    "ready": {
+      "taught": false,
+      "joints": {
+        "shoulder_pan": 0.0, "shoulder_lift": -30.0, "elbow_flex": 45.0,
+        "wrist_flex": 30.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+      }
+    },
+    "fixture_pick": {
+      "taught": false,
+      "joints": {
+        "shoulder_pan": 30.0, "shoulder_lift": 10.0, "elbow_flex": 20.0,
+        "wrist_flex": 45.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+      }
+    },
+    "tray_place": {
+      "taught": false,
+      "joints": {
+        "shoulder_pan": -30.0, "shoulder_lift": 10.0, "elbow_flex": 20.0,
+        "wrist_flex": 45.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+      }
+    }
+  }
+}

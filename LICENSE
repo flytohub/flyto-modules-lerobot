@@ -1,0 +1,59 @@
+# Flyto2 Source Available License 1.1
+
+## Licensor
+Flyto2 Team
+
+## Licensed Work
+Flyto2 - Git Native Workflow Automation
+Copyright (c) 2024-2026 Flyto2 Team. All rights reserved.
+
+## Grant of Rights
+
+Subject to the terms and conditions of this License, the Licensor hereby grants you a non-exclusive, worldwide, royalty-free license to:
+
+### Permitted Uses
+- Use the Licensed Work for personal, educational, or internal business purposes
+- Deploy the Licensed Work on your own servers for your own use
+- Modify the Licensed Work for your own use
+- Create integrations with the Licensed Work
+
+### Prohibited Uses
+You may NOT, without prior written permission from the Licensor:
+
+1. **Commercial Distribution**: Sell, resell, lease, or distribute the Licensed Work or any modified version as a standalone product or service
+
+2. **Competing Product or Service**: Use the Licensed Work or a derivative to provide, sell, host, distribute, or market any product or service that competes with Flyto2 or its affiliates, whether paid or free and even through a different interface, platform, programming language, plugin system, or deployment model
+
+3. **White-labeling**: Remove, alter, or obscure any licensing, copyright, or proprietary notices, and rebrand or white-label the Licensed Work for distribution
+
+4. **Sublicensing**: Grant sublicenses to the Licensed Work
+
+5. **Competitive Extraction or Training**: Use substantial source, assets, workflows, schemas, or derived materials from the Licensed Work to train, generate, benchmark, or improve a competing product, model, codebase, or dataset
+
+6. **Unauthorized Disclosure**: Share access to this private repository or disclose source to a third party except an authorized contractor bound by written confidentiality and use restrictions at least as protective as this License
+
+## Attribution
+
+You must retain all copyright, trademark, and attribution notices in the Licensed Work.
+
+## Disclaimer of Warranty
+
+THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE LICENSED WORK OR THE USE OR OTHER DEALINGS IN THE LICENSED WORK.
+
+## Termination
+
+This License automatically terminates if you violate any of its terms. Upon termination, you must cease all use of the Licensed Work and destroy all copies.
+
+## Contact
+
+For licensing inquiries or permission requests:
+- Website: https://flyto2.com
+- Email: sales@flyto2.com
+
+---
+
+This is a source-available license, not an OSI-approved open source license.
+The public Flyto2 Flow repository uses PolyForm Shield License 1.0.0 for
+revisions after commit `9398a622a2b53bde6df5e661d71735d1cefdbabc`;
+historical Flow revisions through that commit remain Apache-2.0. Cloud-to-Flow
+backports do not change the license of this private Cloud repository.

@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flyto-modules-lerobot"
+version = "0.1.0"
+description = "Manipulation capabilities for Flyto2 AI Space: any arm LeRobot drives, wrapped, never re-implemented"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Flyto2-Source-Available-1.1"
+license-files = ["LICENSE"]
+authors = [{ name = "Flyto2" }]
+keywords = ["flyto", "lerobot", "robot-arm", "manipulation", "workflow", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# None at import time. LeRobot (and torch with it) is imported only when an
+# execution host first talks to a configured arm, and only from the `lerobot`
+# extra. flyto-core is imported only inside register_all; the `core` extra
+# states the floor whose contract schema the pack is tested against
+# (core 06641cf38, released as 2.41.0).
+dependencies = []
+
+[project.optional-dependencies]
+core = ["flyto-core>=2.41.0"]
+# LeRobot itself needs Python 3.12+. AM-ARM200 profiles (`arm_profile`) live
+# in the liyiteng/lerobot_alohamini fork: install it from git instead (README).
+lerobot = ["lerobot>=0.4; python_version >= '3.12'"]
+# jsonschema: tests hold each reply to its output_schema the way the Cloud host does.
+dev = ["pytest>=8", "jsonschema>=4"]
+
+[project.urls]
+Source = "https://github.com/flytohub/flyto-modules-lerobot"
+
+# flyto-core: the module pack (one step per capability, with its contract).
+[project.entry-points."flyto.modules"]
+lerobot = "flyto_modules_lerobot:register_all"
+
+# AI Space execution host: the adapter it loads by exact name for an approved job.
+[project.entry-points."flyto2.external_adapters"]
+"lerobot.arm" = "flyto_modules_lerobot.plugin:build_adapter"
+
+# AI Space execution host: which arm this computer serves, and its telemetry.
+[project.entry-points."flyto2.resource_discoverers"]
+"lerobot.arm" = "flyto_modules_lerobot.discovery:discover_resource_manifests"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tests/ is not a package: the integration test imports Flyto2 Cloud's own
+# `tests` package, which a local one of the same name would shadow.
+pythonpath = ["src", "tests"]
+markers = [
+    "integration: needs a Flyto2 Cloud backend (FLYTO_CLOUD_BACKEND); skipped with a reason when absent",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+# zh-TW runtime strings use full-width punctuation on purpose.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["flyto_modules_lerobot", "fake_lerobot"]

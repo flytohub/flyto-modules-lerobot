@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Nothing is pushed that the repository's own checks have not passed.
+set -euo pipefail
+exec "$(git rev-parse --show-toplevel)/scripts/verify.sh"
