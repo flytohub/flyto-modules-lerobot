@@ -1,6 +1,6 @@
 # Agent rules
 
-Read `PROJECT.md`, `ARCHITECTURE.md`, `STATE.md` and `DECISIONS.md` before
+Read `docs/project/PROJECT.md`, `ARCHITECTURE.md`, `docs/project/STATE.md` and `docs/project/DECISIONS.md` before
 changing anything here.
 
 ## Scope (owner 2026-10-23)
@@ -56,7 +56,7 @@ discovery beyond the manifest, or any capability beyond those four.
   library plus pytest (and jsonschema for tests). `core` and `lerobot` are
   extras.
 - **No Flyto2 Cloud or flyto-core edit to support an arm.** If a change seems
-  to need one, stop and record why in `DECISIONS.md` instead.
+  to need one, stop and record why in `docs/project/DECISIONS.md` instead.
 - **One declarative table.** Ids, arguments, contracts, output schemas and
   refusal codes live in `capabilities.py`. The adapter routes by the row's
   `action`.
@@ -88,6 +88,6 @@ FLYTO_CLOUD_BACKEND=<cloud export>/src/ui/web/backend PYTHONPATH=<core 06641cf38
 Without them it is skipped with the reason. Report what you ran and what you
 did not.
 
-Keep the project-memory scaffold current in the same change: `PROJECT.md`,
-`ARCHITECTURE.md`, `STATE.md`, `ROADMAP.md`, `tasks.md`, `DECISIONS.md`,
-`CHANGELOG.md`, `docs/README.md`, `handoffs/_registry.md`.
+Keep the project-memory scaffold current in the same change: `docs/project/PROJECT.md`,
+`ARCHITECTURE.md`, `docs/project/STATE.md`, `docs/project/ROADMAP.md`, `docs/project/tasks.md`, `docs/project/DECISIONS.md`,
+`CHANGELOG.md`, `docs/README.md`, `docs/project/handoffs/_registry.md`.

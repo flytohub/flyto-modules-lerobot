@@ -107,7 +107,7 @@ Approve the arm's four capabilities in the Space:
 
 No call proves its own effect: a grasp or a place needs an independent
 observation Cloud does not have yet, so those steps stay unproven
-(`DECISIONS.md`).
+(`docs/project/DECISIONS.md`).
 
 ### Architecture
 

@@ -26,7 +26,7 @@ declares an `output_schema` for the data a completed call returns: `arm`
 `target`, `pose`, `max_error` for a move and `gripper_target`,
 `reached_command` for the gripper. The host omits a reply that breaks it.
 
-Why no evidence: see `DECISIONS.md`. In short, nothing independent observes a
+Why no evidence: see `docs/project/DECISIONS.md`. In short, nothing independent observes a
 grasp or place yet, and core's arithmetic cannot judge a move to a named pose
 without naming joints in code.
 
