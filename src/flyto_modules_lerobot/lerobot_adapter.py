@@ -12,7 +12,8 @@ What an outcome claims about the effect is the point (flyto-cloud
 
 * ``refused`` -- nothing was commanded: bad arguments, a target outside the
   configured limits, an unknown or untaught pose, an unreachable,
-  uncalibrated or faulted arm. ``effect_applied: false``.
+  uncalibrated or faulted arm, or one whose LeRobot motors are not the
+  config's joints. ``effect_applied: false``.
 * ``completed`` -- the arm's own readback is within the configured tolerance
   of the target (a grasp: the gripper stopped closing). It is the arm's word
   about its servos, returned as data; no evidence item comes with it.
@@ -23,6 +24,16 @@ What an outcome claims about the effect is the point (flyto-cloud
   to hold where it is.
 * ``cancelled`` / ``timeout`` -- a cancel, a stop or the deadline interrupted
   a move; the arm was told to hold where it is.
+
+Every hold that interrupts a move is measured: after commanding it the
+adapter only reads, until the moving motors are still (two readings in a row
+within ``motion.still_drift``, the same rule a move settles by), and reports
+``stop_to_still_ms`` from the stop request and ``overshoot`` past the held
+position. Nothing is sent while measuring, and torque is never touched.
+
+``manipulation.mark_pose`` moves nothing: it reads the arm and records the
+body joints as a taught pose in the arm's config file
+(``arm_config.record_taught_pose``), then serves that config from then on.
 
 Stop is HOLD, never torque off. These servos have no hardware emergency stop,
 and torque off drops the arm under gravity. :meth:`safe_stop` and a cancel
@@ -54,25 +65,30 @@ from .adapter_contract import (
     OUTCOME_TIMEOUT,
     CallResult,
 )
+from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
 from .capabilities import (
     DEPLOYMENT_MODE,
+    MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
+    REASON_CONFIG_NOT_WRITABLE,
     REASON_DEADLINE,
     REASON_EFFECT_UNKNOWN,
     REASON_FAULT,
+    REASON_MOTORS_MISMATCH,
     REASON_NOT_CALIBRATED,
     REASON_NOT_REACHED,
     REASON_OUTSIDE_LIMITS,
     REASON_POSE_NOT_TAUGHT,
+    REASON_POSE_TAUGHT,
     REASON_POSE_UNKNOWN,
     REASON_STOP_REQUESTED,
     REASON_UNREACHABLE,
     SPECS_BY_CAPABILITY,
     refusal_detail,
 )
-from .driver import ArmFault, ArmSession, ArmUnreachable, CommandLost, NotCalibrated
+from .driver import ArmFault, ArmSession, ArmUnreachable, CommandLost, MotorsMismatch, NotCalibrated
 from .evidence import policy_refusal
 
 OBSERVATION_SCHEMA = "flyto.lerobot.observation.v1"
@@ -83,10 +99,13 @@ _UNSENT_REASONS: Mapping[type, str] = {
     ArmUnreachable: REASON_UNREACHABLE,
     NotCalibrated: REASON_NOT_CALIBRATED,
     ArmFault: REASON_FAULT,
+    MotorsMismatch: REASON_MOTORS_MISMATCH,
 }
 # How an interrupted move ends, by why it was interrupted.
 _STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, REASON_DEADLINE: OUTCOME_TIMEOUT}
-_DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated)
+_DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)
+# What a stop measurement says when it could not measure.
+_UNMEASURED: Mapping[str, Any] = {"stop_measured": False, "stop_to_still_ms": None, "overshoot": None}
 
 
 def _finite(value: Any) -> bool:
@@ -129,12 +148,23 @@ class _Call:
     deadline_at: float
     moves_gripper: bool = False
     cancel: threading.Event = field(default_factory=threading.Event)
+    # When a stop, a cancel or the deadline first interrupted it (the adapter's clock).
+    stop_requested_at: float | None = None
+
+    def request_stop(self, now: float) -> None:
+        """Interrupt this call; the first request's time is the one a stop is measured from."""
+        if self.stop_requested_at is None:
+            self.stop_requested_at = now
+        self.cancel.set()
 
 
 def _unsent(step: Callable[[], Any]) -> Any:
     """Run a step nothing has been commanded before; a driver error is the call's typed refusal."""
     try:
         return step()
+    except MotorsMismatch as error:
+        raise _Refused(REASON_MOTORS_MISMATCH, {"reported": list(error.reported),
+                                                "configured": list(error.configured)}) from error
     except (ArmUnreachable, NotCalibrated, ArmFault) as error:
         raise _Refused(_UNSENT_REASONS[type(error)], {"error": type(error).__name__}) from error
 
@@ -148,6 +178,7 @@ class LeRobotArmAdapter:
         "move_joints": "_move_joints",
         "grasp": "_grasp",
         "release": "_release",
+        "mark_pose": "_mark_pose",
     }
 
     def __init__(
@@ -165,7 +196,6 @@ class LeRobotArmAdapter:
         if not isinstance(served_resource_id, str) or not served_resource_id.strip():
             raise ValueError("The served resource ID is required")
         self.session = session
-        self.config = session.config
         self.resource_id = resource_id.strip()
         # What this adapter is wired to, from its own configuration -- never
         # the id the host handed the factory (``served_identity``).
@@ -180,6 +210,11 @@ class LeRobotArmAdapter:
     def __repr__(self) -> str:
         """The served resource only, never the port."""
         return f"LeRobotArmAdapter({self.served_resource_id!r})"
+
+    @property
+    def config(self) -> ArmConfig:
+        """The arm's config as its session holds it now (a taught pose updates it)."""
+        return self.session.config
 
     # -- readings as data ------------------------------------------------------------
 
@@ -202,22 +237,61 @@ class LeRobotArmAdapter:
                     "evidence_items": [policy_refusal(code=code, observed=observed or {})]}
         return CallResult(call_id, OUTCOME_REFUSED, detail=refusal_detail(code), evidence=evidence)
 
-    def _held(self, call: _Call) -> tuple[bool, dict[str, Any] | None]:
-        """Tell the arm to hold where it is (torque on); whether that was commanded, and where."""
+    def _hold(self, call: _Call) -> dict[str, float] | None:
+        """Tell the arm to hold where it is (torque on); the reading it held at, or None when it could not."""
         motors = self.config.joint_names + ((self.config.gripper.joint,) if call.moves_gripper else ())
         try:
-            positions = self.session.hold(motors)
+            return self.session.hold(motors)
         except _DRIVER_ERRORS:
-            return False, None
-        return True, self._state(positions)
+            return None
 
-    def _interrupted(self, call_id: str, call: _Call, reason: str) -> CallResult:
-        """A move a stop, cancel or deadline interrupted: held, and only a stop *request*."""
-        holding, state = self._held(call)
+    def _held(self, call: _Call) -> tuple[bool, dict[str, Any] | None]:
+        """Tell the arm to hold where it is (torque on); whether that was commanded, and where."""
+        positions = self._hold(call)
+        return (False, None) if positions is None else (True, self._state(positions))
+
+    def _stop_measurement(self, call: _Call, held: Mapping[str, float], held_at: float,
+                          start: Mapping[str, float], target: Mapping[str, float]) -> dict[str, Any]:
+        """After a hold, read until the commanded motors are still; nothing is sent, torque is not touched.
+
+        ``stop_to_still_ms`` runs from the stop request (cancel, safe stop or
+        deadline) to the first of two readings in a row within
+        ``motion.still_drift`` of each other. ``overshoot`` is the furthest a
+        commanded motor went past where it was held, in the direction it was
+        moving, in the config's unit. Not measured (both None) when a reading
+        is lost or the arm is not still within ``motion.settle_timeout_s``.
+        """
+        motion = self.config.motion
+        requested_at = held_at if call.stop_requested_at is None else call.stop_requested_at
+        directions = {motor: math.copysign(1.0, target[motor] - start[motor])
+                      for motor in target if target[motor] != start[motor]}
+        previous, previous_at, overshoot = held, held_at, 0.0
+        while self._clock() - held_at <= motion.settle_timeout_s:
+            self._sleep(motion.poll_interval_s)
+            try:
+                current = self.session.read()
+            except _DRIVER_ERRORS:
+                return dict(_UNMEASURED)
+            now = self._clock()
+            overshoot = max([overshoot, *((current[motor] - held[motor]) * sign
+                                          for motor, sign in directions.items())])
+            if all(abs(current[motor] - previous[motor]) <= motion.still_drift for motor in target):
+                return {"stop_measured": True,
+                        "stop_to_still_ms": round(max(0.0, previous_at - requested_at) * 1000.0, 1),
+                        "overshoot": round(overshoot, 3)}
+            previous, previous_at = current, now
+        return dict(_UNMEASURED)
+
+    def _interrupted(self, call_id: str, call: _Call, reason: str, start: Mapping[str, float],
+                     target: Mapping[str, float]) -> CallResult:
+        """A move a stop, cancel or deadline interrupted: held, measured, and only a stop *request*."""
+        positions = self._hold(call)
+        holding = positions is not None
         evidence: dict[str, Any] = {"reason_code": reason, "stop_requested": True, "stop_confirmed": False,
-                                    "holding": holding, "effect_applied": None}
-        if state is not None:
-            evidence["arm"] = state
+                                    "holding": holding, "effect_applied": None, **_UNMEASURED}
+        if positions is not None:
+            evidence["arm"] = self._state(positions)
+            evidence.update(self._stop_measurement(call, positions, self._clock(), start, target))
         detail = refusal_detail(reason) if holding else POWER_CUTOFF_DETAIL
         return CallResult(call_id, _STOP_OUTCOMES[reason], detail=detail, evidence=evidence)
 
@@ -277,15 +351,16 @@ class LeRobotArmAdapter:
             call = self._inflight.get(call_id)
         if call is None:
             return CallResult(call_id, OUTCOME_REFUSED, detail="no call of this id is in flight")
-        call.cancel.set()
+        call.request_stop(self._clock())
         return CallResult(call_id, OUTCOME_CANCELLED, detail=refusal_detail(REASON_STOP_REQUESTED),
                           evidence={"stop_requested": True, "stop_confirmed": False})
 
     def safe_stop(self) -> CallResult:
         """HOLD, never torque off: interrupt every call on this arm and command it to stay where it is."""
         calls = tuple(self.session.calls_in_flight)
+        now = self._clock()
         for call in calls:
-            call.cancel.set()
+            call.request_stop(now)
         evidence: dict[str, Any] = {"stop_requested": True, "stop_confirmed": False, "holding": False}
         if not self.session.connected:
             # Never connected (or LeRobot disconnected it): nothing this pack
@@ -353,7 +428,9 @@ class LeRobotArmAdapter:
         """Raise when a stop, cancel or the deadline has interrupted this call."""
         if call.cancel.is_set():
             raise _Interrupted(REASON_STOP_REQUESTED)
-        if self._clock() > call.deadline_at:
+        now = self._clock()
+        if now > call.deadline_at:
+            call.request_stop(now)
             raise _Interrupted(REASON_DEADLINE)
 
     def _after_send(self, step: Callable[[], Any]) -> Any:
@@ -362,7 +439,7 @@ class LeRobotArmAdapter:
             return step()
         except ArmFault as error:
             raise _Lost(REASON_FAULT) from error
-        except (ArmUnreachable, CommandLost, NotCalibrated) as error:
+        except (ArmUnreachable, CommandLost, NotCalibrated, MotorsMismatch) as error:
             raise _Lost(REASON_EFFECT_UNKNOWN) from error
 
     def _drive(self, call: _Call, start: Mapping[str, float], target: Mapping[str, float],
@@ -413,7 +490,7 @@ class LeRobotArmAdapter:
             after = self._drive(call, before, target, counter)
             after, reached = self._settle(call, after, target, tolerance=tolerance, accept_still=accept_still)
         except _Interrupted as interrupted:
-            return self._interrupted(call_id, call, interrupted.reason), before, before, False
+            return self._interrupted(call_id, call, interrupted.reason, before, target), before, before, False
         except _Lost as lost:
             return self._lost(call_id, call, lost.code, counter[0]), before, before, False
         return None, before, after, reached
@@ -479,6 +556,55 @@ class LeRobotArmAdapter:
     def _release(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
         """``manipulation.release``: open to the configured open value."""
         return self._gripper(call_id, call, arguments, self.config.gripper.open, accept_still=False)
+
+    # -- teaching ------------------------------------------------------------------
+
+    @staticmethod
+    def _pose_to_mark(arguments: Mapping[str, Any]) -> tuple[str, bool]:
+        """``(pose name, replace)``; refused unless a pose name by the config's rule and an optional boolean."""
+        name = arguments.get("pose")
+        replace = arguments.get("replace", False)
+        if (not set(arguments) <= {"pose", "replace"} or not isinstance(name, str)
+                or not valid_name(name.strip()) or not isinstance(replace, bool)):
+            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
+        return name.strip(), replace
+
+    def _mark_pose(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
+        """``manipulation.mark_pose``: record the body joints' current position as a taught pose. Moves nothing.
+
+        Refused, with the file untouched, for a name already taught without
+        ``replace``, a reading outside the limits, or a config file that cannot
+        take it. One teach at a time per arm (the session's config lock); the
+        motion lock is held only for the read, so a stop never waits on a write.
+        """
+        name, replace = self._pose_to_mark(arguments)
+        with self.session.config_lock:
+            config = self.config
+            if config.source is None or config.source.suffix.lower() != ".json":
+                raise _Refused(REASON_CONFIG_NOT_WRITABLE, {"why": "the arm config was not read from a .json file"})
+            existing = config.poses.get(name)
+            replaced = existing is not None and existing.taught
+            if replaced and not replace:
+                raise _Refused(REASON_POSE_TAUGHT, {"pose": name})
+            positions = _unsent(self.session.read)
+            outside = [{"joint": joint.name, "position": round(positions[joint.name], 3),
+                        "min": joint.minimum, "max": joint.maximum}
+                       for joint in config.joints if not joint.admits(positions[joint.name])]
+            if outside:
+                raise _Refused(REASON_OUTSIDE_LIMITS, {"pose": name, "outside": outside})
+            if call.cancel.is_set():
+                return CallResult(call_id, OUTCOME_CANCELLED, detail=MARK_CANCELLED_DETAIL,
+                                  evidence={"reason_code": REASON_STOP_REQUESTED, "effect_applied": False})
+            try:
+                updated, backup = record_taught_pose(config, name,
+                                                     {joint: positions[joint] for joint in config.joint_names})
+            except ArmConfigError as error:
+                raise _Refused(REASON_CONFIG_NOT_WRITABLE, {"why": str(error)[:200]}) from error
+            self.session.config = updated
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence={
+            "arm": self._state(positions), "pose": name, "joints": dict(updated.poses[name].joints),
+            "replaced": replaced, "backup": backup.name, "effect_applied": True,
+        })
 
 
 __all__ = ["OBSERVATION_SCHEMA", "LeRobotArmAdapter"]

@@ -17,7 +17,8 @@ argument per joint, the shape the arm's manifest declares; whether a joint
 exists and is within its limits is the arm's config, checked by the adapter.
 
 A flyto-core whose ``register_module`` cannot carry a contract gets only the
-read: a step that moves the arm is never registered without its contract.
+read: a step that moves the arm or writes its config is never registered
+without its contract.
 """
 
 from __future__ import annotations
@@ -82,8 +83,16 @@ def _joint_targets(name: str, value: Any) -> dict[str, float]:
     return targets
 
 
+def _flag(name: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise CapabilityRequestError(f"{name} must be true or false")
+    return value
+
+
 # Each declared parameter type, checked and never coerced.
-_ARGUMENT_CHECKS: Mapping[str, Callable[[str, Any], Any]] = {"string": _text, "object": _joint_targets}
+_ARGUMENT_CHECKS: Mapping[str, Callable[[str, Any], Any]] = {
+    "string": _text, "object": _joint_targets, "boolean": _flag,
+}
 
 
 def capability_request(spec: CapabilitySpec, params: Mapping[str, Any], *, resource_id: Any) -> dict[str, Any]:
@@ -97,6 +106,9 @@ def capability_request(spec: CapabilitySpec, params: Mapping[str, Any], *, resou
     if unknown:
         raise CapabilityRequestError(f"unknown parameters: {', '.join(unknown)}")
     given = [name for name in schema if params.get(name) is not None]
+    missing = [name for name in schema if schema[name].get("required") and name not in given]
+    if missing:
+        raise CapabilityRequestError(f"missing parameters: {', '.join(missing)}")
     if spec.exactly_one_of and len([name for name in given if name in spec.exactly_one_of]) != 1:
         raise CapabilityRequestError(f"give exactly one of: {', '.join(spec.exactly_one_of)}")
     arguments: dict[str, Any] = {}
@@ -233,13 +245,14 @@ def _class_name(module_id: str) -> str:
 def build_modules(base_module, register_module) -> list[tuple[str, type]]:
     """Register one step per capability row against flyto-core's API.
 
-    Without ``contract=`` support, a step that moves the arm is not registered.
+    Without ``contract=`` support, only a read-only step is registered: one
+    that moves the arm or writes its config never runs without its contract.
     """
     contracts = supports_contract(register_module)
     step = _capability_step(base_module)
     registered: list[tuple[str, type]] = []
     for spec in SPECS:
-        if spec.actuates and not contracts:
+        if spec.safety_class != "read_only" and not contracts:
             logger.warning(
                 "flyto-modules-lerobot did not register %s: this flyto-core cannot carry its contract "
                 "(install flyto-core>=2.41.0)", spec.module_id,

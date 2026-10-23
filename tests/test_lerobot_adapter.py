@@ -9,7 +9,11 @@ What a call may claim is the point:
   never sent again;
 * stop and cancel HOLD the arm where it is with torque on, report
   ``stop_requested`` and never claim a confirmed physical stop, and nothing
-  in this package ever turns torque off.
+  in this package ever turns torque off;
+* every hold that interrupts a move is measured (stop to still, overshoot)
+  by reading only;
+* an arm whose LeRobot motors are not the config's joints is refused on
+  connect, before anything is sent.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from flyto_modules_lerobot.capabilities import (
     REASON_ARGUMENTS,
     REASON_EFFECT_UNKNOWN,
     REASON_FAULT,
+    REASON_MOTORS_MISMATCH,
     REASON_NOT_CALIBRATED,
     REASON_NOT_REACHED,
     REASON_OUTSIDE_LIMITS,
@@ -102,6 +107,64 @@ def test_a_port_that_does_not_open_is_unreachable_with_no_effect(make_adapter, s
     assert result.evidence["reason_code"] == REASON_UNREACHABLE and result.evidence["effect_applied"] is False
     decision, = result.evidence["evidence_items"]
     assert decision["kind"] == "policy.decision" and decision["reason"]["observed"]["effect_applied"] is False
+
+
+@pytest.mark.parametrize("motors", [
+    ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "gripper"),  # one missing
+    ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "wrist_tilt",
+     "gripper"),  # one the config does not name
+    ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll", "jaw"),  # renamed
+])
+def test_an_arm_driving_other_motors_than_the_config_is_refused_on_connect(arm_config, motors):
+    from fake_lerobot import fake_factory
+    from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
+
+    factory = fake_factory(motors=motors)
+    adapter = LeRobotArmAdapter(session=ArmSession(arm_config, robot_factory=factory), resource_id="r",
+                                served_resource_id="r", sleep=lambda _s: None)
+    result = move(adapter, {"elbow_flex": 10.0})
+    assert result.outcome == OUTCOME_REFUSED
+    assert result.evidence["reason_code"] == REASON_MOTORS_MISMATCH and result.evidence["effect_applied"] is False
+    observed = result.evidence["evidence_items"][0]["reason"]["observed"]
+    assert observed["reported"] == list(motors) and observed["configured"] == list(arm_config.motor_names)
+    arm = factory.arms[arm_config.lerobot.port]
+    assert arm.actions == [] and arm.observations == 0
+    # Every later call is refused the same way; nothing reconnects, nothing is sent.
+    for spec in (MANIPULATION_STATE, GRASP, MOVE_JOINTS):
+        again = call(adapter, spec, {"pose": "ready"} if spec is MOVE_JOINTS else {}, call_id=f"again-{spec.action}")
+        assert again.outcome == OUTCOME_REFUSED and again.evidence["reason_code"] == REASON_MOTORS_MISMATCH
+    stop = adapter.safe_stop()
+    assert stop.outcome == OUTCOME_FAILED and stop.evidence["holding"] is False
+    assert arm.actions == [] and arm.connect_calls == [False]
+    assert arm.torque is True
+
+
+def test_a_robot_that_reports_no_motors_is_refused(arm_config):
+    from fake_lerobot import fake_factory
+    from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
+
+    factory = fake_factory()
+    session = ArmSession(arm_config, robot_factory=factory)
+    adapter = LeRobotArmAdapter(session=session, resource_id="r", served_resource_id="r", sleep=lambda _s: None)
+    from fake_lerobot import FakeFollowerArm, FakeFollowerConfig
+
+    class Silent(FakeFollowerArm):
+        action_features = None
+
+    factory.arms[arm_config.lerobot.port] = Silent(FakeFollowerConfig(port=arm_config.lerobot.port))
+    result = call(adapter, MANIPULATION_STATE)
+    assert result.outcome == OUTCOME_REFUSED and result.evidence["reason_code"] == REASON_MOTORS_MISMATCH
+    assert factory.arms[arm_config.lerobot.port].actions == []
+
+
+def test_the_configs_motors_in_another_order_are_accepted(arm_config):
+    from fake_lerobot import fake_factory
+    from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
+
+    factory = fake_factory(motors=tuple(reversed(arm_config.motor_names)))
+    adapter = LeRobotArmAdapter(session=ArmSession(arm_config, robot_factory=factory), resource_id="r",
+                                served_resource_id="r", sleep=lambda _s: None)
+    assert call(adapter, MANIPULATION_STATE).outcome == OUTCOME_COMPLETED
 
 
 # -- reading -----------------------------------------------------------------------
@@ -405,3 +468,124 @@ def test_an_undeclared_capability_or_bad_deadline_is_refused(make_adapter, facto
     assert adapter.invoke(CallRequest("c", "motion.navigate", {}, 10.0)).outcome == OUTCOME_REFUSED
     assert adapter.invoke(CallRequest("d", MOVE_JOINTS.capability_id, {"pose": "ready"}, 0)).outcome == OUTCOME_REFUSED
     assert factory.arms == {}
+
+
+# -- every hold that interrupts a move is measured -----------------------------------------
+
+
+def _start_move(adapter, arguments, call_id="long"):
+    results = {}
+    worker = threading.Thread(target=lambda: results.setdefault("move", move(adapter, arguments, call_id=call_id)))
+    worker.start()
+    return worker, results
+
+
+def test_a_cancelled_move_reports_stop_to_still_and_overshoot_and_sends_nothing_after_the_hold(make_adapter, arm):
+    adapter = make_adapter()
+    started, release = threading.Event(), threading.Event()
+
+    def slow_sleep(_seconds):
+        started.set()
+        release.wait(2)
+
+    adapter._sleep = slow_sleep  # type: ignore[attr-defined]
+    worker, results = _start_move(adapter, {"elbow_flex": 80.0})
+    assert started.wait(2)
+    adapter.cancel("long")
+    adapter._sleep = lambda _seconds: None  # type: ignore[attr-defined]
+    release.set()
+    worker.join(5)
+    evidence = results["move"].evidence
+    assert results["move"].outcome == OUTCOME_CANCELLED and evidence["holding"] is True
+    assert evidence["stop_measured"] is True
+    assert evidence["stop_to_still_ms"] >= 0.0 and evidence["overshoot"] == 0.0
+    # The last command is the hold itself: measuring only reads.
+    assert arm.actions[-1]["elbow_flex"] == pytest.approx(evidence["arm"]["joints"]["elbow_flex"], abs=1e-3)
+    assert_torque_never_dropped(arm)
+
+
+def test_a_move_past_its_deadline_is_measured_from_the_deadline(make_adapter, arm):
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += max(seconds, 0.01)
+
+    adapter = make_adapter(clock=lambda: now[0], sleep=sleep)
+    result = call(adapter, MOVE_JOINTS, {"elbow_flex": 80.0}, deadline=0.03)
+    assert result.outcome == OUTCOME_TIMEOUT and result.evidence["holding"] is True
+    assert result.evidence["stop_measured"] is True and result.evidence["overshoot"] == 0.0
+    assert result.evidence["stop_to_still_ms"] <= 20.0
+    assert_torque_never_dropped(arm)
+
+
+def test_a_lost_reading_after_the_hold_is_not_measured_and_nothing_more_is_sent(make_adapter, arm, session):
+    adapter = make_adapter()
+    started, release = threading.Event(), threading.Event()
+
+    def slow_sleep(_seconds):
+        started.set()
+        release.wait(2)
+
+    hold = session.hold
+
+    def hold_then_lose_the_link(motors):
+        positions = hold(motors)
+        arm.drop_reads = 1000
+        return positions
+
+    session.hold = hold_then_lose_the_link  # type: ignore[method-assign]
+    adapter._sleep = slow_sleep  # type: ignore[attr-defined]
+    worker, results = _start_move(adapter, {"elbow_flex": 80.0})
+    assert started.wait(2)
+    adapter.cancel("long")
+    adapter._sleep = lambda _seconds: None  # type: ignore[attr-defined]
+    release.set()
+    worker.join(5)
+    sent = len(arm.actions)
+    evidence = results["move"].evidence
+    assert results["move"].outcome == OUTCOME_CANCELLED and evidence["holding"] is True
+    assert evidence["stop_measured"] is False
+    assert evidence["stop_to_still_ms"] is None and evidence["overshoot"] is None
+    assert len(arm.actions) == sent and arm.torque is True
+    assert_torque_never_dropped(arm)
+
+
+@pytest.fixture
+def timed_adapter(config_data):
+    """An arm that moves with time and keeps running toward its old goal for 40 ms after a new one."""
+    import time
+
+    from fake_lerobot import fake_factory
+    from flyto_modules_lerobot.arm_config import parse_arm_config
+    from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
+
+    config_data["motion"].update({"max_step": 5.0, "step_interval_s": 0.02, "poll_interval_s": 0.01,
+                                  "settle_timeout_s": 2.0, "tolerance": 1.0, "still_drift": 0.05})
+    config = parse_arm_config(config_data)
+    factory = fake_factory(velocity=100.0, lag_s=0.04)
+    session = ArmSession(config, robot_factory=factory)
+    session.ensure_connected()
+    adapter = LeRobotArmAdapter(session=session, resource_id="r", served_resource_id="r", sleep=time.sleep)
+    return adapter, factory.arms[config.lerobot.port]
+
+
+def test_a_safe_stop_mid_move_measures_the_servos_run_on(timed_adapter):
+    import time
+
+    adapter, arm = timed_adapter
+    worker, results = _start_move(adapter, {"elbow_flex": 60.0})
+    time.sleep(0.15)
+    stop = adapter.safe_stop()
+    worker.join(5)
+    assert stop.outcome == OUTCOME_COMPLETED and stop.evidence["torque"] == "on"
+    result = results["move"]
+    evidence = result.evidence
+    assert result.outcome == OUTCOME_CANCELLED and evidence["holding"] is True
+    assert evidence["stop_measured"] is True
+    assert 0.0 < evidence["arm"]["joints"]["elbow_flex"] < 60.0
+    assert evidence["overshoot"] > 0.0, "the servo ran on toward its previous goal after the hold"
+    assert 0.0 < evidence["stop_to_still_ms"] < 2000.0
+    # The last goal is a hold (the call's, or the safe stop's when that one landed second), never the
+    # target, and torque stayed on throughout; that measuring only reads is held by the cancel tests above.
+    assert arm.actions[-1]["elbow_flex"] == pytest.approx(evidence["arm"]["joints"]["elbow_flex"], abs=0.5)
+    assert_torque_never_dropped(arm)

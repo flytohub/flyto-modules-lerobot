@@ -17,6 +17,11 @@ TOML file per arm, never in code:
 * ``poses`` -- named joint targets; each says whether it was ``taught`` on
   this arm. An untaught pose is refused, never moved to.
 
+A pose is taught through ``manipulation.mark_pose``: :func:`record_taught_pose`
+writes where the arm is now into the same JSON file, checked as if it were
+read, with a timestamped copy of the previous file kept beside it and the new
+one replacing it atomically.
+
 A file that could make the arm do something its owner did not state is
 refused when it is read: a pose outside the limits, a gripper value outside
 its range, a joint LeRobot would not know, LeRobot told to drop torque.
@@ -24,12 +29,17 @@ its range, a joint LeRobot would not know, LeRobot told to drop torque.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
+import os
 import re
+import shutil
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -141,6 +151,9 @@ class ArmConfig:
     motion: MotionConfig
     poses: Mapping[str, Pose]
     lerobot: LeRobotSettings
+    # The file it was read from, or None when parsed from data. Where the arm
+    # config lives is not part of what the arm is, so it is not compared.
+    source: Path | None = dataclasses.field(default=None, compare=False)
 
     @property
     def joint_names(self) -> tuple[str, ...]:
@@ -160,6 +173,11 @@ class ArmConfig:
     def limit(self, name: str) -> JointLimit | None:
         """The limits of one body joint, or None when it is not one."""
         return next((joint for joint in self.joints if joint.name == name), None)
+
+
+def valid_name(text: str) -> bool:
+    """Whether ``text`` may name a joint or a pose in an arm config."""
+    return bool(_IDENTIFIER.fullmatch(text))
 
 
 # -- reading ------------------------------------------------------------------------
@@ -308,7 +326,71 @@ def load_arm_config(path: str | Path) -> ArmConfig:
         data = loader(file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ArmConfigError(f"the arm config cannot be read: {type(error).__name__}") from error
-    return parse_arm_config(data)
+    return dataclasses.replace(parse_arm_config(data), source=file)
+
+
+# -- teaching a pose ----------------------------------------------------------------
+
+
+def _backup_path(path: Path, now: datetime) -> Path:
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{path.name}.{stamp}.bak")
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.{stamp}-{counter}.bak")
+        counter += 1
+    return candidate
+
+
+def _replace_file(path: Path, data: Mapping[str, Any], now: datetime) -> Path:
+    """Keep the current file as a timestamped backup, then replace it atomically; the backup."""
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    backup = _backup_path(path, now)
+    shutil.copy2(path, backup)
+    handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            file.write(text)
+            file.flush()
+            os.fsync(file.fileno())
+        shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def record_taught_pose(config: ArmConfig, name: str, joints: Mapping[str, float], *,
+                       now: datetime | None = None) -> tuple[ArmConfig, Path]:
+    """Write ``name`` as a taught pose into the file ``config`` was read from.
+
+    Returns the config as the file now says and the backup of the previous
+    file. Raises :class:`ArmConfigError`, with the file untouched, when the
+    config was not read from a JSON file (the standard library writes no
+    TOML), when the file no longer says what ``config`` says (someone edited
+    it since it was loaded), or when the taught pose would make it invalid.
+    """
+    path = config.source
+    if path is None or path.suffix.lower() != ".json":
+        raise ArmConfigError("a pose is written only into an arm config read from a .json file")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ArmConfigError(f"the arm config cannot be read: {type(error).__name__}") from error
+    if parse_arm_config(raw) != config:
+        raise ArmConfigError("the arm config file changed since it was loaded; restart the execution host")
+    poses = raw.setdefault("poses", {})
+    entry = dict(poses.get(name) or {})
+    entry["taught"] = True
+    entry["joints"] = {joint: round(float(value), 3) for joint, value in joints.items()}
+    poses[name] = entry
+    updated = parse_arm_config(raw)
+    try:
+        backup = _replace_file(path, raw, now or datetime.now(UTC))
+    except OSError as error:
+        raise ArmConfigError(f"the arm config cannot be written: {type(error).__name__}") from error
+    return dataclasses.replace(updated, source=path), backup
 
 
 __all__ = [
@@ -322,4 +404,6 @@ __all__ = [
     "Pose",
     "load_arm_config",
     "parse_arm_config",
+    "record_taught_pose",
+    "valid_name",
 ]

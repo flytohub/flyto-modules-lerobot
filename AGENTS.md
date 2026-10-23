@@ -8,10 +8,11 @@ changing anything here.
 This pack is written purely in the capability-contract way. It contains
 exactly:
 
-1. Four step modules -- `manipulation.state`, `manipulation.move_joints`,
-   `manipulation.grasp`, `manipulation.release` -- each with its
-   `flyto.capability-contract.v1` contract and its `output_schema`.
-2. A thin adapter that calls LeRobot for those four, plus the hold-stop.
+1. Five step modules -- `manipulation.state`, `manipulation.move_joints`,
+   `manipulation.grasp`, `manipulation.release`, `manipulation.mark_pose` --
+   each with its `flyto.capability-contract.v1` contract and its
+   `output_schema`.
+2. A thin adapter that calls LeRobot for those five, plus the hold-stop.
 3. The minimum the execution host needs to register them, as the power pack
    does: `register_all`, the three entry points, the adapter contract, and a
    resource manifest built from the arm config.
@@ -20,21 +21,27 @@ exactly:
 
 Do not add a CLI or MCP server, planners, goal resolvers, recording or
 training helpers, dataset or teleoperation tools, a web or telemetry layer,
-discovery beyond the manifest, or any capability beyond those four.
+discovery beyond the manifest, or any capability beyond those five.
+Commissioning an arm is done through the capabilities, not beside them (owner
+2026-10-23): the motor check runs on every connect, `manipulation.mark_pose`
+teaches a pose, `manipulation.move_joints` jogs, and every hold-stop of a
+move is measured. A separate tool for any of these is the patch the owner
+rejected.
 
 ## Constraints
 
 - **Wrap LeRobot; never re-implement it.** `driver.py` is the only module
   that calls LeRobot, and only its public `Robot` API (`connect(calibrate=False)`,
-  `is_calibrated`, `get_observation`, `send_action`). No motor-bus or servo
-  protocol call, ever.
+  `is_calibrated`, `action_features`, `get_observation`, `send_action`). No
+  motor-bus or servo protocol call, ever.
 - **Stop is HOLD, never torque off.** These servos have no hardware E-stop;
   torque off drops the arm. `safe_stop` and cancel command every body joint
   to its present position with torque on and report `stop_requested`,
   `stop_confirmed: false`. Nothing in `src/` may disable torque, and the
   LeRobot config is always built with `disable_torque_on_disconnect: false`
   (`tests/test_lerobot_adapter.py` and `tests/test_arm_config.py` hold both).
-  A physical 12 V cut-off switch is required for any real run.
+  A physical 12 V cut-off switch is required for any real run. Measuring a
+  stop (`stop_to_still_ms`, `overshoot`) only reads.
 - **The arm's report is never proof.** No contract declares a self-observed
   spec for grasp or release, and none may until Cloud has an independent
   observation of an object in the gripper or the place zone. A completed
@@ -46,11 +53,13 @@ discovery beyond the manifest, or any capability beyond those four.
 - **Per-device detail is configuration, not code.** No source names a robot
   model, arm profile, joint or port (`tests/test_hygiene.py`). A new arm is a
   new config file.
-- **Capability ids and their safety words are Cloud's.** The four rows in
+- **Capability ids and their safety words are Cloud's.** The rows in
   flyto-cloud `services/space_tasks/capabilities.py`, as they resolve
-  (`movement`, safe stop required, cancellable, `equipment.motion`). Change
+  (`movement`, safe stop required, cancellable, `equipment.motion` for the
+  three that move). `manipulation.mark_pose` is the one row requested from
+  Cloud and not yet shipped there (`docs/project/DECISIONS.md`). Change
   `tests/test_capabilities.py`'s copy only together with that file. Never
-  invent an id.
+  invent another id.
 - **LeRobot, torch and flyto-core are optional.** Nothing imports them at
   module import time; the base install and every test run on the standard
   library plus pytest (and jsonschema for tests). `core` and `lerobot` are

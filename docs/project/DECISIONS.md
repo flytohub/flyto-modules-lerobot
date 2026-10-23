@@ -14,7 +14,83 @@ schemas, a thin LeRobot adapter with the hold-stop, the registration the host
 needs, and one config file per arm. No CLI, MCP server, planner, goal
 resolver, recording/training/dataset/teleoperation tool, telemetry or web
 layer, or extra discovery. Telemetry that had been drafted was removed before
-the first code commit.
+the first code commit. The same day the owner added a fifth capability,
+`manipulation.mark_pose`, so that commissioning is done through the
+contract too (below); the rule itself is unchanged.
+
+## 2026-10-23 -- Commissioning through the contract, not a CLI (owner)
+
+An earlier branch (`claude/arm-commissioning`, PR #7, not merged) added a
+`flyto-lerobot-arm` command (check / read / jog / teach / stop-latency) as an
+exception to "no CLI". The owner rejected it as a patch: commissioning
+happens through Flyto2 like any other capability, and the pack has no CLI or
+console script. Each function moved to where it belongs:
+
+| CLI | Now |
+|---|---|
+| `check` | The session checks LeRobot's reported motors against the config on every connect and refuses a difference (`arm_motors_mismatch`), as it refuses an uncalibrated arm. |
+| `read` | `manipulation.state`, unchanged. |
+| `jog` | `manipulation.move_joints` with joint targets, unchanged: limits, `max_step` waypoints, readback and hold-stop already apply. |
+| `teach` | `manipulation.mark_pose`: reads the arm, records the body joints as a taught pose in the JSON arm config (backup, atomic replace). |
+| `stop-latency` | Every hold that interrupts a move is measured by reading only, and the call reports `stop_to_still_ms` and `overshoot`. |
+
+The PR #7 teach and measurement code and tests were reused inside the
+adapter and `arm_config.py`; nothing of its command line remains.
+
+## 2026-10-23 -- `manipulation.mark_pose` is `controlled`, like `places.mark`
+
+It moves nothing and needs no stop, but it changes where every later move to
+that name goes and no call puts the old pose back (the backup file does), so
+it is `controlled`, as the ROS 2 pack's `places.mark` is. No permission:
+Cloud's `places.mark` row names none, and the manipulation family's
+`equipment.motion` is about the machine moving. Cancellable as Cloud's rows
+default (a cancel before the write leaves the file untouched); idempotent by
+call id; effect `poses.written`; no evidence.
+
+The id is not yet in Cloud's vocabulary. The rule "no Cloud edit to support
+an arm" holds: this is a new capability for every LeRobot arm, not support
+for one arm, and it was asked for by the owner. Cloud needs one row in
+`services/space_tasks/capabilities.py`, beside the four manipulation rows:
+
+```python
+_Row("manipulation.mark_pose", FAMILY_MANIPULATION, actuates=False, estimate=5,
+       describes="Record where the manipulator is now as a named pose it can be moved to later",
+       answers=("teach this pose as ready", "remember where the arm is now", "save this arm position as a pose"),
+       distinguish_from="Moves nothing; manipulation.move_joints goes to a taught pose",
+       safety_class=SAFETY_CONTROLLED, permissions=(),
+       arguments=(
+           CapabilityArgument("pose", type="string", required=True,
+                              description="The name to record the current position under", max_length=64),
+           CapabilityArgument("replace", type="boolean", required=False,
+                              description="Overwrite a pose of this name that is already taught"),
+       )),
+```
+
+It resolves to `controlled`, no safe stop, cancellable, no permission -- the
+values the pack declares (checked in memory against Cloud `e1f9bfa13`'s
+`_entry` and `declare`). Until it ships, Cloud refuses the mark_pose
+declaration as `capability_not_in_vocabulary` and the other four are
+unaffected; `tests/integration` records that as an expected failure.
+
+## 2026-10-23 -- The motor check is a set comparison on every connect
+
+LeRobot's `action_features` (`<motor>.pos`) are compared with the config's
+joints plus gripper as sets: order is LeRobot's business, a missing, extra
+or renamed motor is not. A robot that reports none is a mismatch. The check
+runs after `connect(calibrate=False)` -- LeRobot's own configure has already
+run, as for the calibration check -- and before any goal is sent; the session
+then refuses everything until the host restarts with a fixed config.
+
+## 2026-10-23 -- Every stop of a move is measured, by reading only
+
+After a hold the adapter reads until two readings in a row lie within
+`motion.still_drift` (the rule a move settles by), for at most
+`motion.settle_timeout_s`, and reports `stop_to_still_ms` from the stop
+request and `overshoot` past the held position. Measuring sends nothing and
+never touches torque; a lost reading ends it as `stop_measured: false`
+without changing the outcome. The interrupted call therefore answers once
+the arm is still, at most `settle_timeout_s` after the hold. A safe stop's
+own result carries no measurement: the calls it interrupts carry theirs.
 
 ## 2026-10-23 -- `movement`, not `controlled`
 

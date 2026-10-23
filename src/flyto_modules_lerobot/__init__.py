@@ -5,8 +5,9 @@
 flyto-core discovers this package through its ``flyto.modules`` entry point
 (``lerobot``) and calls :func:`register_all`. Each capability -- read the arm
 (``manipulation.state``), move its joints (``manipulation.move_joints``),
-close and open its gripper (``manipulation.grasp`` / ``manipulation.release``)
--- is one registered step carrying ``provides_capability``, a
+close and open its gripper (``manipulation.grasp`` / ``manipulation.release``),
+record where it is as a taught pose (``manipulation.mark_pose``) -- is one
+registered step carrying ``provides_capability``, a
 ``flyto.capability-contract.v1`` contract and an ``output_schema``.
 
 Two more entry points serve an AI Space execution host: the ``lerobot.arm``
@@ -47,7 +48,9 @@ __all__ = [
 __version__ = PACK_VERSION
 
 #: What flyto-core reports for this pack (``PluginInfo.description``).
-PACK_DESCRIPTION = "LeRobot arms: read, move to limits-checked poses, grasp and release, with a hold-stop"
+PACK_DESCRIPTION = (
+    "LeRobot arms: read, move to limits-checked poses, grasp and release, teach poses, with a measured hold-stop"
+)
 
 logger = logging.getLogger(__name__)
 

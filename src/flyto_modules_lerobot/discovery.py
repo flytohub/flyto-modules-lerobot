@@ -40,7 +40,6 @@ from .plugin import configured_config
 
 MANIFEST_CONTRACT = "flyto.resource-manifest.v1"
 _OFF = frozenset({"0", "false", "off", "no"})
-_NO_ARGUMENTS = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
 
 
 def move_input_schema(config: ArmConfig) -> dict[str, Any]:
@@ -67,7 +66,7 @@ def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = F
         "adapter": {"adapter_id": ADAPTER_ID, "version": PACK_VERSION, "provider": PROVIDER_NAME},
         "deployment_mode": DEPLOYMENT_MODE,
         "capability_ids": list(CAPABILITY_IDS),
-        "capability_contracts": [spec.manifest_contract(schemas.get(spec.capability_id, _NO_ARGUMENTS))
+        "capability_contracts": [spec.manifest_contract(schemas.get(spec.capability_id, spec.input_schema))
                                  for spec in SPECS],
         "settings": [],
         "telemetry_channels": [],
