@@ -29,7 +29,7 @@ Add the arm to a Flyto2 Space and say:
 
 - **Plain words in, real motion out.** No code, no waypoints, no babysitting.
 - **Four skills, ready to go.** Know its pose, move to taught poses, grab, let go.
-- **Proof, not promises.** "Done" only counts when another camera sees it.
+- **Never takes the arm's word.** The arm reports what it did. Flyto2 never counts that as proof on its own.
 - **Stop means freeze.** It holds position and never drops what it carries.
 - **Stays inside your limits.** Every move is checked against the ranges you set.
 - **Teams up across brands.** Works with your other robots under one set of permissions.
@@ -39,7 +39,7 @@ Add the arm to a Flyto2 Space and say:
 1. You say what you want.
 2. Flyto2 plans it and checks permissions.
 3. This pack drives the arm through LeRobot.
-4. Another camera confirms the result.
+4. Flyto2 records what the arm reports, and never counts it as proof by itself.
 
 ---
 
