@@ -8,6 +8,8 @@
 
 [English](README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · **简体中文** · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
+[快速开始](#快速开始) · [特性](#特性) · [工作原理](#工作原理) · [开发者](#开发者)
+
 </div>
 
 ## 快速开始
