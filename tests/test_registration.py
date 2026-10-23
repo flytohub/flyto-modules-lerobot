@@ -14,7 +14,7 @@ import sys
 import pytest
 
 import flyto_modules_lerobot as pkg
-from flyto_modules_lerobot.capabilities import GRASP, MANIPULATION_STATE, MOVE_JOINTS, SPECS
+from flyto_modules_lerobot.capabilities import GRASP, MANIPULATION_STATE, MARK_POSE, MOVE_JOINTS, SPECS
 from flyto_modules_lerobot.modules import (
     HOST_DISPATCHER_CONTEXT_KEY,
     CapabilityRequestError,
@@ -77,12 +77,12 @@ def test_one_step_per_row_with_its_contract_and_output_schema():
         assert entry["concurrent_safe"] is False and entry["retryable"] is False
 
 
-def test_a_core_without_contracts_never_gets_a_step_that_moves_the_arm(caplog):
-    """Without a contract Cloud would grade an arm move by a floor no one wrote for it."""
+def test_a_core_without_contracts_never_gets_a_step_that_moves_the_arm_or_writes_its_config(caplog):
+    """Without a contract Cloud would grade an arm move or a pose write by a floor no one wrote for it."""
     with caplog.at_level(logging.WARNING):
         registered = built(contracts=False)
     assert list(registered) == [MANIPULATION_STATE.module_id]
-    assert MOVE_JOINTS.module_id in caplog.text
+    assert MOVE_JOINTS.module_id in caplog.text and MARK_POSE.module_id in caplog.text
 
 
 def test_execute_is_a_coroutine():
@@ -125,6 +125,25 @@ def test_the_gripper_steps_take_no_arguments():
     assert capability_request(GRASP, {}, resource_id="arm")["arguments"] == {}
     with pytest.raises(CapabilityRequestError):
         capability_request(GRASP, {"force": 3}, resource_id="arm")
+
+
+def test_mark_pose_takes_a_pose_and_an_optional_replace():
+    assert capability_request(MARK_POSE, {"pose": "ready"}, resource_id="arm")["arguments"] == {"pose": "ready"}
+    request = capability_request(MARK_POSE, {"pose": "ready", "replace": True}, resource_id="arm")
+    assert request["arguments"] == {"pose": "ready", "replace": True}
+
+
+@pytest.mark.parametrize("params", [
+    {},
+    {"replace": True},
+    {"pose": ""},
+    {"pose": "ready", "replace": "true"},
+    {"pose": "ready", "replace": 1},
+    {"pose": "ready", "joints": {"elbow_flex": 1.0}},
+])
+def test_mark_pose_refuses_anything_else(params):
+    with pytest.raises(CapabilityRequestError):
+        capability_request(MARK_POSE, params, resource_id="arm")
 
 
 def test_a_step_without_a_dispatcher_only_declares():

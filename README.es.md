@@ -30,7 +30,7 @@ Añade el brazo a un Space de Flyto2 y di:
 ## Lo mejor
 
 - **Palabras normales, movimiento real.** Sin código, sin puntos de paso, sin vigilarlo.
-- **Cuatro habilidades, listas para usar.** Saber su postura, ir a posturas enseñadas, agarrar, soltar.
+- **Cinco habilidades, listas para usar.** Saber su postura, ir a posturas enseñadas, agarrar, soltar, enseñar una postura.
 - **No se fía de la palabra del brazo.** El brazo informa de lo que hizo. Flyto2 nunca lo toma como prueba por sí solo.
 - **Parar es congelarse.** Mantiene la posición y nunca suelta lo que lleva.
 - **Dentro de tus límites.** Cada movimiento se comprueba con los rangos que fijaste.

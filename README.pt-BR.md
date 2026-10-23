@@ -30,7 +30,7 @@ Adicione o braço a um Space do Flyto2 e diga:
 ## Destaques
 
 - **Palavras simples, movimento de verdade.** Sem código, sem pontos de passagem, sem ficar de babá.
-- **Quatro habilidades, prontas para usar.** Saber a posição, ir às posições ensinadas, pegar, soltar.
+- **Cinco habilidades, prontas para usar.** Saber a posição, ir às posições ensinadas, pegar, soltar, ensinar uma posição.
 - **Não acredita só na palavra do braço.** O braço conta o que fez. O Flyto2 nunca trata isso como prova sozinho.
 - **Parar é congelar.** Segura a posição e nunca derruba o que carrega.
 - **Dentro dos seus limites.** Cada movimento é conferido com as faixas que você definiu.

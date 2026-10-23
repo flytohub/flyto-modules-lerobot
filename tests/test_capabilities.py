@@ -1,10 +1,12 @@
 """The capability table: Cloud's manipulation vocabulary by value, contracts, and returned-data schemas.
 
-``CLOUD_MANIPULATION_ROWS`` is a copy of the four ``manipulation.*`` rows of
+``CLOUD_MANIPULATION_ROWS`` is a copy of the ``manipulation.*`` rows of
 flyto-cloud's ``services/space_tasks/capabilities.py`` as they resolve (the
 family's safety class, stop and permission defaults applied). Change it only
 together with that file; ``tests/integration`` checks the copy against a
-Cloud checkout.
+Cloud checkout. ``manipulation.mark_pose`` is the row this pack asks Cloud to
+add (``docs/project/DECISIONS.md``), written here as Cloud is asked to resolve
+it: stated ``controlled`` with no permission, as ``places.mark`` is.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from flyto_modules_lerobot.capabilities import (
     CONTRACT_SCHEMA,
     GRASP,
     MANIPULATION_STATE,
+    MARK_POSE,
     MOVE_JOINTS,
     RELEASE,
     SPECS,
@@ -33,6 +36,8 @@ CLOUD_MANIPULATION_ROWS = {
                            "cancellable": True, "required_permissions": ("equipment.motion",)},
     "manipulation.release": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
                              "cancellable": True, "required_permissions": ("equipment.motion",)},
+    "manipulation.mark_pose": {"actuates": False, "safety_class": "controlled", "requires_safe_stop": False,
+                               "cancellable": True, "required_permissions": ()},
 }
 
 
@@ -66,6 +71,17 @@ def test_no_contract_lets_the_arm_prove_a_grasp_or_a_place_by_itself():
 def test_move_joints_declares_no_evidence_core_cannot_judge_for_a_named_pose():
     """Core's arithmetic compares the last phase with numeric arguments only; a pose name has none."""
     assert MOVE_JOINTS.contract["evidence"] == []
+
+
+def test_marking_a_pose_moves_nothing_and_writes_a_pose():
+    """Like ``places.mark``: controlled, no stop needed, one effect, nothing self-proven."""
+    contract = MARK_POSE.contract
+    assert contract["actuates"] is False and contract["safety_class"] == "controlled"
+    assert contract["requires_safe_stop"] is False and contract["idempotent"] is True
+    assert contract["effects"] == ["poses.written"] and contract["evidence"] == []
+    assert MARK_POSE.required_permissions == ()
+    assert MARK_POSE.input_schema["required"] == ["pose"]
+    assert MARK_POSE.input_schema["properties"]["replace"]["type"] == "boolean"
 
 
 def test_reading_the_state_proves_nothing_and_changes_nothing():
@@ -117,6 +133,8 @@ def test_every_capability_declares_a_readable_output_schema():
              "effect_applied": True}),
     (RELEASE, {"arm": ARM, "arm_before": ARM, "gripper_target": 60.0, "reached_command": True,
                "effect_applied": True}),
+    (MARK_POSE, {"arm": ARM, "pose": "ready", "joints": {"elbow_flex": 45.0}, "replaced": False,
+                 "backup": "arm.json.20261023T000000Z.bak", "effect_applied": True}),
 ])
 def test_the_data_a_completed_call_returns_holds_to_its_schema(spec, data):
     assert list(_validator(dict(spec.output_schema)).iter_errors(data)) == []
@@ -149,3 +167,8 @@ def test_flyto_core_accepts_every_contract():
         normalized = core.validate_contract(dict(spec.contract), spec.core_params_schema())
         assert normalized["safety_class"] == spec.safety_class
         assert normalized["evidence"] == []
+
+
+def test_a_mark_reply_without_its_backup_is_caught():
+    data = {"arm": ARM, "pose": "ready", "joints": {"elbow_flex": 45.0}, "replaced": False, "effect_applied": True}
+    assert list(_validator(dict(MARK_POSE.output_schema)).iter_errors(data))

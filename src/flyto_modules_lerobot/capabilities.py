@@ -8,13 +8,22 @@ name. ``modules.py`` hands each row to flyto-core's ``@register_module``,
 and ``lerobot_adapter.py`` routes a call to the handler the row's ``action``
 names.
 
-The capability ids are flyto-cloud's own shipped vocabulary
+The capability ids are flyto-cloud's manipulation vocabulary
 (``manipulation.state``, ``manipulation.move_joints``, ``manipulation.grasp``,
-``manipulation.release``; ``services/space_tasks/capabilities.py``), not
-vendor ids: any arm LeRobot drives answers to the same four, and this pack is
-one provider of them. Their safety class, stop requirement, cancellability
-and permission are Cloud's resolved rows, restated here exactly: Cloud's
-``declare`` refuses a claim that says anything else.
+``manipulation.release``, ``manipulation.mark_pose``;
+``services/space_tasks/capabilities.py``), not vendor ids: any arm LeRobot
+drives answers to the same five, and this pack is one provider of them. Their
+safety class, stop requirement, cancellability and permission are Cloud's
+resolved rows, restated here exactly: Cloud's ``declare`` refuses a claim that
+says anything else. ``manipulation.mark_pose`` is the row Cloud is asked to
+add (``docs/project/DECISIONS.md``); until it does, Cloud refuses its
+declaration and the other four are unaffected.
+
+``manipulation.mark_pose`` is how an arm is commissioned through Flyto2: it
+moves nothing, reads where the arm is, and records that as a taught pose in
+the arm's config file. Like ``places.mark`` it is ``controlled`` -- it
+changes where later moves to that name go, and no call puts the old pose back
+except the backup file it keeps.
 
 Nothing here names an arm. Joint names, limits, the gripper's open and closed
 values and taught poses are the arm's configuration (``arm_config.py``).
@@ -93,6 +102,12 @@ REASON_OUTSIDE_LIMITS = "outside_joint_limits"
 REASON_POSE_UNKNOWN = "pose_unknown"
 #: The pose is configured but not taught on this arm; nothing was sent.
 REASON_POSE_NOT_TAUGHT = "pose_not_taught"
+#: LeRobot's robot drives other motors than the config's joints and gripper; nothing was sent.
+REASON_MOTORS_MISMATCH = "arm_motors_mismatch"
+#: The pose is already taught and ``replace`` was not given; nothing was written.
+REASON_POSE_TAUGHT = "pose_already_taught"
+#: The arm config file cannot take the pose (not JSON, changed since loaded, unwritable); nothing was written.
+REASON_CONFIG_NOT_WRITABLE = "arm_config_not_writable"
 #: A command went out and its reply or the readback after it was lost.
 REASON_EFFECT_UNKNOWN = "effect_unknown"
 #: The arm stopped moving short of the target; it now holds where it is.
@@ -112,6 +127,11 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_OUTSIDE_LIMITS: "目標超出這支手臂設定的關節範圍，沒有送出任何動作指令。",
         REASON_POSE_UNKNOWN: "這支手臂沒有這個名稱的姿勢，沒有送出任何動作指令。",
         REASON_POSE_NOT_TAUGHT: "這個姿勢還沒有在這支手臂上教過，沒有送出任何動作指令。",
+        REASON_MOTORS_MISMATCH: (
+            "LeRobot 回報的馬達與這支手臂設定檔的關節不符，沒有送出任何動作指令；請修正設定檔後重新啟動。"
+        ),
+        REASON_POSE_TAUGHT: "這個姿勢已經教過了；要覆蓋請指定 replace，沒有寫入任何資料。",
+        REASON_CONFIG_NOT_WRITABLE: "無法把姿勢寫入手臂設定檔，沒有寫入任何資料。",
         REASON_EFFECT_UNKNOWN: "已送出動作指令，但沒有收到回覆或讀回位置，無法確定手臂目前的位置。",
         REASON_NOT_REACHED: "手臂停在目標之前，已保持在目前位置。",
         REASON_STOP_REQUESTED: "已要求停止：手臂被指令保持在目前位置（扭力未關閉），並非已確認的實體停止。",
@@ -129,12 +149,18 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_OUTSIDE_LIMITS: "A joint target lies outside the configured limits; nothing was sent",
         REASON_POSE_UNKNOWN: "No pose of that name is configured; nothing was sent",
         REASON_POSE_NOT_TAUGHT: "The pose is not taught on this arm; nothing was sent",
+        REASON_MOTORS_MISMATCH: "LeRobot's robot drives other motors than the arm config names; nothing was sent",
+        REASON_POSE_TAUGHT: "The pose is already taught and replace was not given; nothing was written",
+        REASON_CONFIG_NOT_WRITABLE: "The arm config file cannot take the pose; nothing was written",
         REASON_EFFECT_UNKNOWN: "A command was sent and its reply or readback was lost; its effect is unknown",
         REASON_NOT_REACHED: "The arm stopped short of the target and was told to hold",
         REASON_STOP_REQUESTED: "Stop requested: the arm was told to hold with torque on; not a confirmed stop",
         REASON_DEADLINE: "The deadline passed; the arm was told to hold",
     }
 )
+
+#: A mark_pose cancelled before it wrote anything.
+MARK_CANCELLED_DETAIL = "已取消，沒有寫入任何姿勢。Cancelled before anything was written."
 
 #: Said with every stop that could not command the hold.
 POWER_CUTOFF_DETAIL = (
@@ -181,6 +207,17 @@ def _output(required: tuple[str, ...], **properties: Any) -> Mapping[str, Any]:
 _MOVED = {"arm_before": dict(ARM_STATE_SCHEMA), "effect_applied": {"const": True}}
 _GRIPPER_MOVED = {**_MOVED, "gripper_target": _NUMBER, "reached_command": {"type": "boolean"}}
 
+#: What a pose may be called: the arm config's own name rule (``arm_config.valid_name``).
+POSE_NAME_PATTERN = "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+POSE_NAME_MAX_LENGTH = 64
+#: What ``manipulation.mark_pose`` changes: a named pose in the arm's config file.
+POSES_WRITTEN = "poses.written"
+
+#: The manifest ``input_schema`` of a capability that takes no arguments.
+NO_ARGUMENTS: Mapping[str, Any] = MappingProxyType(
+    {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+)
+
 # -- capability rows -------------------------------------------------------------
 
 
@@ -208,6 +245,9 @@ class CapabilitySpec:
     required_permissions: tuple[str, ...] = ()
     # At most one of these parameters may be given, and one must be.
     exactly_one_of: tuple[str, ...] = field(default=())
+    # The manifest's arguments when they do not depend on the arm's config
+    # (a move's do, and are built by ``discovery.move_input_schema``).
+    input_schema: Mapping[str, Any] = NO_ARGUMENTS
 
     @property
     def safety_class(self) -> str:
@@ -229,7 +269,7 @@ class CapabilitySpec:
             "capability_id": self.capability_id,
             "display_name": self.display_name,
             "description": self.manifest_description,
-            "input_schema": dict(input_schema),
+            "input_schema": copy.deepcopy(dict(input_schema)),
             "safety_class": self.safety_class,
             "required_permissions": list(self.required_permissions),
             "requires_safe_stop": bool(self.contract["requires_safe_stop"]),
@@ -371,7 +411,76 @@ RELEASE = CapabilitySpec(
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
 )
 
-SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE)
+MARK_POSE = CapabilitySpec(
+    capability_id="manipulation.mark_pose",
+    module_id="manipulation.mark_pose",
+    action="mark_pose",
+    label="Mark arm pose",
+    display_name="記錄手臂姿勢",
+    description=(
+        "Record where the arm's joints are now as a taught pose in the arm's config file; moves nothing"
+    ),
+    manifest_description=(
+        "把手臂各關節目前的位置記錄成已教過的姿勢（寫入手臂設定檔），不會移動手臂。"
+        "Record the arm's current joint positions as a taught pose; moves nothing."
+    ),
+    icon="BookmarkPlus",
+    color="#5CE4C8",
+    tags=("manipulation", "arm", "pose", "teach"),
+    params_schema=MappingProxyType(
+        {
+            "pose": {
+                "type": "string",
+                "label": "Pose",
+                "description": "The name to record the arm's current position under",
+                "required": True,
+            },
+            "replace": {
+                "type": "boolean",
+                "label": "Replace",
+                "description": "Overwrite a pose of this name that is already taught",
+                "required": False,
+                "default": False,
+            },
+        }
+    ),
+    # Writes the arm's config file; nothing moves, so no stop is needed. The
+    # adapter keeps the result by call id, so a retry does not record wherever
+    # the arm is by then. A cancel before the write leaves the file untouched.
+    contract=_contract(
+        actuates=False,
+        safety_class="controlled",
+        requires_safe_stop=False,
+        cancellable=True,
+        idempotent=True,
+        effects=[POSES_WRITTEN],
+        requires=[],
+        evidence=[],
+    ),
+    output_schema=_output(
+        ("arm", "pose", "joints", "replaced", "backup", "effect_applied"),
+        pose={"type": "string", "maxLength": POSE_NAME_MAX_LENGTH},
+        joints=_JOINT_MAP,
+        replaced={"type": "boolean"},
+        backup={"type": "string", "maxLength": 255},
+        effect_applied={"const": True},
+    ),
+    timeout_ms=10_000,
+    input_schema=MappingProxyType(
+        {
+            "type": "object",
+            "properties": {
+                "pose": {"type": "string", "maxLength": POSE_NAME_MAX_LENGTH, "pattern": POSE_NAME_PATTERN,
+                         "description": "The name to record the arm's current position under"},
+                "replace": {"type": "boolean", "description": "Overwrite a pose of this name that is already taught"},
+            },
+            "required": ["pose"],
+            "additionalProperties": False,
+        }
+    ),
+)
+
+SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE)
 SPECS_BY_CAPABILITY: Mapping[str, CapabilitySpec] = MappingProxyType({spec.capability_id: spec for spec in SPECS})
 SPECS_BY_MODULE: Mapping[str, CapabilitySpec] = MappingProxyType({spec.module_id: spec for spec in SPECS})
 CAPABILITY_IDS: tuple[str, ...] = tuple(spec.capability_id for spec in SPECS)
@@ -390,6 +499,7 @@ __all__ = [
     "CONTRACT_SCHEMA",
     "GRASP",
     "MANIPULATION_STATE",
+    "MARK_POSE",
     "MODULE_IDS",
     "MODULE_PACK",
     "MOVE_JOINTS",

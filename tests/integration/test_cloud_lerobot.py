@@ -7,6 +7,12 @@ fake arm is driven through Cloud's real ``ExternalCapabilityDispatcher``, and
 each completed reply is held to the module's ``output_schema`` by the host's
 own ``local.result_schema.checked``.
 
+``manipulation.mark_pose`` is the row this pack asks Cloud to add
+(``docs/project/DECISIONS.md``). Against a Cloud that does not ship it yet,
+the vocabulary check is an expected failure naming that row, and Cloud's
+``declare`` is shown refusing it as not in the vocabulary while the other four
+declare; the rest runs either way.
+
 Cloud is not a dependency of this package. The backend is found at
 ``$FLYTO_CLOUD_BACKEND`` (a checkout's ``src/ui/web/backend`` or a read-only
 ``git archive`` export outside this repository, see README) and is put on
@@ -68,6 +74,7 @@ from flyto_modules_lerobot.capabilities import (  # noqa: E402
     CAPABILITY_IDS,
     GRASP,
     MANIPULATION_STATE,
+    MARK_POSE,
     MOVE_JOINTS,
     REASON_EFFECT_UNKNOWN,
     REASON_OUTSIDE_LIMITS,
@@ -91,16 +98,28 @@ def _binding(capability_id: str) -> dict:
 # -- the vocabulary and what Cloud admits -------------------------------------------------
 
 
+def _pending_in_cloud() -> set[str]:
+    """The pack's ids this Cloud does not ship yet; only the requested mark_pose row may be one."""
+    pending = set(CAPABILITY_IDS) - set(CAPABILITIES)
+    assert pending <= {MARK_POSE.capability_id}, pending
+    return pending
+
+
 def test_the_pack_provides_clouds_manipulation_rows_as_cloud_resolves_them():
+    pending = _pending_in_cloud()
     shipped = {cid for cid, row in CAPABILITIES.items() if row.family == "manipulation"}
-    assert set(CAPABILITY_IDS) == shipped
+    assert set(CAPABILITY_IDS) - pending == shipped
     for spec in SPECS:
+        if spec.capability_id in pending:
+            continue
         row = CAPABILITIES[spec.capability_id]
         assert spec.actuates is row.actuates
         assert spec.safety_class == row.safety_class
         assert spec.contract["requires_safe_stop"] is row.requires_safe_stop
         assert spec.contract["cancellable"] is row.cancellable
         assert spec.required_permissions == tuple(row.required_permissions)
+    if pending:
+        pytest.xfail(f"Cloud's vocabulary has no {sorted(pending)} row yet (docs/project/DECISIONS.md)")
 
 
 def _claim(row: dict, **overrides) -> DeclarationClaim:
@@ -114,8 +133,13 @@ def _claim(row: dict, **overrides) -> DeclarationClaim:
 
 
 def test_cloud_declares_every_capability_the_manifest_states(arm_config):
+    pending = _pending_in_cloud()
     manifest = build_manifest(arm_config, observed_at="2026-10-23T00:00:00+00:00")
     for row in manifest["capability_contracts"]:
+        if row["capability_id"] in pending:
+            with pytest.raises(DeclarationRefused, match="capability_not_in_vocabulary"):
+                declare(_claim(row))
+            continue
         declaration = declare(_claim(row))
         assert declaration.safety_class == row["safety_class"]
     move, = [row for row in manifest["capability_contracts"] if row["capability_id"] == MOVE_JOINTS.capability_id]
@@ -231,6 +255,31 @@ def test_a_lost_reply_reaches_cloud_as_effect_unknown(cloud_session):
     assert record[CALL_OUTCOME_KEY]["reason"] == REASON_EFFECT_UNKNOWN
     assert effect_of(record["outcome"]) == EFFECT_UNKNOWN
     assert results == []
+
+
+def test_a_pose_marked_through_cloud_is_written_and_its_data_holds_to_its_schema(arm_config, tmp_path):
+    import dataclasses
+    import json
+
+    from flyto_modules_lerobot.arm_config import load_arm_config
+
+    path = tmp_path / "arm.json"
+    data = {"schema": "flyto.lerobot.arm.v1", "resource_id": arm_config.resource_id, "unit": arm_config.unit,
+            "lerobot": {"robot_module": arm_config.lerobot.robot_module, "robot_type": arm_config.lerobot.robot_type,
+                        "port": arm_config.lerobot.port, "id": arm_config.lerobot.robot_id},
+            "joints": {joint.name: {"min": joint.minimum, "max": joint.maximum} for joint in arm_config.joints},
+            "gripper": {"joint": arm_config.gripper.joint, "min": arm_config.gripper.minimum,
+                        "max": arm_config.gripper.maximum, "open": arm_config.gripper.open,
+                        "closed": arm_config.gripper.closed, "tolerance": arm_config.gripper.tolerance},
+            "motion": dataclasses.asdict(arm_config.motion), "poses": {}}
+    path.write_text(json.dumps(data), encoding="utf-8")
+    session = ArmSession(load_arm_config(path), robot_factory=fake_factory())
+    record, results = _dispatch(session, MARK_POSE.capability_id, {"pose": "inspect"})
+    assert record["outcome"] == "completed", record.get("detail")
+    result, = results
+    assert "omitted" not in result["data"], result["data"]
+    assert result["data"]["pose"] == "inspect"
+    assert load_arm_config(path).poses["inspect"].taught is True
 
 
 def test_a_grasp_through_cloud_proves_nothing_by_itself(cloud_session):

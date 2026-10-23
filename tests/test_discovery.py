@@ -17,6 +17,7 @@ from flyto_modules_lerobot.capabilities import (
     CAPABILITY_IDS,
     ENV_AUTODISCOVER,
     ENV_CONFIG,
+    MARK_POSE,
     MODULE_PACK,
 )
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
@@ -106,3 +107,13 @@ def test_the_installed_factory_refuses_without_a_config(monkeypatch):
     monkeypatch.delenv(ENV_CONFIG, raising=False)
     with pytest.raises(ValueError):
         plugin.build_adapter("arm")
+
+
+def test_mark_pose_is_offered_with_a_pose_name_and_replace(configured):
+    manifest, = discovery.discover_resource_manifests(execution_host_id="host")
+    row, = [row for row in manifest["capability_contracts"] if row["capability_id"] == MARK_POSE.capability_id]
+    assert row["safety_class"] == "controlled" and row["requires_safe_stop"] is False
+    assert row["required_permissions"] == []
+    schema = row["input_schema"]
+    assert schema["required"] == ["pose"] and set(schema["properties"]) == {"pose", "replace"}
+    assert schema["properties"]["replace"]["type"] == "boolean"

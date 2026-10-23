@@ -19,7 +19,7 @@
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
 pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini"
 pip install -e .
-cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
+cp examples/am-arm200.json my-arm.json        # set your port; teach poses through Flyto2
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
 ```
 
@@ -30,7 +30,7 @@ Add the arm to a Flyto2 Space and say:
 ## Highlights
 
 - **Plain words in, real motion out.** No code, no waypoints, no babysitting.
-- **Four skills, ready to go.** Know its pose, move to taught poses, grab, let go.
+- **Five skills, ready to go.** Know its pose, move to taught poses, grab, let go, and teach a pose where it stands.
 - **Never takes the arm's word.** The arm reports what it did. Flyto2 never counts that as proof on its own.
 - **Stop means freeze.** It holds position and never drops what it carries.
 - **Stays inside your limits.** Every move is checked against the ranges you set.
@@ -51,7 +51,11 @@ Add the arm to a Flyto2 Space and say:
 
 **A move to a pose is refused.**
 
-Poses run only after you teach them on this arm and mark them `taught: true` in your arm file. The example's poses start untaught on purpose.
+Poses run only after they are taught on this arm. Move the arm there and call `manipulation.mark_pose` with the pose's name (see [Commissioning an arm](#commissioning-an-arm)). The example's poses start untaught on purpose.
+
+**The arm is refused with `arm_motors_mismatch`.**
+
+LeRobot's robot drives other motors than your arm file names. Check `joints` and `gripper.joint` against LeRobot's motor names and `robot_type` / `arm_profile`, then restart the execution host. Nothing was sent.
 
 **The arm is refused as uncalibrated.**
 
@@ -63,7 +67,7 @@ Arms LeRobot drives, chosen by `robot_module` and `robot_type` in the arm file. 
 
 **What happens when I press stop mid-move?**
 
-The arm holds its pose where it is, and the gripper keeps what it holds.
+The arm holds its pose where it is, and the gripper keeps what it holds. The stopped call reports how long the arm took to come still (`stop_to_still_ms`) and how far it ran past the hold (`overshoot`).
 
 ### Installation
 
@@ -96,7 +100,7 @@ untaught, so a move to them is refused until you teach and mark them.
 
 ### Usage
 
-Approve the arm's four capabilities in the Space:
+Approve the arm's five capabilities in the Space:
 
 | Capability | Arguments | Returns (`output_schema`) |
 |---|---|---|
@@ -104,10 +108,41 @@ Approve the arm's four capabilities in the Space:
 | `manipulation.move_joints` | `pose` **or** joint numbers | `arm`, `arm_before`, `target`, `pose`, `max_error` |
 | `manipulation.grasp` | none | `arm`, `arm_before`, `gripper_target`, `reached_command` |
 | `manipulation.release` | none | same as grasp |
+| `manipulation.mark_pose` | `pose`, optional `replace` | `arm`, `pose`, `joints`, `replaced`, `backup` |
 
 No call proves its own effect: a grasp or a place needs an independent
 observation Cloud does not have yet, so those steps stay unproven
+(`docs/project/DECISIONS.md`). `manipulation.mark_pose` needs a row in
+Cloud's capability vocabulary before a Space can approve it
 (`docs/project/DECISIONS.md`).
+
+### Commissioning an arm
+
+A new arm is commissioned through Flyto2 with the same capabilities, in
+this order. There is no separate tool.
+
+1. **Connect.** The first call connects. Every connect checks that LeRobot
+   reports the arm calibrated (`arm_not_calibrated` otherwise) and that the
+   motors it drives are exactly the arm file's joints and gripper
+   (`arm_motors_mismatch` otherwise). Either refusal sends nothing.
+2. **Read the state.** `manipulation.state` returns every joint and the
+   gripper. Compare them with the limits in your arm file.
+3. **Jog with `manipulation.move_joints`.** Give one joint a target a few
+   degrees from where it reads (for example `{"elbow_flex": 12.0}`). The move
+   is checked against the limits and sent in steps of at most
+   `motion.max_step`; repeat in small steps toward the pose you want.
+4. **Teach with `manipulation.mark_pose`.** With the arm where the pose
+   should be, call it with the pose's name (`{"pose": "ready"}`). It moves
+   nothing, records the body joints as `taught: true` in the arm file, and
+   keeps the previous file as `<file>.<UTC timestamp>.bak`. It refuses a
+   position outside the limits, and a name already taught unless
+   `replace` is true. The arm file must be JSON. The host serves the new
+   pose at once; Cloud offers it to moves once the host republishes the
+   arm's manifest.
+5. **Stops are measured.** Every cancel, safe stop or deadline that
+   interrupts a move holds the arm (torque stays on) and reports
+   `stop_to_still_ms` and `overshoot` in that call's result. Stop a few
+   moves on purpose and read them before trusting the hold.
 
 ### Architecture
 

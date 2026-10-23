@@ -4,8 +4,9 @@
 
 LeRobot owns the motors. This module builds LeRobot's own robot from the arm
 config and calls only its public ``Robot`` API -- ``connect(calibrate=False)``,
-``is_calibrated``, ``get_observation()``, ``send_action()`` -- never the motor
-bus, never the servo protocol, never torque.
+``is_calibrated``, ``action_features``, ``get_observation()``,
+``send_action()`` -- never the motor bus, never the servo protocol, never
+torque.
 
 LeRobot (and torch with it) is imported only by :func:`lerobot_robot`, the
 default factory, when an execution host first talks to a configured arm.
@@ -25,6 +26,10 @@ it:
 * :class:`NotCalibrated` -- LeRobot reports the motors do not match the
   calibration for this ``id``. ``connect(calibrate=False)`` is used because
   ``calibrate=True`` would prompt on stdin.
+* :class:`MotorsMismatch` -- the motors LeRobot's robot drives (its
+  ``<motor>.pos`` action features) are not the config's joints and gripper.
+  Checked on every connect, before anything is sent; the session refuses
+  everything after that until the config is fixed and the host restarts.
 
 Connecting is itself a LeRobot behaviour worth knowing: its ``configure()``
 writes motor settings with torque briefly disabled. So the session connects
@@ -58,6 +63,16 @@ class NotCalibrated(RuntimeError):
     """LeRobot reports the arm uncalibrated for this calibration id."""
 
 
+class MotorsMismatch(RuntimeError):
+    """LeRobot's robot drives other motors than the arm config names; nothing was sent."""
+
+    def __init__(self, message: str, *, reported: tuple[str, ...], configured: tuple[str, ...]) -> None:
+        """What LeRobot reported and what the config names."""
+        super().__init__(message)
+        self.reported = reported
+        self.configured = configured
+
+
 RobotFactory = Callable[..., Any]
 
 
@@ -68,6 +83,12 @@ def lerobot_robot(*, robot_module: str, robot_type: str, settings: Mapping[str, 
 
     config_class = RobotConfig.get_choice_class(robot_type)
     return make_robot_from_config(config_class(**dict(settings)))
+
+
+def reported_motors(robot: Any) -> tuple[str, ...]:
+    """The motors LeRobot's robot says it drives (its ``<motor>.pos`` action features), in its order."""
+    features = getattr(robot, "action_features", None) or {}
+    return tuple(str(key).removesuffix(".pos") for key in features if str(key).endswith(".pos"))
 
 
 def _position(observation: Mapping[str, Any], motor: str) -> float:
@@ -90,7 +111,12 @@ class ArmSession:
         self._factory = robot_factory or lerobot_robot
         self._robot: Any = None
         self.lock = threading.RLock()
+        # One write of the arm's config at a time (a taught pose), apart from
+        # ``lock`` so a stop never waits on a file write.
+        self.config_lock = threading.Lock()
         self.fault: str | None = None
+        # Set when LeRobot's robot drives other motors than the config names.
+        self.mismatch: MotorsMismatch | None = None
         # Calls in flight on this arm, from every adapter: a stop interrupts them all.
         self.calls_in_flight: set[Any] = set()
 
@@ -102,13 +128,17 @@ class ArmSession:
     def connected(self) -> bool:
         """Whether this session holds a connected robot (never connects)."""
         robot = self._robot
-        return robot is not None and bool(getattr(robot, "is_connected", False)) and self.fault is None
+        return (robot is not None and bool(getattr(robot, "is_connected", False)) and self.fault is None
+                and self.mismatch is None)
 
     def ensure_connected(self) -> None:
         """Connect once; raise the typed error that says why the arm cannot be used."""
         with self.lock:
             if self.fault is not None:
                 raise ArmFault(self.fault)
+            if self.mismatch is not None:
+                raise MotorsMismatch(str(self.mismatch), reported=self.mismatch.reported,
+                                     configured=self.mismatch.configured)
             if self.connected:
                 return
             if self._robot is not None:
@@ -123,6 +153,14 @@ class ArmSession:
             except (OSError, ConnectionError) as error:
                 raise ArmUnreachable(f"the arm's port did not open ({type(error).__name__})") from error
             self._robot = robot
+            reported = reported_motors(robot)
+            configured = self.config.motor_names
+            if set(reported) != set(configured):
+                self.mismatch = MotorsMismatch(
+                    "LeRobot's robot drives other motors than the arm config names",
+                    reported=reported, configured=configured,
+                )
+                raise MotorsMismatch(str(self.mismatch), reported=reported, configured=configured)
             if not robot.is_calibrated:
                 raise NotCalibrated("LeRobot reports the arm uncalibrated for its calibration id")
 
@@ -159,4 +197,5 @@ class ArmSession:
             return positions
 
 
-__all__ = ["ArmFault", "ArmSession", "ArmUnreachable", "CommandLost", "NotCalibrated", "lerobot_robot"]
+__all__ = ["ArmFault", "ArmSession", "ArmUnreachable", "CommandLost", "MotorsMismatch", "NotCalibrated",
+           "lerobot_robot", "reported_motors"]
