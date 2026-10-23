@@ -13,9 +13,10 @@
 ## Inicio rápido
 
 ```bash
+# in the Python environment that runs Flyto2
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
 pip install "lerobot @ git+https://github.com/liyiteng/lerobot_alohamini"
-pip install -e ".[core]"
+pip install -e .
 cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
 ```
@@ -28,7 +29,7 @@ Añade el brazo a un Space de Flyto2 y di:
 
 - **Palabras normales, movimiento real.** Sin código, sin puntos de paso, sin vigilarlo.
 - **Cuatro habilidades, listas para usar.** Saber su postura, ir a posturas enseñadas, agarrar, soltar.
-- **Pruebas, no promesas.** "Hecho" solo cuenta cuando otra cámara lo ve.
+- **No se fía de la palabra del brazo.** El brazo informa de lo que hizo. Flyto2 nunca lo toma como prueba por sí solo.
 - **Parar es congelarse.** Mantiene la posición y nunca suelta lo que lleva.
 - **Dentro de tus límites.** Cada movimiento se comprueba con los rangos que fijaste.
 - **Equipo entre marcas.** Trabaja con tus otros robots bajo un mismo conjunto de permisos.
@@ -38,7 +39,7 @@ Añade el brazo a un Space de Flyto2 y di:
 1. Dices lo que quieres.
 2. Flyto2 lo planifica y revisa los permisos.
 3. Este paquete mueve el brazo a través de LeRobot.
-4. Otra cámara confirma el resultado.
+4. Flyto2 registra lo que informa el brazo, pero nunca lo toma como prueba por sí solo.
 
 ---
 
