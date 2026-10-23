@@ -104,7 +104,7 @@ ARM = {"unit": "deg", "joints": {"shoulder_pan": 0.0, "elbow_flex": 45.0},
 def test_every_capability_declares_a_readable_output_schema():
     for spec in SPECS:
         assert spec.output_schema["type"] == "object"
-        _validator(spec.output_schema)
+        _validator(dict(spec.output_schema))
 
 
 @pytest.mark.parametrize(("spec", "data"), [
@@ -119,7 +119,7 @@ def test_every_capability_declares_a_readable_output_schema():
                "effect_applied": True}),
 ])
 def test_the_data_a_completed_call_returns_holds_to_its_schema(spec, data):
-    assert list(_validator(spec.output_schema).iter_errors(data)) == []
+    assert list(_validator(dict(spec.output_schema)).iter_errors(data)) == []
 
 
 @pytest.mark.parametrize("data", [
@@ -129,7 +129,7 @@ def test_the_data_a_completed_call_returns_holds_to_its_schema(spec, data):
     {"arm": {**ARM, "unit": 7}},
 ])
 def test_a_reply_that_breaks_the_state_schema_is_caught(data):
-    assert list(_validator(MANIPULATION_STATE.output_schema).iter_errors(data))
+    assert list(_validator(dict(MANIPULATION_STATE.output_schema)).iter_errors(data))
 
 
 # -- against flyto-core's own schema (skipped without it) -----------------------------

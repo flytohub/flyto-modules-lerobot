@@ -131,7 +131,7 @@ class FakeFollowerArm:
             self.goals.update(goal)
             if self.lose_reply_after_action == len(self.actions):
                 # The sync write went out; the port then failed.
-                raise ConnectionError("Failed to sync write 'Goal_Position' after 1 tries. [TxRxResult] Port is in use!")
+                raise ConnectionError("Failed to sync write 'Goal_Position' after 1 tries. [TxRxResult] Port is in use")
             return {f"{name}.pos": value for name, value in goal.items()}
 
     def disconnect(self) -> None:

@@ -43,10 +43,9 @@ try:
     from local.actuation_gate import ActuationGate
     from local.capability_contracts import CapabilityContract
     from local.external_capability_dispatch import ExternalCapabilityDispatcher
-    from local.resource_state_telemetry import envelope
     from local.result_schema import OMITTED_BREAKS, checked
     from local.uncertain_effects import EFFECT_UNKNOWN, effect_of
-    from services.device.models import ResourceManifestDTO, ResourceTelemetryDTO
+    from services.device.models import ResourceManifestDTO
     from services.space_tasks.adapter_reasons import CALL_OUTCOME_KEY
     from services.space_tasks.capabilities import CAPABILITIES
     from services.space_tasks.capability_declaration_contract import (
@@ -75,7 +74,7 @@ from flyto_modules_lerobot.capabilities import (  # noqa: E402
     SPECS,
     SPECS_BY_CAPABILITY,
 )
-from flyto_modules_lerobot.discovery import build_manifest, samples_from_state  # noqa: E402
+from flyto_modules_lerobot.discovery import build_manifest  # noqa: E402
 from flyto_modules_lerobot.driver import ArmSession  # noqa: E402
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter  # noqa: E402
 
@@ -140,13 +139,10 @@ def test_cloud_reads_every_contract_and_finds_nothing_the_arm_proves_by_itself()
         assert not facts.evidence
 
 
-def test_cloud_admits_the_manifest_and_a_telemetry_sample(arm_config):
+def test_cloud_admits_the_manifest(arm_config):
     manifest = ResourceManifestDTO(**build_manifest(arm_config, observed_at="2026-10-23T00:00:00+00:00",
                                                     module_pack=True))
     assert manifest.module_pack == "lerobot" and manifest.contract_hash
-    state = {"unit": "deg", "joints": {"elbow_flex": 12.0}, "gripper": {"position": 60.0, "state": "open"}}
-    sample, = samples_from_state(state, resource_id=ARM)
-    assert ResourceTelemetryDTO(**envelope(sample)).payload["joints"]["elbow_flex"] == 12.0
 
 
 # -- the fake arm through Cloud's execution-host dispatcher -------------------------------
@@ -219,7 +215,7 @@ def test_the_hosts_schema_check_omits_a_reply_that_breaks_the_declared_shape():
 
 
 def test_a_target_outside_the_limits_reaches_cloud_as_a_refusal_with_no_effect(cloud_session):
-    session, factory = cloud_session
+    session, _factory = cloud_session
     record, _results = _dispatch(session, MOVE_JOINTS.capability_id, {"elbow_flex": 120.0})
     assert record["outcome"] == "refused"
     assert record[CALL_OUTCOME_KEY]["reason"] == REASON_OUTSIDE_LIMITS

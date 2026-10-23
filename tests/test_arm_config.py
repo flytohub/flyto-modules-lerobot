@@ -12,8 +12,8 @@ import copy
 import json
 
 import pytest
-
 from conftest import EXAMPLE, example_data
+
 from flyto_modules_lerobot.arm_config import ARM_CONFIG_SCHEMA, ArmConfigError, load_arm_config, parse_arm_config
 
 

@@ -1,7 +1,7 @@
 """Resource discovery: a configured arm is reported from its configuration, never by moving or connecting it.
 
 Connecting a LeRobot follower configures its motors with torque briefly off,
-so discovery and telemetry never connect. The manifest carries the arm's own
+so discovery never connects, and the pack reports no telemetry. The manifest carries the arm's own
 limits and taught poses as the move's bounds -- configuration, not code.
 """
 
@@ -35,7 +35,6 @@ def configured(monkeypatch, tmp_path, config_data, factory):
 def test_an_unconfigured_host_serves_no_arm(monkeypatch):
     monkeypatch.delenv(ENV_CONFIG, raising=False)
     assert discovery.discover_resource_manifests(execution_host_id="h") == []
-    assert discovery.telemetry_sampler(execution_host_id="h") == []
 
 
 def test_an_invalid_config_is_no_resource(monkeypatch, tmp_path):
@@ -64,6 +63,8 @@ def test_a_configured_arm_is_one_manifest_and_nothing_connects(configured, facto
     assert manifest["deployment_mode"] == "real"
     assert manifest["adapter"]["adapter_id"] == ADAPTER_ID and manifest["module_pack"] == MODULE_PACK
     assert manifest["capability_ids"] == list(CAPABILITY_IDS)
+    assert manifest["telemetry_channels"] == []
+    assert not hasattr(discovery.discover_resource_manifests, "telemetry_sampler")
 
 
 def test_the_move_bounds_are_the_arms_own_limits_and_taught_poses(configured, config_data):
@@ -92,17 +93,6 @@ def test_an_untaught_pose_is_not_offered(configured, config_data):
 def test_the_manifest_names_the_resource_but_never_the_port(configured, config_data):
     manifest, = discovery.discover_resource_manifests(execution_host_id="h")
     assert config_data["lerobot"]["port"] not in json.dumps(manifest)
-
-
-def test_telemetry_reads_only_an_arm_already_connected(configured, factory):
-    assert discovery.telemetry_sampler(execution_host_id="h") == []
-    assert factory.arms == {}
-    adapter = plugin.build_adapter("handed-in")
-    adapter.session.ensure_connected()
-    sample, = discovery.telemetry_sampler(execution_host_id="h")
-    assert sample["channel_id"] == "manipulation.joints" and sample["resource_id"] == "am-arm200-01"
-    assert set(sample["payload"]["joints"]) >= {"elbow_flex"} and sample["payload"]["gripper"]["state"] == "between"
-    assert sample["quality"] == "good"
 
 
 def test_the_installed_factory_reads_its_wiring_from_the_environment(configured):

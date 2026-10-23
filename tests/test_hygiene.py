@@ -54,7 +54,7 @@ def test_no_source_names_a_model_a_profile_a_joint_or_a_port():
 
 
 def test_no_address_literal_but_loopback():
-    files = _sources() + [path for path in ROOT.rglob("*.json") if ".venv" not in path.parts and ".git" not in path.parts]
+    files = _sources() + [path for path in ROOT.rglob("*.json") if not {".venv", ".git"} & set(path.parts)]
     found = []
     for path in files:
         for match in IPV4.finditer(path.read_text(encoding="utf-8")):

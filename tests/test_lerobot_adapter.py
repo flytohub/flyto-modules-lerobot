@@ -109,6 +109,7 @@ def test_a_port_that_does_not_open_is_unreachable_with_no_effect(make_adapter, s
 
 def test_reading_the_state_returns_joints_and_gripper(make_adapter, arm):
     arm.positions.update({"elbow_flex": 45.0, "gripper": 60.0})
+    arm.goals.update(arm.positions)  # at rest there
     result = call(make_adapter(), MANIPULATION_STATE)
     assert result.outcome == OUTCOME_COMPLETED
     state = result.evidence["arm"]
