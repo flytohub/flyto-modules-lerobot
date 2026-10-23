@@ -11,14 +11,19 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   (`tests/fake_lerobot.py`): moves by pose and by joints, limits, untaught
   poses, blocked joints, lost replies (effect unknown, never resent),
   over-current fault, cancel / stop / deadline as HOLD with torque on.
+- Checked against the real fork with no arm attached (2026-10-23,
+  lerobot_alohamini 0.6.1 with the `feetech` extra, Python 3.12):
+  `driver.lerobot_robot` builds `SOFollower` from `examples/am-arm200.json`;
+  its seven motors equal the config's joints; its action and observation keys
+  are `<motor>.pos`; `connect(calibrate=...)`, `is_calibrated`,
+  `get_observation`, `send_action` exist; `disable_torque_on_disconnect` is
+  False, `use_degrees` True, `arm_profile` `am-follower-6dof`. A read with no
+  port raises `ArmUnreachable` and leaves no fault. Without the `feetech`
+  extra the robot cannot be built, so the install line names it.
 
 ## Not done
 
-- **No arm.** The AM-ARM200 has not arrived; the adapter has only met the fake.
-- **LeRobot itself is unverified here.** `driver.lerobot_robot` follows the
-  fork's source (`RobotConfig.get_choice_class`, `make_robot_from_config`,
-  `connect(calibrate=False)`, `get_observation`, `send_action`) but was never
-  imported or run against a real LeRobot install.
+- **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.
 - **Placeholder data.** The example's joint limits are not measured and its
   poses are untaught. Measure limits, teach `ready`, `fixture_pick`,
   `tray_place` on the arm, and record `motion` values that suit it.
