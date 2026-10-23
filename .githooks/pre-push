@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
-# Nothing is pushed that the repository's own checks have not passed.
+# main changes only through a merged pull request, and nothing else is pushed
+# that the repository's own checks have not passed. install-hooks.sh links
+# this file over the workspace's pre-push hook, so it refuses main itself.
 set -euo pipefail
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      echo "pre-push: refusing a direct push to ${remote_ref#refs/heads/}; merge it through a pull request." >&2
+      exit 1
+      ;;
+  esac
+done
+
 exec "$(git rev-parse --show-toplevel)/scripts/verify.sh"

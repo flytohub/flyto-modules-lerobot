@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # The repository's own checks, the same steps .github/workflows/ci.yml runs.
-# Uses .venv/bin/python when it exists, else python3 on PATH.
+# Uses this checkout's .venv/bin/python, else the main checkout's (a git
+# worktree has none of its own), else python3 on PATH. pytest's pythonpath puts
+# this checkout's src first, so another checkout's environment tests this code.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PY=python3
-[ -x .venv/bin/python ] && PY=.venv/bin/python
+MAIN_CHECKOUT="$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd)")"
+for candidate in .venv/bin/python "$MAIN_CHECKOUT/.venv/bin/python"; do
+  if [ -x "$candidate" ]; then PY="$candidate"; break; fi
+done
 
 echo "== ruff"
 "$PY" -m ruff check src tests
