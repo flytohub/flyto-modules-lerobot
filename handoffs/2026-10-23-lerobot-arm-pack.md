@@ -83,7 +83,11 @@ No flyto-cloud, flyto-core or other repository file was changed.
 - `safe_stop` on an arm this process never connected answers `failed`
   (nothing to hold, connecting would blip torque). Cloud's conformance
   `safe_stop` check will fail in that state.
-- 12 V cut-off switch and hold-stop latency untested. GitHub CI: see push result.
+- 12 V cut-off switch and hold-stop latency untested.
+- GitHub CI did not run: the first push (run 39886296415) ended in
+  `startup_failure` with no job started, the same org-wide state recorded for
+  flyto-modules-power on 2026-10-22. The local `scripts/verify.sh` (also the
+  pre-push gate, which ran on the push) is the check that ran.
 
 ## Next
 
