@@ -132,7 +132,7 @@ FLYTO_CLOUD_BACKEND=/tmp/cloud-export/src/ui/web/backend PYTHONPATH=<core>/src \
   ../flyto-cloud/.venv/bin/python -m pytest -q -rs
 ```
 
-Install the pre-push gate once per clone with `./scripts/install-hooks.sh`.
+Inside the Flyto2 workspace, its pre-push hook runs `.githooks/pre-push` (this repository's checks) and refuses a push to main. In a clone outside the workspace, `./scripts/install-hooks.sh` links that gate when no pre-push hook is installed.
 
 ### Development
 
