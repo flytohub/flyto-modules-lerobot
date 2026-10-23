@@ -36,6 +36,10 @@ lerobot = ["lerobot>=0.4; python_version >= '3.12'"]
 # jsonschema: tests hold each reply to its output_schema the way the Cloud host does.
 dev = ["pytest>=8", "jsonschema>=4"]
 
+# Commissioning a new arm from its config file: check, read, jog, teach, stop-latency.
+[project.scripts]
+flyto-lerobot-arm = "flyto_modules_lerobot.commissioning:main"
+
 [project.urls]
 Source = "https://github.com/flytohub/flyto-modules-lerobot"
 

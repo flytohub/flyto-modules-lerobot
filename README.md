@@ -94,6 +94,64 @@ execution host by `FLYTO_LEROBOT_ARM_CONFIG` (`.env.example`). Start from
 The example's limits are conservative placeholders and its poses are
 untaught, so a move to them is refused until you teach and mark them.
 
+### Commissioning a new arm
+
+`flyto-lerobot-arm` (installed with the package) commissions an arm from its
+config file, with no code edits. It reads the file from `--config` or
+`FLYTO_LEROBOT_ARM_CONFIG`, connects through the same LeRobot session the
+execution host uses, and moves only through the pack's own
+`manipulation.move_joints` path (limits, waypoints, readback, hold-stop).
+Stop the execution host first so only one process holds the serial port, and
+keep a hand on the 12 V cut-off switch.
+
+Do it in this order:
+
+1. **Check.** Calibrate with `lerobot-calibrate` first, then:
+
+   ```bash
+   flyto-lerobot-arm --config my-arm.json check
+   ```
+
+   It confirms LeRobot reports the arm calibrated and drives exactly the
+   config's motors, prints every joint against its limits and every pose's
+   taught state, and never moves. Fix the limits in the file until it passes.
+   `flyto-lerobot-arm read --json` prints the positions at any time.
+
+2. **Teach the poses.** Jog the arm into each pose, one joint at a time, and
+   record it:
+
+   ```bash
+   flyto-lerobot-arm --config my-arm.json jog elbow_flex 3          # prints the move, sends nothing
+   flyto-lerobot-arm --config my-arm.json jog elbow_flex 3 --yes    # moves
+   flyto-lerobot-arm --config my-arm.json teach ready
+   ```
+
+   `jog` refuses a step larger than `motion.max_step` or a target outside the
+   joint's limits. `teach` records the body joints' current positions as the
+   pose with `taught: true`, refuses a position outside the limits, writes
+   the file atomically and keeps the previous one beside it as
+   `my-arm.json.<UTC time>.bak`. Re-teaching a taught pose needs
+   `--replace`. It writes JSON configs only.
+
+3. **Measure the stop.**
+
+   ```bash
+   flyto-lerobot-arm --config my-arm.json stop-latency elbow_flex 30 --yes --runs 5
+   ```
+
+   Each run moves the joint by the delta, issues the pack's hold-stop after
+   `--after` seconds (default 0.2), samples readback until three readings in
+   a row lie within `motion.still_drift`, and reports the milliseconds from
+   the stop to stillness and the overshoot past the held position (flagged
+   when larger than `motion.tolerance`); then it moves the joint back. It
+   prints min/median/max (`--json` for the full runs). Torque stays on
+   throughout: stop is a hold.
+
+Exit status: 0 done, 1 refused or a check failed (nothing was sent), 2 the
+config or the arm cannot be used (unreachable port, uncalibrated, LeRobot
+missing). Every invocation connects once, and LeRobot's `connect()` writes
+motor settings with torque briefly off, so run it with the arm at rest.
+
 ### Usage
 
 Approve the arm's four capabilities in the Space:

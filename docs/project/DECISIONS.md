@@ -16,6 +16,31 @@ resolver, recording/training/dataset/teleoperation tool, telemetry or web
 layer, or extra discovery. Telemetry that had been drafted was removed before
 the first code commit.
 
+## 2026-10-23 -- A commissioning CLI, `flyto-lerobot-arm`
+
+The scope above excluded a CLI. Commissioning the arm needs one anyway:
+otherwise teaching a pose or checking a limit means hand-editing the JSON,
+and nothing measures how fast the hold-stop stops a move. The request for
+this tool came through the 2026-10-23 arm-day session; the owner should
+confirm the scope change (handoff `2026-10-23-arm-commissioning-cli.md`).
+The tool is bounded to commissioning one arm from its config file:
+
+- It adds no capability, no Cloud or core path and no motor call. It drives
+  the arm only through `ArmSession` and `LeRobotArmAdapter`, so a jog is a
+  `manipulation.move_joints` call with the same limits, waypoints and
+  readback, and the stop it measures is the pack's own `safe_stop`.
+- Stop stays HOLD. There is no torque-off teaching by hand (it would drop
+  the arm); poses are taught by jogging, one joint and at most
+  `motion.max_step` at a time.
+- It never calibrates (`lerobot-calibrate` does) and refuses an
+  uncalibrated arm.
+- `teach` checks the whole file with the same reader the host uses before
+  writing it, writes atomically and keeps the previous file as a
+  timestamped backup. It writes JSON only: the standard library cannot
+  write TOML, and no dependency is added.
+- One LeRobot connection per invocation; the execution host must be stopped
+  while it runs.
+
 ## 2026-10-23 -- `movement`, not `controlled`
 
 The brief said "controlled, actuating" for move_joints, grasp and release.

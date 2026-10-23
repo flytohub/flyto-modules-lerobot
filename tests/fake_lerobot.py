@@ -18,7 +18,11 @@ liyiteng/lerobot_alohamini (``src/lerobot/robots/so_follower/so_follower.py``):
   ``config.disable_torque_on_disconnect`` is true (LeRobot's default is true).
 
 The simulation is deliberately small: each ``get_observation`` moves every
-motor toward its goal by ``speed``, unless the motor is blocked. Torque off
+motor toward its goal by ``speed``, unless the motor is blocked. A test that
+times motion (the stop-latency measurement) sets ``velocity`` (units per
+second of ``clock``) instead: motors then move with time, and a goal takes
+effect ``lag_s`` after it was sent, the way a real servo keeps running toward
+its previous goal for a moment. Torque off
 means the arm sags under gravity (``sagging``). Faults reproduce what a real
 USB serial link does: a dropped read, a write whose reply is lost after it was
 applied, and an over-current trip.
@@ -29,6 +33,8 @@ Test-only: never shipped in the package.
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,7 +64,9 @@ class FakeFollowerConfig:
 class FakeFollowerArm:
     """One follower arm on one serial port."""
 
-    def __init__(self, config: FakeFollowerConfig, *, motors=AM_FOLLOWER_6DOF, calibrated: bool = True) -> None:
+    def __init__(self, config: FakeFollowerConfig, *, motors=AM_FOLLOWER_6DOF, calibrated: bool = True,
+                 velocity: float | None = None, lag_s: float = 0.0,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.config = config
         self.motors = tuple(motors)
         self.positions = {name: 0.0 for name in self.motors}
@@ -80,6 +88,12 @@ class FakeFollowerArm:
         self.lose_reply_after_action: int | None = None  # this action (1-based) is applied, then raises
         self.overcurrent_on_read = False
         self.observations = 0
+        # Motion over time (None: a fixed ``speed`` per observation).
+        self.velocity = velocity
+        self.lag_s = lag_s
+        self.clock = clock
+        self._stepped_at: float | None = None
+        self._pending: list[tuple[float, dict[str, float]]] = []  # (takes effect at, goal)
 
     # -- the LeRobot Robot API -------------------------------------------------
 
@@ -90,6 +104,10 @@ class FakeFollowerArm:
     @property
     def is_calibrated(self) -> bool:
         return self.calibrated
+
+    @property
+    def action_features(self) -> dict[str, type]:
+        return {f"{name}.pos": float for name in self.motors}
 
     def connect(self, calibrate: bool = True) -> None:
         if self.connected:
@@ -104,6 +122,7 @@ class FakeFollowerArm:
         self._set_torque(False)
         self._set_torque(True)
         self.goals = dict(self.positions)
+        self._stepped_at = self.clock()
 
     def get_observation(self) -> dict[str, float]:
         self._require_connected()
@@ -128,7 +147,11 @@ class FakeFollowerArm:
             if unknown:
                 raise KeyError(f"unknown motors {sorted(unknown)}")
             self.actions.append(dict(goal))
-            self.goals.update(goal)
+            if self.velocity is None:
+                self.goals.update(goal)
+            else:
+                self._step()
+                self._pending.append((self.clock() + self.lag_s, dict(goal)))
             if self.lose_reply_after_action == len(self.actions):
                 # The sync write went out; the port then failed.
                 raise ConnectionError("Failed to sync write 'Goal_Position' after 1 tries. [TxRxResult] Port is in use")
@@ -138,6 +161,10 @@ class FakeFollowerArm:
         self._require_connected()
         if self.config.disable_torque_on_disconnect:
             self._set_torque(False)
+        self.connected = False
+
+    def process_exited(self) -> None:
+        """The process holding the port ended without ``disconnect()``: the port closes, torque stays as it was."""
         self.connected = False
 
     # -- simulation ------------------------------------------------------------
@@ -156,11 +183,32 @@ class FakeFollowerArm:
         self.torque_log.append(on)
 
     def _step(self) -> None:
+        if self.velocity is not None:
+            self._step_in_time()
+            return
         if not self.torque:
             return
+        self._advance(self.speed)
+
+    def _step_in_time(self) -> None:
+        """Move with the clock, applying each goal when its lag has passed."""
+        now = self.clock()
+        at = now if self._stepped_at is None else self._stepped_at
+        self._pending.sort(key=lambda item: item[0])
+        while self._pending and self._pending[0][0] <= now:
+            effective, goal = self._pending.pop(0)
+            if self.torque:
+                self._advance(self.velocity * max(0.0, effective - at))
+            at = max(at, effective)
+            self.goals.update(goal)
+        if self.torque:
+            self._advance(self.velocity * max(0.0, now - at))
+        self._stepped_at = now
+
+    def _advance(self, limit: float) -> None:
         for name, goal in self.goals.items():
             current = self.positions[name]
-            delta = max(-self.speed, min(self.speed, goal - current))
+            delta = max(-limit, min(limit, goal - current))
             moved = current + delta
             stop = self.blocked.get(name)
             if stop is not None and (current <= stop < moved or moved < stop <= current):

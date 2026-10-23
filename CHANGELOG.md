@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `flyto-lerobot-arm` console tool to commission an arm from its config
+  file: `check`, `read`, `jog`, `teach` (atomic write, timestamped backup),
+  `stop-latency` (hold-stop to stillness and overshoot). No new dependency.
+- `ArmSession.reported_motors()` (LeRobot's `action_features`), for `check`.
+
 ## 0.1.0 -- 2026-10-23
 
 - `manipulation.state`, `manipulation.move_joints`, `manipulation.grasp` and

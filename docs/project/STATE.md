@@ -21,14 +21,28 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   port raises `ArmUnreachable` and leaves no fault. Without the `feetech`
   extra the robot cannot be built, so the install line names it.
 
+- `flyto-lerobot-arm` commissions an arm from its config file: `check`
+  (calibrated, motors equal the config, joints against limits; reads only),
+  `read`, `jog` (one joint, at most `motion.max_step`, within limits, through
+  the adapter's move path; nothing without `--yes`), `teach` (records the
+  pose as taught, atomic write with a timestamped backup), `stop-latency`
+  (hold-stop to stillness in ms and overshoot, min/median/max). Tested only
+  against the fake follower, including one that moves with time and runs on
+  toward its old goal for a moment.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.
 - **Placeholder data.** The example's joint limits are not measured and its
-  poses are untaught. Measure limits, teach `ready`, `fixture_pick`,
-  `tray_place` on the arm, and record `motion` values that suit it.
+  poses are untaught. `flyto-lerobot-arm check` shows the limits against the
+  arm and `jog` + `teach` record `ready`, `fixture_pick`, `tray_place`; none
+  of that has run on the arm. Limits and `motion` values are still edited
+  in the file by hand.
 - **Nothing is proven by Cloud.** move_joints, grasp and release declare no
   evidence (`DECISIONS.md`).
-- **The 12 V cut-off switch** must be fitted and tested before any real run;
-  the stop latency of the hold has not been measured.
+- **The 12 V cut-off switch** must be fitted and tested before any real run.
+- **Stop latency is unmeasured on the arm.** `flyto-lerobot-arm stop-latency`
+  measures it; its numbers so far come from the fake only, and its stillness
+  rule (three readings within `motion.still_drift`) has not been compared
+  with what the real servos report.
 - No execution-host run with a paired Cloud.

@@ -50,6 +50,7 @@ jobs:
               ('flyto.modules', 'lerobot'),
               ('flyto2.external_adapters', 'lerobot.arm'),
               ('flyto2.resource_discoverers', 'lerobot.arm'),
+              ('console_scripts', 'flyto-lerobot-arm'),
           ):
               found = tuple(entry_points().select(group=group, name=name))
               assert len(found) == 1, (group, name)

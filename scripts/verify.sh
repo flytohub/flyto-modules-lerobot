@@ -25,11 +25,12 @@ for group, name in (
     ("flyto.modules", "lerobot"),
     ("flyto2.external_adapters", "lerobot.arm"),
     ("flyto2.resource_discoverers", "lerobot.arm"),
+    ("console_scripts", "flyto-lerobot-arm"),
 ):
     found = tuple(entry_points().select(group=group, name=name))
     assert len(found) == 1, (group, name)
     assert callable(found[0].load()), (group, name)
-print("3 entry points load")
+print("4 entry points load")
 PY
 
 echo "== build"

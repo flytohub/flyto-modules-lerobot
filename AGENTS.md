@@ -17,8 +17,12 @@ exactly:
    resource manifest built from the arm config.
 4. One config file per arm (serial port, joint limits, gripper open/closed
    values, named poses) as data.
+5. `flyto-lerobot-arm`, which commissions one arm from its config file
+   (`check`, `read`, `jog`, `teach`, `stop-latency`) through the same
+   session and adapter. It adds no capability and never turns torque off.
 
-Do not add a CLI or MCP server, planners, goal resolvers, recording or
+Do not add a CLI (beyond the `flyto-lerobot-arm` commissioning tool, see
+`docs/project/DECISIONS.md`) or MCP server, planners, goal resolvers, recording or
 training helpers, dataset or teleoperation tools, a web or telemetry layer,
 discovery beyond the manifest, or any capability beyond those four.
 
@@ -26,7 +30,7 @@ discovery beyond the manifest, or any capability beyond those four.
 
 - **Wrap LeRobot; never re-implement it.** `driver.py` is the only module
   that calls LeRobot, and only its public `Robot` API (`connect(calibrate=False)`,
-  `is_calibrated`, `get_observation`, `send_action`). No motor-bus or servo
+  `is_calibrated`, `action_features`, `get_observation`, `send_action`). No motor-bus or servo
   protocol call, ever.
 - **Stop is HOLD, never torque off.** These servos have no hardware E-stop;
   torque off drops the arm. `safe_stop` and cancel command every body joint

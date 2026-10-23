@@ -5,4 +5,5 @@
 - `docs/project/DECISIONS.md` -- why it is shaped this way.
 - `docs/project/STATE.md` -- what is verified now, and what is not.
 - `docs/project/ROADMAP.md`, `docs/project/tasks.md` -- what comes next.
+- `../README.md#commissioning-a-new-arm` -- `flyto-lerobot-arm`: check, jog, teach, stop-latency.
 - `../examples/am-arm200.json` -- the AM-ARM200 arm config (placeholder limits, untaught poses).

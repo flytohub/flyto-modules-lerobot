@@ -4,7 +4,7 @@
 
 LeRobot owns the motors. This module builds LeRobot's own robot from the arm
 config and calls only its public ``Robot`` API -- ``connect(calibrate=False)``,
-``is_calibrated``, ``get_observation()``, ``send_action()`` -- never the motor
+``is_calibrated``, ``action_features``, ``get_observation()``, ``send_action()`` -- never the motor
 bus, never the servo protocol, never torque.
 
 LeRobot (and torch with it) is imported only by :func:`lerobot_robot`, the
@@ -125,6 +125,13 @@ class ArmSession:
             self._robot = robot
             if not robot.is_calibrated:
                 raise NotCalibrated("LeRobot reports the arm uncalibrated for its calibration id")
+
+    def reported_motors(self) -> tuple[str, ...]:
+        """The motors LeRobot's robot says it drives (its ``<motor>.pos`` action features), in its order."""
+        with self.lock:
+            self.ensure_connected()
+            features = getattr(self._robot, "action_features", None) or {}
+            return tuple(str(key).removesuffix(".pos") for key in features if str(key).endswith(".pos"))
 
     def read(self) -> dict[str, float]:
         """Every configured motor's position (body joints, then the gripper)."""

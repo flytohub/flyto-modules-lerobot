@@ -7,6 +7,7 @@ host        --flyto2.resource_discoverers "lerobot.arm"-> discovery.discover_res
                                                         capabilities.py  the one table
                                                         arm_config.py    one file per arm (FLYTO_LEROBOT_ARM_CONFIG)
 LeRobotArmAdapter --driver.ArmSession--> LeRobot Robot API (connect / get_observation / send_action)
+flyto-lerobot-arm  commissioning.py --> ArmSession + LeRobotArmAdapter (check / read / jog / teach / stop-latency)
 ```
 
 ## The capability table (`capabilities.py`)
@@ -86,6 +87,17 @@ One `ArmSession` per arm per process, connected lazily on the first call with
 only with the arm at rest. After an over-current trip (LeRobot cuts torque
 and disconnects) the session refuses everything until the host restarts.
 LeRobot is imported only in `driver.lerobot_robot`.
+
+## Commissioning (`commissioning.py`, `flyto-lerobot-arm`)
+
+A console tool for a new arm, run with the execution host stopped. It builds
+its own `ArmSession` from the config file and moves only through
+`LeRobotArmAdapter.invoke` (`manipulation.move_joints`) and `safe_stop`, so
+what it measures is what the host does. `check` also compares LeRobot's
+`action_features` motors with the config. `teach` re-reads the file, checks
+the result with `parse_arm_config`, keeps a timestamped `.bak` beside it and
+replaces it with `os.replace`. README "Commissioning a new arm" has the
+order.
 
 ## Runtime configuration
 

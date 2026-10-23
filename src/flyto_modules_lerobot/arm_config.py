@@ -162,6 +162,11 @@ class ArmConfig:
         return next((joint for joint in self.joints if joint.name == name), None)
 
 
+def valid_name(text: str) -> bool:
+    """Whether ``text`` may name a joint or a pose in an arm config."""
+    return bool(_IDENTIFIER.fullmatch(text))
+
+
 # -- reading ------------------------------------------------------------------------
 
 
@@ -322,4 +327,5 @@ __all__ = [
     "Pose",
     "load_arm_config",
     "parse_arm_config",
+    "valid_name",
 ]

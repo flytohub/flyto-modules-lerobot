@@ -1,4 +1,4 @@
-"""The three entry points a Flyto2 install finds this pack by, loaded by name.
+"""The entry points a Flyto2 install finds this pack by, loaded by name.
 
 Materialised with ``tuple()`` before indexing (Python 3.12 ``EntryPoints``).
 Skipped when the package is not installed into this interpreter.
@@ -16,6 +16,7 @@ GROUPS = (
     ("flyto.modules", MODULE_PACK),
     ("flyto2.external_adapters", ADAPTER_ID),
     ("flyto2.resource_discoverers", ADAPTER_ID),
+    ("console_scripts", "flyto-lerobot-arm"),
 )
 
 
