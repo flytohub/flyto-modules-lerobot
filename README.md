@@ -8,6 +8,8 @@
 
 **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
+[Quick start](#quick-start) · [Highlights](#highlights) · [How it works](#how-it-works) · [FAQ](#faq) · [For developers](#for-developers)
+
 </div>
 
 ## Quick start
@@ -44,6 +46,24 @@ Add the arm to a Flyto2 Space and say:
 ---
 
 ## For developers
+
+### FAQ
+
+**A move to a pose is refused.**
+
+Poses run only after you teach them on this arm and mark them `taught: true` in your arm file. The example's poses start untaught on purpose.
+
+**The arm is refused as uncalibrated.**
+
+Calibrate it with LeRobot first (`lerobot-calibrate ...`). This pack never calibrates.
+
+**Which arms work?**
+
+Arms LeRobot drives, chosen by `robot_module` and `robot_type` in the arm file. `examples/am-arm200.json` is a ready starting point.
+
+**What happens when I press stop mid-move?**
+
+The arm holds its pose where it is, and the gripper keeps what it holds.
 
 ### Installation
 

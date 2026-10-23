@@ -8,6 +8,8 @@
 
 [English](README.md) · **日本語** · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
+[クイックスタート](#クイックスタート) · [ハイライト](#ハイライト) · [しくみ](#しくみ) · [開発者向け](#開発者向け)
+
 </div>
 
 ## クイックスタート

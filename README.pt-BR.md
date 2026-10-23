@@ -8,6 +8,8 @@
 
 [English](README.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · **Português (BR)**
 
+[Início rápido](#início-rápido) · [Destaques](#destaques) · [Como funciona](#como-funciona) · [Para desenvolvedores](#para-desenvolvedores)
+
 </div>
 
 ## Início rápido

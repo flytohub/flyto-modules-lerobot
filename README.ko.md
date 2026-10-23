@@ -8,6 +8,8 @@
 
 [English](README.md) · [日本語](README.ja.md) · **한국어** · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
+[빠른 시작](#빠른-시작) · [하이라이트](#하이라이트) · [작동 방식](#작동-방식) · [개발자용](#개발자용)
+
 </div>
 
 ## 빠른 시작
