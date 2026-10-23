@@ -8,5 +8,5 @@ Read `AGENTS.md` first: its constraints are the point of this package.
 - Run `./scripts/verify.sh` before pushing (`./scripts/install-hooks.sh`
   makes it the pre-push gate).
 - A new arm is a new config file, never code. If supporting it seems to need
-  code that names the arm, stop and record why in `DECISIONS.md`.
-- Record a durable change in `handoffs/` and keep `STATE.md` current.
+  code that names the arm, stop and record why in `docs/project/DECISIONS.md`.
+- Record a durable change in `docs/project/handoffs/` and keep `docs/project/STATE.md` current.
