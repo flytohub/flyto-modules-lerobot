@@ -17,7 +17,7 @@
 ```bash
 # in the Python environment that runs Flyto2
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
-pip install "lerobot @ git+https://github.com/liyiteng/lerobot_alohamini"
+pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini"
 pip install -e .
 cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
@@ -70,7 +70,7 @@ The arm holds its pose where it is, and the gripper keeps what it holds.
 ```bash
 pip install -e .
 # LeRobot (Python 3.12+, pulls in torch). For AM-ARM200 use the fork:
-pip install 'lerobot @ git+https://github.com/liyiteng/lerobot_alohamini'
+pip install 'lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini'
 ```
 
 Calibrate the follower with LeRobot first (`lerobot-calibrate --robot.type=so101_follower
