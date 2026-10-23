@@ -1,54 +1,44 @@
 <div align="center">
 
-# Flyto2 for LeRobot Arms
+# Flyto2 × LeRobot Arms
 
-**Tell it what to pick up. A $240 arm does the work, and another camera checks it was really done.**
+**Give your LeRobot arm a job in plain words. It does it, and Flyto2 checks it got done.**
 
-![Flyto2 device pack](https://img.shields.io/badge/Flyto2-device%20pack-6d5dfc) ![LeRobot](https://img.shields.io/badge/LeRobot-arms-ffcc4d) ![status](https://img.shields.io/badge/status-early%20preview-lightgrey)
+![Flyto2 device pack](https://img.shields.io/badge/Flyto2-device%20pack-6d5dfc) ![LeRobot](https://img.shields.io/badge/LeRobot-compatible-ffcc4d) ![Python](https://img.shields.io/badge/python-3.11%2B-3776ab)
 
 **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
 
 </div>
 
----
+## Quick start
 
-## One sentence in, real work out
+```bash
+git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
+pip install "lerobot @ git+https://github.com/liyiteng/lerobot_alohamini"
+pip install -e ".[core]"
+cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
+export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
+```
 
-*"Pick up the part on the fixture and put it in the tray."* Flyto2 turns that into steps, sends the right ones to your arm, and only calls the job done once it has been seen done.
+Add the arm to a Flyto2 Space and say:
 
-## What your arm can do
+> Pick up the part on the fixture and put it in the tray.
 
-- **Know where it is.** Every joint and the gripper, right now.
-- **Go where you taught it.** Named poses like *ready* or *tray*, never past the limits you set.
-- **Pick up.** Close the gripper and hold on.
-- **Let go.** Open the gripper and set it down.
+## Highlights
 
-## Works with your other robots
+- **Plain words in, real motion out.** No code, no waypoints, no babysitting.
+- **Four skills, ready to go.** Know its pose, move to taught poses, grab, let go.
+- **Proof, not promises.** "Done" only counts when another camera sees it.
+- **Stop means freeze.** It holds position and never drops what it carries.
+- **Stays inside your limits.** Every move is checked against the ranges you set.
+- **Teams up across brands.** Works with your other robots under one set of permissions.
 
-Your arm does not work alone. A mobile robot brings the part, the arm picks it up, a camera confirms it, across brands and under one set of permissions.
+## How it works
 
-## Safe by design
-
-- **Stop means hold still.** It never goes limp and drops what it holds.
-- **It never trusts its own word.** Another camera confirms the result.
-- **It stays in its lane.** Every move is checked against your limits.
-- **No guessing.** If the connection drops mid-move it says *unknown* and never repeats the motion.
-- **You stay in charge.** Moving the arm needs your approval, and a retrained arm asks again.
-
-## Grows with you
-
-Start with poses you teach by hand. Train a smarter grasp with LeRobot later: it slots in behind the same capability, and Flyto2 asks you to approve the new version first. Any arm LeRobot drives can join, starting with the AM-ARM200.
-
-## Start in four steps
-
-1. Get an AM-ARM200 (about $240 for the follower) and a 12 V power switch within reach.
-2. Install this pack and LeRobot on the computer the arm plugs into.
-3. Copy `examples/am-arm200.json`, set your port, and teach your poses.
-4. Add the arm to a Flyto2 Space and say what you want done.
-
-## Status
-
-Early preview. Every capability is tested end to end against a simulated arm and Flyto2 Cloud. First runs on a real AM-ARM200 come next.
+1. You say what you want.
+2. Flyto2 plans it and checks permissions.
+3. This pack drives the arm through LeRobot.
+4. Another camera confirms the result.
 
 ---
 
