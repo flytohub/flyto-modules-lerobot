@@ -1,18 +1,60 @@
-# flyto-modules-lerobot
+<div align="center">
 
-Manipulation capabilities for Flyto2 AI Space, for any arm LeRobot drives:
-read the arm, move it to a taught pose or to joint targets within its limits,
-close and open its gripper. The pack wraps LeRobot's own `Robot` API; it never
-re-implements motor control. The first arm is the AM-ARM200 follower
-(liyiteng, [AM-ARM](https://github.com/liyiteng/AM-ARM), software via
-[lerobot_alohamini](https://github.com/liyiteng/lerobot_alohamini)).
+# Flyto2 for LeRobot Arms
 
-> **Safety.** These servos have no hardware emergency stop, and torque off
-> drops the arm. This pack's stop *holds* the arm where it is with torque on
-> and reports `stop_requested`, never a confirmed stop. A physical 12 V
-> cut-off switch on the arm's supply is required for any real run.
+**Tell it what to pick up. A $240 arm does the work, and another camera checks it was really done.**
 
-## Installation
+![Flyto2 device pack](https://img.shields.io/badge/Flyto2-device%20pack-6d5dfc) ![LeRobot](https://img.shields.io/badge/LeRobot-arms-ffcc4d) ![status](https://img.shields.io/badge/status-early%20preview-lightgrey)
+
+**English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [Português (BR)](README.pt-BR.md)
+
+</div>
+
+---
+
+## One sentence in, real work out
+
+*"Pick up the part on the fixture and put it in the tray."* Flyto2 turns that into steps, sends the right ones to your arm, and only calls the job done once it has been seen done.
+
+## What your arm can do
+
+- **Know where it is.** Every joint and the gripper, right now.
+- **Go where you taught it.** Named poses like *ready* or *tray*, never past the limits you set.
+- **Pick up.** Close the gripper and hold on.
+- **Let go.** Open the gripper and set it down.
+
+## Works with your other robots
+
+Your arm does not work alone. A mobile robot brings the part, the arm picks it up, a camera confirms it, across brands and under one set of permissions.
+
+## Safe by design
+
+- **Stop means hold still.** It never goes limp and drops what it holds.
+- **It never trusts its own word.** Another camera confirms the result.
+- **It stays in its lane.** Every move is checked against your limits.
+- **No guessing.** If the connection drops mid-move it says *unknown* and never repeats the motion.
+- **You stay in charge.** Moving the arm needs your approval, and a retrained arm asks again.
+
+## Grows with you
+
+Start with poses you teach by hand. Train a smarter grasp with LeRobot later: it slots in behind the same capability, and Flyto2 asks you to approve the new version first. Any arm LeRobot drives can join, starting with the AM-ARM200.
+
+## Start in four steps
+
+1. Get an AM-ARM200 (about $240 for the follower) and a 12 V power switch within reach.
+2. Install this pack and LeRobot on the computer the arm plugs into.
+3. Copy `examples/am-arm200.json`, set your port, and teach your poses.
+4. Add the arm to a Flyto2 Space and say what you want done.
+
+## Status
+
+Early preview. Every capability is tested end to end against a simulated arm and Flyto2 Cloud. First runs on a real AM-ARM200 come next.
+
+---
+
+## For developers
+
+### Installation
 
 ```bash
 pip install -e '.[core]'
@@ -24,7 +66,7 @@ Calibrate the follower with LeRobot first (`lerobot-calibrate --robot.type=so101
 --robot.port=... --robot.id=... --robot.arm_profile=am-follower-6dof`). This pack
 never calibrates; it refuses an arm LeRobot reports uncalibrated.
 
-## Configuration
+### Configuration
 
 One file per arm (`flyto.lerobot.arm.v1`, JSON or TOML), named on the
 execution host by `FLYTO_LEROBOT_ARM_CONFIG` (`.env.example`). Start from
@@ -41,7 +83,7 @@ execution host by `FLYTO_LEROBOT_ARM_CONFIG` (`.env.example`). Start from
 The example's limits are conservative placeholders and its poses are
 untaught, so a move to them is refused until you teach and mark them.
 
-## Usage
+### Usage
 
 Approve the arm's four capabilities in the Space:
 
@@ -56,13 +98,13 @@ No call proves its own effect: a grasp or a place needs an independent
 observation Cloud does not have yet, so those steps stay unproven
 (`DECISIONS.md`).
 
-## Architecture
+### Architecture
 
 Three entry points: `flyto.modules` `lerobot`, `flyto2.external_adapters`
 `lerobot.arm`, `flyto2.resource_discoverers` `lerobot.arm`. See
 `ARCHITECTURE.md` for the outcome table and the hold-stop.
 
-## Testing
+### Testing
 
 ```bash
 ./scripts/verify.sh
@@ -81,10 +123,10 @@ FLYTO_CLOUD_BACKEND=/tmp/cloud-export/src/ui/web/backend PYTHONPATH=<core>/src \
 
 Install the pre-push gate once per clone with `./scripts/install-hooks.sh`.
 
-## Development
+### Development
 
 See `CONTRIBUTING.md` and `AGENTS.md`.
 
-## License
+### License
 
 Flyto2 Source Available License 1.1 (`LICENSE`).
