@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .perception import MOUNTED_CAMERA
-from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, SimulatedArm, SimulationError, parse_fault
+from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, OneArm, SimulatedArm, SimulationError, parse_fault
 from .urdf_model import matrix_quaternion, rpy_matrix
 
 #: The robot type an arm config names to be served by MuJoCo.
@@ -298,13 +298,13 @@ def build_mjcf(config: Any) -> str:
 
 
 class GLThread:
-    """The one thread that makes, uses and closes this world's renderers.
+    """The one thread that makes, uses and frees every GL context and drawing of the process's worlds.
 
     A GL context belongs to the thread that made it current. Callers render
     from whatever thread they run on -- the execution host's worker threads,
-    the live view's request threads -- so the renderers live here and every
+    the live view's request threads -- so the contexts live here and every
     caller hands its frame to this thread and waits for it. Started on the
-    first frame; a world that never renders starts none.
+    first frame; a process that never renders starts none.
     """
 
     def __init__(self, name: str) -> None:
@@ -323,6 +323,8 @@ class GLThread:
                 answer["value"] = work()
             except BaseException as error:  # raised again on the caller's thread
                 answer["error"] = error
+            # The thread outlives every world: holding the last job's work would keep its world alive.
+            job = work = answer = None
             done.set()
 
     def call(self, work: Callable[[], Any]) -> Any:
@@ -349,7 +351,75 @@ class GLThread:
             thread.join()
 
 
-class MujocoWorld:
+#: The process's one GL thread (:class:`GLThread`): every world's frames are drawn on it.
+GL = GLThread("flyto-mujoco-gl")
+#: The process's GL contexts, one per frame size, made on :data:`GL` on first use and kept for the life of
+#: the process. The platform's GL keeps memory for every context ever made, even after it is freed (about
+#: 0.2 MB each, measured), so a world replaced per episode must not make its own; it draws into these.
+_CONTEXTS: dict[tuple[int, int], Any] = {}
+
+
+def _context(width: int, height: int) -> Any:
+    """On :data:`GL`: this frame size's context, made current."""
+    context = _CONTEXTS.get((width, height))
+    if context is None:
+        context = _CONTEXTS[(width, height)] = importlib.import_module("mujoco.gl_context").GLContext(width, height)
+    context.make_current()
+    return context
+
+
+class FrameDrawing:
+    """One world's drawing at one frame size, in the process's context of that size (on :data:`GL` only).
+
+    What is the world's own -- its scene and its model's GL resources (meshes,
+    textures, the offscreen framebuffer) -- is made here and freed by
+    :meth:`close`; the context itself is the process's.
+    """
+
+    def __init__(self, mj: Any, model: Any, width: int, height: int) -> None:
+        """Make the scene and the model's GL resources in this size's context."""
+        if width > model.vis.global_.offwidth or height > model.vis.global_.offheight:
+            raise SimulationError(f"a {width}x{height} frame is larger than the model's offscreen framebuffer")
+        self.mj, self.model, self.width, self.height = mj, model, width, height
+        _context(width, height)
+        self.scene = mj.MjvScene(model=model, maxgeom=10000)
+        self.option = mj.MjvOption()
+        self.rect = mj.MjrRect(0, 0, width, height)
+        self.gl = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
+
+    def _camera(self, camera: Any) -> Any:
+        if isinstance(camera, self.mj.MjvCamera):
+            return camera
+        named = self.mj.MjvCamera()
+        named.type = self.mj.mjtCamera.mjCAMERA_FIXED
+        named.fixedcamid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_CAMERA.value, str(camera))
+        if named.fixedcamid < 0:
+            raise SimulationError(f"the model has no camera {camera!r}")
+        return named
+
+    def draw(self, data: Any, camera: Any) -> Any:
+        """The scene as ``data`` has it, from ``camera`` (a name or a free camera): ``height x width x 3`` uint8."""
+        mj = self.mj
+        _context(self.width, self.height)
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN.value, self.gl)
+        mj.mjv_updateScene(self.model, data, self.option, None, self._camera(camera), mj.mjtCatBit.mjCAT_ALL.value,
+                           self.scene)
+        mj.mjr_render(self.rect, self.scene, self.gl)
+        pixels = _numpy().empty((self.height, self.width, 3), dtype="uint8")
+        mj.mjr_readPixels(pixels, None, self.rect, self.gl)
+        return pixels[::-1].copy()  # GL's first row is the bottom one
+
+    def close(self) -> None:
+        """Free the model's GL resources, in the context they were made in."""
+        _context(self.width, self.height)
+        self.gl.free()
+
+
+def _numpy() -> Any:
+    return importlib.import_module("numpy")
+
+
+class MujocoWorld(OneArm):
     """The arm config's world on MuJoCo; exposes what ``simulation.SimulatedArm`` drives."""
 
     def __init__(self, config: Any, *, clock: Callable[[], float] | None = None,
@@ -404,11 +474,9 @@ class MujocoWorld:
         self.started_at = self.clock()
         self._stepped_at = self.started_at
         self._read()
-        # Renderers by frame size, made, used and closed on the GL thread only.
-        self._gl = GLThread(f"flyto-mujoco-gl-{config.resource_id}")
-        self._renderers: dict[tuple[int, int], Any] = {}
+        # This world's drawings by frame size, made, used and freed on the process's GL thread only.
+        self._drawings: dict[tuple[int, int], FrameDrawing] = {}
         self._closed = False
-        self.robot = SimulatedArm(self)
 
     # -- units ---------------------------------------------------------------------------
 
@@ -543,22 +611,20 @@ class MujocoWorld:
 
     def render(self, width: int, height: int, camera: Any = "overhead") -> Any:
         """One RGB frame (``height x width x 3`` uint8) from a named camera (the overhead one by default) or a
-        free one (:meth:`free_camera`), drawn on the world's GL thread whichever thread asks."""
+        free one (:meth:`free_camera`), drawn on the process's GL thread whichever thread asks."""
         self.step()
-        return self._gl.call(lambda: self._draw(width, height, camera))
+        return GL.call(lambda: self._draw(width, height, camera))
 
     def _draw(self, width: int, height: int, camera: Any) -> Any:
-        """On the GL thread: this size's renderer, the scene as it is now, one frame."""
+        """On the GL thread: this size's drawing, the scene as it is now, one frame."""
         if self._closed:
-            # A renderer made now would never be closed, and its finalizer would free
-            # the GL context on whichever thread collected it.
+            # A drawing made now would never be freed.
             raise SimulationError("this simulated world was closed; it draws no more frames")
-        renderer = self._renderers.get((width, height))
-        if renderer is None:
-            renderer = self._renderers[(width, height)] = self.mj.Renderer(self.model, height, width)
+        drawing = self._drawings.get((width, height))
+        if drawing is None:
+            drawing = self._drawings[(width, height)] = FrameDrawing(self.mj, self.model, width, height)
         with self.lock:
-            renderer.update_scene(self.data, camera=camera)
-            return renderer.render().copy()
+            return drawing.draw(self.data, camera)
 
     def free_camera(self, view: Mapping[str, float]) -> Any:
         """A free scene camera looking at ``lookat`` from ``azimuth`` / ``elevation`` (degrees), ``distance`` away."""
@@ -581,15 +647,14 @@ class MujocoWorld:
             viewer.sync()
 
     def close(self) -> None:
-        """Release every renderer's GL context, on the thread that made them, and end that thread."""
+        """Free this world's drawings on the GL thread; the process's contexts and thread stay for the next."""
         def release() -> None:
             self._closed = True
-            renderers, self._renderers = list(self._renderers.values()), {}
-            for renderer in renderers:
-                renderer.close()
+            drawings, self._drawings = list(self._drawings.values()), {}
+            for drawing in drawings:
+                drawing.close()
 
-        self._gl.call(release)
-        self._gl.stop()
+        GL.call(release)
 
 
 # -- one world per simulated port in this process -------------------------------------------------
@@ -632,5 +697,5 @@ def mujoco_robot(config: Any) -> SimulatedArm:
     return world_for(config).robot
 
 
-__all__ = ["COLOURS", "MUJOCO_ROBOT_TYPE", "GLThread", "MujocoWorld", "build_mjcf", "install_world", "mujoco_robot",
-           "reset_worlds", "world_for"]
+__all__ = ["COLOURS", "GL", "MUJOCO_ROBOT_TYPE", "FrameDrawing", "GLThread", "MujocoWorld", "build_mjcf",
+           "install_world", "mujoco_robot", "reset_worlds", "world_for"]

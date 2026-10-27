@@ -1599,7 +1599,10 @@ class RenderedCamera:
         self.rng: random.Random = world.camera_rng
         self.table_z = table_z
         self.chain = chain
-        self.timings: list[dict[str, float]] = []
+        # Every frame's render and detection time, for a measurement that asks for them by setting a list
+        # here (``scripts/benchmark_sim.py``); None keeps nothing. The host keeps this camera for its whole
+        # life, and each capture already carries its own timing.
+        self.timings: list[dict[str, float]] | None = None
         if settings.mount is not None:
             return
         cx, cy, _ = settings.position
@@ -1611,7 +1614,6 @@ class RenderedCamera:
                                            tuple(image), tuple(table), settings.classes, settings.xy_m,
                                            settings.yaw_rad, camera_height_m=settings.position[2] - table_z,
                                            nadir=(cx, cy))
-        self.timings: list[dict[str, float]] = []
 
     def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
         """Render one frame and locate the colour blobs in it."""
@@ -1627,7 +1629,8 @@ class RenderedCamera:
         done = time.perf_counter()
         timing = {"render_ms": round((rendered - started) * 1000.0, 3),
                   "detect_ms": round((done - rendered) * 1000.0, 3)}
-        self.timings.append(timing)
+        if self.timings is not None:
+            self.timings.append(timing)
         camera = {"camera_id": settings.id, "kind": "rendered", "width": frame.width, "height": frame.height,
                   "latency_ms": round(latency, 3), **timing, "height_observed": True,
                   "sim_time_s": round(self.world.elapsed(), 4),
@@ -1662,7 +1665,8 @@ class RenderedCamera:
         done = time.perf_counter()
         timing = {"render_ms": round((rendered - started) * 1000.0, 3),
                   "detect_ms": round((done - rendered) * 1000.0, 3)}
-        self.timings.append(timing)
+        if self.timings is not None:
+            self.timings.append(timing)
         camera = {"camera_id": settings.id, "kind": "rendered", "mount": mount.link, "width": frame.width,
                   "height": frame.height, "latency_ms": round(latency, 3), **timing, "height_observed": True,
                   "sim_time_s": round(self.world.elapsed(), 4),

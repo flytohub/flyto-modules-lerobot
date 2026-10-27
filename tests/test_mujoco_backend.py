@@ -160,7 +160,7 @@ def test_every_gl_call_runs_on_one_thread_whichever_thread_asks(data, monkeypatc
     """A GL context belongs to the thread that made it. The execution host runs each call on a
     worker thread of its own choosing (and the live view on its request threads), so a renderer
     made on one thread and used, resized or closed on another crashed the host (SIGSEGV in
-    ``mjr_freeContext``, seen end to end). Every renderer is made, used and closed on the world's
+    ``mjr_freeContext``, seen end to end). Every drawing is made, used and freed on the process's
     one GL thread."""
     import threading
 
@@ -169,21 +169,18 @@ def test_every_gl_call_runs_on_one_thread_whichever_thread_asks(data, monkeypatc
     used: list[tuple[str, int]] = []
 
     class Recording:
-        def __init__(self, _model, height, width):
+        def __init__(self, _mj, _model, width, height):
             used.append(("make", threading.get_ident()))
             self.height, self.width = height, width
 
-        def update_scene(self, _data, camera=None):
-            used.append(("scene", threading.get_ident()))
-
-        def render(self):
-            used.append(("render", threading.get_ident()))
+        def draw(self, _data, _camera):
+            used.append(("draw", threading.get_ident()))
             return numpy.zeros((self.height, self.width, 3), dtype=numpy.uint8)
 
         def close(self):
             used.append(("close", threading.get_ident()))
 
-    monkeypatch.setattr(mujoco, "Renderer", Recording)
+    monkeypatch.setattr(mujoco_sim, "FrameDrawing", Recording)
     world = mujoco_sim.MujocoWorld(parse_arm_config(data))
     sizes = [(48, 36), (64, 48), (48, 36)]
     frames = []
@@ -193,7 +190,7 @@ def test_every_gl_call_runs_on_one_thread_whichever_thread_asks(data, monkeypatc
         worker.join()
     world.close()
     assert sorted(frames) == sorted((h, w, 3) for w, h in sizes)
-    assert {kind for kind, _thread in used} == {"make", "scene", "render", "close"}
+    assert {kind for kind, _thread in used} == {"make", "draw", "close"}
     assert len({thread for _kind, thread in used}) == 1
     assert threading.get_ident() not in {thread for _kind, thread in used}
 
@@ -202,29 +199,96 @@ def test_a_closed_world_draws_nothing_and_makes_no_gl_context(data, monkeypatch)
     """A frame asked of a world after it was closed (a call still finishing while the world is replaced)
     made a renderer on a GL thread started again for it. Nothing closed that renderer, and when the world
     was collected its finalizer freed the GL context on whatever thread collected it: SIGSEGV in
-    mjr_freeContext, seen end to end. A closed world refuses the frame and makes no context."""
+    mjr_freeContext, seen end to end. A closed world refuses the frame and makes no drawing."""
     import numpy
 
     made: list[int] = []
 
     class Recording:
-        def __init__(self, _model, height, width):
+        def __init__(self, _mj, _model, width, height):
             made.append(1)
             self.height, self.width = height, width
 
-        def update_scene(self, _data, camera=None):
-            pass
-
-        def render(self):
+        def draw(self, _data, _camera):
             return numpy.zeros((self.height, self.width, 3), dtype=numpy.uint8)
 
         def close(self):
             pass
 
-    monkeypatch.setattr(mujoco, "Renderer", Recording)
+    monkeypatch.setattr(mujoco_sim, "FrameDrawing", Recording)
     world = mujoco_sim.MujocoWorld(parse_arm_config(data))
     world.render(48, 36)
     world.close()
     with pytest.raises(simulation.SimulationError, match="closed"):
         world.render(48, 36)
     assert made == [1]
+
+
+def test_a_replaced_world_is_freed_at_once_not_left_to_the_cycle_collector(data):
+    """A host that replaces its world must give back the MuJoCo model, data and renderers when it does.
+
+    Their memory is native: the cyclic collector never runs for it, so a world
+    kept alive by a reference cycle (or by its session, camera or captures)
+    piles up one model per episode until a full collection happens to run.
+    """
+    import gc
+    import weakref
+
+    gc.collect()
+    gc.disable()
+    try:
+        rig = Rig(data)
+        assert rig.call("perception.locate_objects").outcome == OUTCOME_COMPLETED
+        assert rig.call("manipulation.pick", {"object_id": "red-1"}).outcome == OUTCOME_COMPLETED
+        assert rig.call("manipulation.place", {"container_id": "blue-1"}).outcome == OUTCOME_COMPLETED
+        world, model = weakref.ref(rig.world), weakref.ref(rig.world.model)
+        mujoco_sim.reset_worlds()
+        del rig
+        assert world() is None and model() is None
+    finally:
+        gc.enable()
+
+
+def test_a_long_lived_camera_keeps_no_history_of_its_frames(data):
+    """The host keeps one camera per arm for its whole life: what it records per frame must not pile up.
+
+    Each frame's render and detection time travel on the capture itself; a
+    per-frame list is kept only when a measurement asks for one.
+    """
+    rig = Rig(data)
+    for _ in range(3):
+        located = rig.call("perception.locate_objects")
+        assert located.outcome == OUTCOME_COMPLETED
+        assert {"render_ms", "detect_ms"} <= set(located.evidence["capture"])
+    assert rig.adapter.session.camera.timings is None
+
+
+def test_replacing_a_world_makes_no_new_gl_context(data, monkeypatch):
+    """The platform's GL keeps memory for every context ever made (about 0.2 MB each, measured), so a
+    host that replaced its world -- a new GL context per world -- grew every episode. The process makes
+    one context per frame size and every world draws into it; a world owns only its own drawing state."""
+    import importlib
+
+    made: list[tuple[int, int]] = []
+    for name in ("mujoco.gl_context", "mujoco.rendering.classic.gl_context"):
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        real = getattr(module, "GLContext", None)
+        if real is None:
+            continue
+
+        def counting(width, height, _real=real):
+            made.append((width, height))
+            return _real(width, height)
+
+        monkeypatch.setattr(module, "GLContext", counting)
+    frames = []
+    for _ in range(3):
+        world = mujoco_sim.MujocoWorld(parse_arm_config(data))
+        frames.append(world.render(48, 36))
+        world.close()
+    assert len(made) <= 1, made
+    assert all(frame.shape == (36, 48, 3) and frame.any() for frame in frames)
+    assert (frames[0] == frames[1]).all(), "the same scene draws the same frame in a reused context"

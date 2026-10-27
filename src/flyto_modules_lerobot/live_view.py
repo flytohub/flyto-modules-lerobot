@@ -18,7 +18,7 @@ nothing more -- no second streaming system:
 * :class:`LiveView` -- a loopback HTTP server answering each poll with one
   freshly rendered frame, JPEG-encoded with ``SIMULATION`` drawn into the
   picture and ``"source": "simulation"`` in the answer. Its frames are drawn
-  on the world's one GL thread (``mujoco_sim.GLThread``), as every other
+  on the process's one GL thread (``mujoco_sim.GL``), as every other
   frame is, and it only reads the world.
 
 Off unless ``FLYTO_LEROBOT_LIVE_PORT`` is set and the arm config's camera is

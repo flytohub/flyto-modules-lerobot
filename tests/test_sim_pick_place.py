@@ -230,3 +230,26 @@ def test_cores_judge_proves_a_pick_and_place_and_refuses_a_grasp_on_nothing(sim)
     empty, phases = observations_around(sim, GRASP.capability_id, {})
     assert empty.outcome == OUTCOME_FAILED
     assert not all(core.judge(spec, {}, phases)["usable"] for spec in GRASP.contract["evidence"])
+
+
+def test_a_forgotten_in_process_world_is_freed_at_once(sim_data):
+    """Dropping the in-process world frees it by reference counting alone (no cycle through its arm)."""
+    import gc
+    import weakref
+
+    from flyto_modules_lerobot import simulation
+    from flyto_modules_lerobot.arm_config import parse_arm_config
+
+    config = parse_arm_config(sim_data)
+    gc.collect()
+    gc.disable()
+    try:
+        world = simulation.SimWorld(config)
+        arm = world.robot
+        arm.connect()
+        assert world.robot is arm, "one arm per world while it is in use"
+        ref = weakref.ref(world)
+        del world, arm
+        assert ref() is None
+    finally:
+        gc.enable()

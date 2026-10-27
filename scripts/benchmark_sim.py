@@ -211,6 +211,9 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
     for index in range(episodes):
         episode = Episode(data, base_seed + index, backend)
         inject(episode)
+        camera = episode.adapter._camera()
+        if hasattr(camera, "timings"):
+            camera.timings = []  # this measurement asks for every frame's render and detection time
         truly = backend["where"](episode.world)
         pick = episode.call("manipulation.pick", {"object_id": backend["block"]})
         seen = (pick.evidence.get("perception_before") or {}).get("pose")
