@@ -36,6 +36,13 @@ through the host's existing `live_channels` (`live_view.py`), and two
 developer scripts (`scripts/benchmark_sim.py`, `scripts/watch_mujoco.py`).
 Everything a simulator produces says `source: "simulation"`. Still no CLI,
 planner, recording, training, dataset or teleoperation tool.
+**Owner addition 2026-10-28 (latency, `docs/project/DECISIONS.md`).** Every
+motion is one time-optimal joint trajectory within each servo's speed and
+acceleration (`trajectory.py`, arithmetic over the arm config; it plans
+*how* a move is timed, not *what* to do -- not a task planner), ending on a
+convergence criterion; the verifying look moves away from the table only as
+far as an occlusion model and the look's own frame say it must. Stop
+latency, verification honesty and limits never give way to speed.
 Commissioning an arm is done through the capabilities, not beside them (owner
 2026-10-23): the motor check runs on every connect, `manipulation.mark_pose`
 teaches a pose, `manipulation.move_joints` jogs, and every hold-stop of a

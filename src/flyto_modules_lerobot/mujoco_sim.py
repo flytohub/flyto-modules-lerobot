@@ -13,8 +13,9 @@ injection; this one adds real contact physics and a rendered camera:
   is built from that file (:func:`build_mjcf`): every link with the
   description's masses, inertias and meshes (drawn, never colliding), every
   mapped joint a hinge with the config's limits, driven by a position servo
-  whose torque is the joint's servo class's stall torque and whose goal moves
-  no faster than the class's no-load speed, and the jaw a hinge on the
+  whose torque is the joint's servo class's stall torque, whose goal moves
+  no faster than the class's no-load speed, and whose damping is the class's
+  speed-torque line (``stall / no_load``), and the jaw a hinge on the
   description's moving-jaw joint. What touches an object are the boxes the
   config declares on the jaws (``simulation.collision``). Without a
   description, a written-out chain is drawn as capsules with two slide
@@ -144,6 +145,21 @@ def _inertial(link: Any, override: float | None) -> str:
     return f'<inertial pos="{_v(inertial.origin)}" mass="{inertial.mass:.6g}" fullinertia="{_v(full)}"/>'
 
 
+def _damping(config: Any, motor: str) -> float:
+    """A joint's damping: its servo's speed-torque line (stall torque over no-load speed), else the config's.
+
+    A DC servo's torque falls linearly from its stall torque at rest to zero
+    at its no-load speed; as damping that is ``stall / no_load``, so the
+    simulated servo reaches its rated no-load speed unloaded and slows under
+    load. A torque limit (the gripper's) caps the drive, so the limited servo
+    also turns proportionally slower, as a PWM-limited servo does.
+    """
+    servo = config.servos.get(motor)
+    if servo is None:
+        return float(config.simulation.physics["joint_damping"])
+    return servo.stall_torque_nm / servo.no_load_speed_rad_s
+
+
 def _model_arm(config: Any) -> tuple[str, str, str]:
     """The arm built from its robot description: (assets, arm body, actuators)."""
     chain, sim = config.kinematics, config.simulation
@@ -189,11 +205,12 @@ def _model_arm(config: Any) -> tuple[str, str, str]:
                 chain_link = mapped[joint.name]
                 low, high = _joint_range(chain_link, limits[chain_link.joint], chain.to_radians)
                 hinge = (f'<joint name="{chain_link.joint}" type="hinge" axis="{_v(joint.axis)}" '
-                         f'range="{low:.6g} {high:.6g}" damping="{physics["joint_damping"]}" armature="0.01"/>')
+                         f'range="{low:.6g} {high:.6g}" damping="{_damping(config, chain_link.joint):.6g}" '
+                         'armature="0.01"/>')
             elif joint.name == jaw.joint:
                 low, high = _jaw_range(config, jaw)
                 hinge = (f'<joint name="{_JAW}" type="hinge" axis="{_v(joint.axis)}" range="{low:.6g} {high:.6g}" '
-                         f'damping="{physics["joint_damping"]}" armature="0.002"/>')
+                         f'damping="{_damping(config, config.gripper.joint):.6g}" armature="0.002"/>')
             parts.append(f'<body name="{joint.child}" {pose}>{hinge}{body(joint.child)}</body>')
         return "".join(parts)
 

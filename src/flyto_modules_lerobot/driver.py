@@ -179,8 +179,10 @@ class ArmSession:
         # The last goal this session commanded per motor, and the gripper effort of the last reading.
         self.goals: dict[str, float] = {}
         self.effort: float | None = None
-        # The camera of this arm (``perception.build_camera``), built when first used.
+        # The camera of this arm (``perception.build_camera``), built when first used, and its last frame
+        # with when it was taken (the adapter's clock).
         self.camera: Any = None
+        self.last_capture: tuple[float, Any] | None = None
         # The id of the object a completed pick left in the gripper (None: unknown or nothing).
         self.held_object: str | None = None
         # Calls in flight on this arm, from every adapter: a stop interrupts them all.

@@ -270,6 +270,11 @@ class KinematicChain:
         """The tool pose for these joint positions (the config's unit)."""
         return self._frames(joints)[1]
 
+    def points(self, joints: Mapping[str, float]) -> list[Vector]:
+        """The arm as a polyline: its base, each joint's position, and the tool point (table frame, metres)."""
+        frames, tool = self._frames(joints)
+        return [self.base_position, *(position for position, _axis in frames), tool.position]
+
     def _residual(self, pose: ToolPose, target: Vector, yaw: float | None) -> list[float]:
         residual = [*_sub(target, pose.position), *_sub(_DOWN, pose.pointing)]
         if yaw is not None:

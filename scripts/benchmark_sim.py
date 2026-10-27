@@ -20,8 +20,11 @@ then ``manipulation.place`` through the real adapter, and the script prints:
   simulator's ground truth disagrees (a pick with nothing held, a place with
   the block outside the bin). It must be zero;
 * P50 / P95 / P99 of every phase (perceive, plan, open, approach, descend,
-  grasp, verify_grip, lift, verify; and the place's), in milliseconds;
-* for the cancel scenario, stop latency (cancel -> still) and overshoot.
+  grasp, verify_grip, lift, clear_view, verify; and the place's), in
+  milliseconds; ``clear_view_again`` / ``verify_again`` count the looks taken
+  early that had to be taken again from the observe pose;
+* for the cancel scenario, stop latency (cancel -> hold command sent, and
+  cancel -> still) and overshoot.
 
 Usage: python scripts/benchmark_sim.py [--backend sim|mujoco] [--episodes 50] [--seed 1000] [--config PATH]
 """
@@ -128,7 +131,7 @@ def _grasp_slip(episode: Episode) -> None:
 
 
 def _container_moved(episode: Episode) -> None:
-    # Moved while the place is on its way (the pick takes about 1.6 s of simulated time).
+    # Moved around the end of the pick or the start of the place (simulated time).
     episode.world.inject({"kind": "container_moved", "object_id": BIN, "x": 0.05, "y": 0.25,
                           "at_s": episode.rng.uniform(1.8, 2.6)})
 
@@ -174,6 +177,7 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
     phases: dict[str, list[float]] = defaultdict(list)
     plan_wall: list[float] = []
     stops: list[float] = []
+    holds: list[float] = []
     overshoot: list[float] = []
     frames: dict[str, list[float]] = defaultdict(list)
     false_completions = 0
@@ -189,6 +193,8 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
         if pick.evidence.get("stop_measured"):
             stops.append(float(pick.evidence["stop_to_still_ms"]))
             overshoot.append(float(pick.evidence["overshoot"]))
+        if pick.evidence.get("stop_to_hold_ms") is not None:
+            holds.append(float(pick.evidence["stop_to_hold_ms"]))
         for row in pick.evidence.get("phases", ()):
             phases[f"pick.{row['phase']}"].append(row["ms"])
         if "plan" in pick.evidence:
@@ -212,7 +218,7 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
             phases["episode.total"].append(pick.evidence["latency_ms"]["total"] + place.evidence["latency_ms"]["total"])
     return {"name": name, "episodes": episodes, "successes": successes, "false_completions": false_completions,
             "outcomes": dict(sorted(outcomes.items())), "phases": dict(phases), "plan_wall": plan_wall,
-            "stops": stops, "overshoot": overshoot, "frames": dict(frames)}
+            "stops": stops, "holds": holds, "overshoot": overshoot, "frames": dict(frames)}
 
 
 def _row(label: str, values: list[float]) -> str:
@@ -230,6 +236,8 @@ def report(result: dict) -> str:
         lines.append(_row("plan wall (real ms)", result["plan_wall"]))
     for key, values in result["frames"].items():
         lines.append(_row(f"frame {key} (real)", values))
+    if result["holds"]:
+        lines.append(_row("stop: cancel -> hold sent", result["holds"]))
     if result["stops"]:
         lines.append(_row("stop: cancel -> still", result["stops"]))
         lines.append(_row("stop: overshoot (deg)", result["overshoot"]))

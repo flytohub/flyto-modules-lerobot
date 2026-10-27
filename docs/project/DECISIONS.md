@@ -416,3 +416,44 @@ lands the fixed jaw on the block. A blob whose moments are nearly isotropic
 now takes the heading of its tightest bounding rectangle (outline points,
 1-degree steps over a quarter turn); an elongated blob keeps its moments'
 long axis.
+
+## 2026-10-28 -- Only the servos' physics may take time (owner)
+
+Owner directive: compress every latency the pack controls; only the real
+physics of the STS3095 / STS3215 servos may remain. Stop latency,
+verification honesty (zero false completions) and limits never give way.
+A MuJoCo pick-and-place took 12.5 s (P50); it now takes 3.5 s, and the
+in-process one 8.3 s -> 3.2 s, with zero false completions in every
+benchmark scenario on both backends. Each latency was traced to its cause,
+and the cause was changed, not the waits:
+
+| Latency | Cause | Fix |
+|---|---|---|
+| Stop-and-go motion | The move model was a sequence of independent blocking moves: each straight piece cut into equal steps, each step sent, slept on and read back, every piece brought to rest before the next. | `trajectory.py`: one time-optimal joint trajectory per continuous motion (approach+descend, lift/retreat+clear_view), every joint within its own servo's speed and acceleration, all joints in step, via points on a straight path passed at speed, corners no faster than each joint can turn in one period; streamed one set point per period, nothing waits for a set point. |
+| Uniform pacing | Pacing was one `max_step / step_interval_s` for every joint, so the fastest joint set the pace of all and a config could not use a servo's rating. | Each joint is paced by its own servo class (`servo_speed`, `servo_acceleration`); `max_step` per period stays as a cap. The refusal "pacing faster than a servo" is gone because pacing is per servo now. |
+| Settling | There was no convergence criterion: a move accepted the first reading inside the tolerance (moving or not) and otherwise polled until a fixed timeout. | `_converge`: arrived = within tolerance *and* still (no more than `still_drift` between readings one poll apart); `settle_timeout_s` only bounds a servo that never converges. |
+| clear_view moved every time, the whole way | Occlusion was not modelled, so the arm always drove to the observe pose. | `perception.arm_hides`: the arm's links (capsules of `perception.arm_clearance_m` round the chain's polyline) cast along the camera's rays onto every object the call first saw. After the lift/retreat, the motion brakes along its path at the first reading the model calls clear (or does not move on at all). The look's own frame must show every spot free of the arm (`Capture.covered`: grey pixels no brighter than `camera.arm_max_value`), and give a settled answer, or the arm goes on to the observe pose and looks again. Never a skipped verify. |
+| Two 178 deg wrist turns per pick/place | The observe pose was the folded `ready` pose with the gripper pointing up, so every approach and every look turned the wrist over. | An `observe` pose holding the gripper down, folded back out of the camera's view (simulation configs; on an arm it is taught with `mark_pose`). |
+| Gripper close / open ~1 s each in MuJoCo | The jaw was stepped like a joint, then the hold window waited after a separate "still" check; and MuJoCo's jaw damping (an estimate, 2 N.m.s/rad) capped it at 0.7 rad/s, a third of what its servo does. | The jaws close on a trajectory at the gripper servo's speed; when they stop short of the set point (contact) the closed value is sent at once, so the squeeze is the servo's torque limit. The grip is confirmed on `hold_samples` readings from the first still one. MuJoCo joint damping is each servo's speed-torque line, `stall / no_load` (below). |
+| Slow MuJoCo wrist | `joint_damping` 2 for every joint made the STS3215 wrist top out at stall/damping = 1.47 rad/s, not its rated 4.72. | Damping per joint = its servo's `stall_torque / no_load_speed` (the DC motor's line): the servo reaches its rated no-load speed unloaded and slows under load; the 50 % torque-limited jaw turns at half speed, as a PWM-limited servo does. `joint_damping` remains for joints without a servo class. |
+| In-process world ignored the servos | `SimWorld` moved every joint at one `joint_speed`. | Each motor moves at its servo class's no-load speed (`joint_speed` / `gripper_speed` only without servo classes). |
+| A slip during the look could complete a pick | The pick read the gripper before its look, so a grip lost while the camera looked was missed when the camera could not see the block (under the arm). Exposed once the in-process camera modelled the whole arm. | The gripper is read after the look. |
+| Detection 13-17 ms per frame | The square-blob heading was a 90-step search, and every labelled pixel went through a Python dict and flood fill; hue was computed for every pixel. | Closed-form smallest rectangle (convex hull, one side on a hull edge); blobs from row runs (numpy run-length coding, union-find on runs, moments and hull from runs in closed form); hue only for pixels saturated and bright enough for some class. Same blobs as before on rendered frames (checked); detect 12.7 -> 3.4 ms P50. |
+| A perceive waited for a new frame | Every look took a new frame. | A look that only plans (the perceive of a pick or place) may reuse a frame younger than `perception.reuse_within_s` that shows what it needs; a verifying look and `locate_objects` always take a new frame. |
+
+What stays physics: the servos' rated speed and (estimated) acceleration,
+the jaws' torque-limited speed, the camera's latency, and in MuJoCo the
+servo tracking and contact dynamics.
+
+Estimated, not sourced: `max_acceleration_rad_s2` 38.97 for both classes is
+LeRobot's `Acceleration` register value 254 (written by `configure_motors`
+at lerobot_alohamini `ec65318`) at 100 steps/s^2 per unit -- the unit is the
+Feetech STS register convention, not a datasheet. `arm_clearance_m` 0.05 m
+and `arm_max_value` 0.3 were chosen on MuJoCo renders of the official
+meshes (the frame check is what decides; the model only decides when to
+stop moving). The `observe` pose was chosen in simulation.
+
+Hardware: the same adapter code drives a real arm, and `examples/am-arm200.json`
+now streams at 20 ms with `max_step` 6 per period; none of it has run on an
+arm. Measure `stop_to_hold_ms`, `stop_to_still_ms` and `overshoot` on the arm
+before relying on the pace.

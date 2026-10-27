@@ -92,7 +92,7 @@ execution host by `FLYTO_LEROBOT_ARM_CONFIG` (`.env.example`). Start from
 | `lerobot` | `robot_module`, `robot_type`, serial `port`, calibration `id`, optional `calibration_dir`, `options` (e.g. `arm_profile`) |
 | `joints` | each body joint by LeRobot motor name, with `min` / `max` |
 | `gripper` | its motor, range, `open` and `closed` values, `tolerance` |
-| `motion` | `max_step`, `tolerance`, `settle_timeout_s`, timing |
+| `motion` | control period (`step_interval_s`), `max_step` per period, convergence (`tolerance`, `still_drift`), `settle_timeout_s` bound |
 | `poses` | named joint targets; `taught: true` only once taught on this arm |
 | `servos` | optional: each motor's servo class (stall / rated torque, no-load speed, and where each number came from) |
 | `kinematics` | optional: the chain for Cartesian pick and place, read from a robot description (`model`, e.g. the packaged official AM-ARM200 URDF) with each joint's calibration and whether it was `verified_on_hardware` |
@@ -140,8 +140,9 @@ this order. There is no separate tool.
    gripper. Compare them with the limits in your arm file.
 3. **Jog with `manipulation.move_joints`.** Give one joint a target a few
    degrees from where it reads (for example `{"elbow_flex": 12.0}`). The move
-   is checked against the limits and sent in steps of at most
-   `motion.max_step`; repeat in small steps toward the pose you want.
+   is checked against the limits and streamed as a trajectory within each
+   servo's speed, one set point per control period, never more than
+   `motion.max_step` apart; repeat in small steps toward the pose you want.
 4. **Teach with `manipulation.mark_pose`.** With the arm where the pose
    should be, call it with the pose's name (`{"pose": "ready"}`). It moves
    nothing, records the body joints as `taught: true` in the arm file, and

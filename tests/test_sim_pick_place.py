@@ -61,7 +61,9 @@ def test_pick_then_place_is_verified_by_the_gripper_and_the_camera(sim):
     assert picked.outcome == OUTCOME_COMPLETED, (picked.detail, picked.evidence.get("reason_code"))
     evidence = picked.evidence
     assert evidence["object_held"] is True and evidence["grip"]["held"] is True
-    assert evidence["perception_after"]["object_lifted"] is True
+    # The held block is under the arm; the camera must see the table it was taken from, free of the arm.
+    assert evidence["perception_after"]["object_lifted"] is not False
+    assert evidence["perception_after"]["table_seen"] is True
     assert evidence["source"] == "simulation" and evidence["effect_applied"] is True
     assert [phase["phase"] for phase in evidence["phases"]] == list(PICK_PHASES)
     assert set(evidence["latency_ms"]) == {*PICK_PHASES, "total"}
@@ -90,9 +92,10 @@ def test_a_block_moved_by_a_hand_during_the_approach_is_not_picked(sim):
 
 
 @pytest.mark.parametrize(("after_held_s", "reason"), [
-    (0.1, REASON_NO_OBJECT),               # gone before the jaws settled: they closed fully
-    (0.3, "object_slipped"),               # gone during the hold window: the jaws crept on
-    (2.13, "perception_disagrees"),        # gone just before the look: the camera sees it back on the table
+    (0.0, REASON_NO_OBJECT),               # gone as the jaws touched it: they closed fully
+    (0.04, "object_slipped"),              # gone during the hold window: the jaws crept on
+    (0.3, "object_slipped"),               # gone during the lift: the gripper says so after the look
+    (0.55, "object_slipped"),              # gone while the camera looked: the gripper is read after the look
 ])
 def test_a_grasp_that_slips_is_never_completed(sim, after_held_s, reason):
     sim.world.inject({"kind": "grasp_slip", "after_held_s": after_held_s})
@@ -101,6 +104,27 @@ def test_a_grasp_that_slips_is_never_completed(sim, after_held_s, reason):
     assert result.evidence["object_held"] is False
     assert result.evidence["reason_code"] == reason
     assert sim.world.held is None
+
+
+def test_a_camera_that_still_sees_the_object_on_the_table_vetoes_the_pick(sim):
+    real = sim.adapter._look_for
+    calls = []
+
+    def look_for(*ids):
+        capture = real(*ids)
+        calls.append(capture)
+        if len(calls) == 1:
+            return capture
+        # Every later look: the block still rests where it was (the gripper closed on something else).
+        block = next(item for item in calls[0].detections if item.id == "block-red")
+        return type(capture)((*capture.detections, block), capture.observed_at, capture.source, capture.camera,
+                             capture.covered)
+
+    sim.adapter._look_for = look_for
+    result = sim.call(PICK.capability_id, {"object_id": "block-red"})
+    assert result.outcome == OUTCOME_FAILED
+    assert result.evidence["reason_code"] == "perception_disagrees"
+    assert result.evidence["object_held"] is False
 
 
 def test_a_container_moved_after_it_was_seen_leaves_the_block_outside(sim):

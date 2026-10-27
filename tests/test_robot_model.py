@@ -7,8 +7,8 @@
   explicitly; the joints' calibration against the URDF is flagged unverified
   on hardware, and a real arm with such a chain refuses Cartesian moves.
 * Each joint names its servo class (the lerobot_alohamini am-follower-6dof
-  profile: STS3095 on the three large joints), and a config that paces moves
-  faster than a servo turns is refused.
+  profile: STS3095 on the three large joints), and every joint's trajectory
+  is paced by its own servo.
 * A square blob's heading is its sides', not the noise of isotropic moments.
 """
 
@@ -26,6 +26,7 @@ from flyto_modules_lerobot.adapter_contract import OUTCOME_REFUSED, CallRequest
 from flyto_modules_lerobot.arm_config import ArmConfigError, parse_arm_config
 from flyto_modules_lerobot.capabilities import REASON_KINEMATICS_UNAVAILABLE
 from flyto_modules_lerobot.perception import ColourClass, RgbImage, find_blobs
+from flyto_modules_lerobot.trajectory import motion_limits
 from flyto_modules_lerobot.urdf_model import MODELS_DIR, load_urdf, rpy_matrix
 
 MODEL = MODELS_DIR / "am-arm200"
@@ -108,11 +109,12 @@ def test_each_joint_has_its_servo_class_from_the_follower_profile(name):
     assert all(servo.source for servo in config.servos.values())
 
 
-def test_pacing_moves_faster_than_a_servo_turns_is_refused():
+def test_each_joint_is_paced_by_its_own_servo_however_loose_max_step_is():
     data = example("am-arm200.json")
-    data["motion"].update({"max_step": 10.0, "step_interval_s": 0.02})  # 500 deg/s
-    with pytest.raises(ArmConfigError, match="faster than servo class sts3095"):
-        parse_arm_config(data)
+    data["motion"].update({"max_step": 10.0, "step_interval_s": 0.02})  # a 500 deg/s cap
+    limits = motion_limits(parse_arm_config(data))
+    assert limits.velocity["shoulder_lift"] == pytest.approx(math.degrees(3.25))  # STS3095, not the cap
+    assert limits.velocity["wrist_flex"] == pytest.approx(math.degrees(4.72))  # STS3215
 
 
 def test_a_chain_mapping_a_joint_off_the_tool_path_is_refused():
