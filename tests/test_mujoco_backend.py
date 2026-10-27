@@ -123,3 +123,45 @@ def test_the_world_is_built_from_the_official_robot_description(data):
     body = world.data.body(chain.binding.tool_link)
     expected = body.xpos + body.xmat.reshape(3, 3) @ numpy.array(data["kinematics"]["tool"]["origin"])
     assert tuple(world.tip().position) == pytest.approx(tuple(expected), abs=1e-3)
+
+
+def test_every_gl_call_runs_on_one_thread_whichever_thread_asks(data, monkeypatch):
+    """A GL context belongs to the thread that made it. The execution host runs each call on a
+    worker thread of its own choosing (and the live view on its request threads), so a renderer
+    made on one thread and used, resized or closed on another crashed the host (SIGSEGV in
+    ``mjr_freeContext``, seen end to end). Every renderer is made, used and closed on the world's
+    one GL thread."""
+    import threading
+
+    import numpy
+
+    used: list[tuple[str, int]] = []
+
+    class Recording:
+        def __init__(self, _model, height, width):
+            used.append(("make", threading.get_ident()))
+            self.height, self.width = height, width
+
+        def update_scene(self, _data, camera=None):
+            used.append(("scene", threading.get_ident()))
+
+        def render(self):
+            used.append(("render", threading.get_ident()))
+            return numpy.zeros((self.height, self.width, 3), dtype=numpy.uint8)
+
+        def close(self):
+            used.append(("close", threading.get_ident()))
+
+    monkeypatch.setattr(mujoco, "Renderer", Recording)
+    world = mujoco_sim.MujocoWorld(parse_arm_config(data))
+    sizes = [(48, 36), (64, 48), (48, 36)]
+    frames = []
+    for width, height in sizes:
+        worker = threading.Thread(target=lambda w=width, h=height: frames.append(world.render(w, h).shape))
+        worker.start()
+        worker.join()
+    world.close()
+    assert sorted(frames) == sorted((h, w, 3) for w, h in sizes)
+    assert {kind for kind, _thread in used} == {"make", "scene", "render", "close"}
+    assert len({thread for _kind, thread in used}) == 1
+    assert threading.get_ident() not in {thread for _kind, thread in used}

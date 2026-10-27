@@ -41,6 +41,7 @@ The ``mujoco`` package is the ``mujoco`` extra; nothing imports it until a
 from __future__ import annotations
 
 import importlib
+import queue
 import random
 import threading
 import time
@@ -296,6 +297,58 @@ def build_mjcf(config: Any) -> str:
     )
 
 
+class GLThread:
+    """The one thread that makes, uses and closes this world's renderers.
+
+    A GL context belongs to the thread that made it current. Callers render
+    from whatever thread they run on -- the execution host's worker threads,
+    the live view's request threads -- so the renderers live here and every
+    caller hands its frame to this thread and waits for it. Started on the
+    first frame; a world that never renders starts none.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def _serve(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            work, done, answer = job
+            try:
+                answer["value"] = work()
+            except BaseException as error:  # raised again on the caller's thread
+                answer["error"] = error
+            done.set()
+
+    def call(self, work: Callable[[], Any]) -> Any:
+        """Run ``work`` on the GL thread and return what it returned (or raise what it raised)."""
+        if self._thread is not None and threading.current_thread() is self._thread:
+            return work()
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._serve, name=self.name, daemon=True)
+                self._thread.start()
+        done, answer = threading.Event(), {}
+        self._jobs.put((work, done, answer))
+        done.wait()
+        if "error" in answer:
+            raise answer["error"]
+        return answer.get("value")
+
+    def stop(self) -> None:
+        """End the thread once the work already handed to it is done."""
+        with self._start_lock:
+            thread, self._thread = self._thread, None
+        if thread is not None:
+            self._jobs.put(None)
+            thread.join()
+
+
 class MujocoWorld:
     """The arm config's world on MuJoCo; exposes what ``simulation.SimulatedArm`` drives."""
 
@@ -351,7 +404,9 @@ class MujocoWorld:
         self.started_at = self.clock()
         self._stepped_at = self.started_at
         self._read()
-        self._renderer: Any = None
+        # Renderers by frame size, made, used and closed on the GL thread only.
+        self._gl = GLThread(f"flyto-mujoco-gl-{config.resource_id}")
+        self._renderers: dict[tuple[int, int], Any] = {}
         self.robot = SimulatedArm(self)
 
     # -- units ---------------------------------------------------------------------------
@@ -485,20 +540,17 @@ class MujocoWorld:
 
     # -- the rendered camera ------------------------------------------------------------------
 
-    def render(self, width: int, height: int, camera: str = "overhead") -> Any:
-        """One RGB frame from a named camera, the overhead one by default (``height x width x 3`` uint8)."""
+    def render(self, width: int, height: int, camera: Any = "overhead") -> Any:
+        """One RGB frame (``height x width x 3`` uint8) from a named camera (the overhead one by default) or a
+        free one (:meth:`free_camera`), drawn on the world's GL thread whichever thread asks."""
         self.step()
-        with self.lock:
-            if self._renderer is None or (self._renderer.width, self._renderer.height) != (width, height):
-                if self._renderer is not None:
-                    self._renderer.close()
-                self._renderer = self.mj.Renderer(self.model, height, width)
-            self._renderer.update_scene(self.data, camera=camera)
-            return self._renderer.render().copy()
+        return self._gl.call(lambda: self._draw(width, height, camera))
 
-    def render_with(self, renderer: Any, camera: Any) -> Any:
-        """One RGB frame through a caller's renderer (another thread's GL context): a named camera or a free one."""
-        self.step()
+    def _draw(self, width: int, height: int, camera: Any) -> Any:
+        """On the GL thread: this size's renderer, the scene as it is now, one frame."""
+        renderer = self._renderers.get((width, height))
+        if renderer is None:
+            renderer = self._renderers[(width, height)] = self.mj.Renderer(self.model, height, width)
         with self.lock:
             renderer.update_scene(self.data, camera=camera)
             return renderer.render().copy()
@@ -524,10 +576,15 @@ class MujocoWorld:
             viewer.sync()
 
     def close(self) -> None:
-        """Release the renderer's GL context."""
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+        """Release every renderer's GL context, on the thread that made them, and end that thread."""
+        def release() -> None:
+            renderers, self._renderers = list(self._renderers.values()), {}
+            for renderer in renderers:
+                renderer.close()
+
+        if self._renderers:
+            self._gl.call(release)
+        self._gl.stop()
 
 
 # -- one world per simulated port in this process -------------------------------------------------
@@ -570,5 +627,5 @@ def mujoco_robot(config: Any) -> SimulatedArm:
     return world_for(config).robot
 
 
-__all__ = ["COLOURS", "MUJOCO_ROBOT_TYPE", "MujocoWorld", "build_mjcf", "install_world", "mujoco_robot",
+__all__ = ["COLOURS", "MUJOCO_ROBOT_TYPE", "GLThread", "MujocoWorld", "build_mjcf", "install_world", "mujoco_robot",
            "reset_worlds", "world_for"]
