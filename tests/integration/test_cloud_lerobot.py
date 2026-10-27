@@ -57,12 +57,12 @@ try:
     from services.device.models import ResourceManifestDTO
     from services.space_tasks.adapter_reasons import CALL_OUTCOME_KEY
     from services.space_tasks.capabilities import CAPABILITIES
+    from services.space_tasks.capability_argument_schema import arguments_from_json_schema
     from services.space_tasks.capability_declaration_contract import (
         EXECUTOR_EXTERNAL_ADAPTER,
         SOURCE_DEVICE,
         DeclarationClaim,
         DeclarationRefused,
-        arguments_from_json_schema,
     )
     from services.space_tasks.capability_declaration_lifecycle import declare
     from services.space_tasks.capability_results import call_result
@@ -155,6 +155,17 @@ def test_cloud_declares_every_capability_the_manifest_states(arm_config):
     bounds = {item.name: item for item in arguments_from_json_schema(move["input_schema"])}
     assert (bounds["elbow_flex"].minimum, bounds["elbow_flex"].maximum) == (-90.0, 90.0)
     assert set(bounds["pose"].choices) == {"ready", "fixture_pick", "tray_place", "look"}
+
+
+def test_every_input_schema_passes_the_admission_cloud_applies_when_the_arm_is_adopted(arm_config):
+    """Adopting the arm into a Space (``POST /spaces/{id}/adapters/discover``) stores each row
+    through Cloud's lossless schema guard, which refuses a keyword its engine does not enforce.
+    One refused row refuses the whole adoption, so every row must pass it, not only the decoder."""
+    from services.space_tasks.ucc_schema_guard import require_lossless_executable_schema
+
+    manifest = build_manifest(arm_config, observed_at="2026-10-23T00:00:00+00:00")
+    for row in manifest["capability_contracts"]:
+        require_lossless_executable_schema(row["input_schema"])
 
 
 def test_cloud_refuses_the_arm_declared_as_merely_controlled(arm_config):

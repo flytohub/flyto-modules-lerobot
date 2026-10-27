@@ -336,8 +336,10 @@ EVIDENCE_LEFT_TABLE = _held_change("perception.object_left_table", OBSERVED_ON_T
 EVIDENCE_INTO_CONTAINER = _held_change("perception.object_in_container", OBSERVED_IN_CONTAINERS, 1, "table_objects",
                                        "One more object inside a container", "容器內多了一個物品")
 
-#: What a pose may be called: the arm config's own name rule (``arm_config.valid_name``).
-POSE_NAME_PATTERN = "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+#: How long a pose name may be. The declared schema states only what Cloud's argument
+#: engine enforces (its lossless admission refuses any other keyword, and with it the
+#: whole arm's adoption); the full name rule (``arm_config.valid_name``) is the
+#: adapter's own refusal, stricter than the declaration, never looser.
 POSE_NAME_MAX_LENGTH = 64
 #: What ``manipulation.mark_pose`` changes: a named pose in the arm's config file.
 POSES_WRITTEN = "poses.written"
@@ -605,8 +607,9 @@ MARK_POSE = CapabilitySpec(
         {
             "type": "object",
             "properties": {
-                "pose": {"type": "string", "maxLength": POSE_NAME_MAX_LENGTH, "pattern": POSE_NAME_PATTERN,
-                         "description": "The name to record the arm's current position under"},
+                "pose": {"type": "string", "maxLength": POSE_NAME_MAX_LENGTH, "minLength": 1,
+                         "description": "The name to record the arm's current position under: a letter, "
+                                        "then letters, digits or underscores"},
                 "replace": {"type": "boolean", "description": "Overwrite a pose of this name that is already taught"},
             },
             "required": ["pose"],
