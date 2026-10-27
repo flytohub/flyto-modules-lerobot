@@ -31,8 +31,8 @@ injection; this one adds real contact physics and a rendered camera:
   offscreen; ``perception.detect`` -- the same colour-blob and homography
   pipeline as a USB camera -- locates objects in it. It never reads where the
   objects are.
-* Faults: a block or a container moved, a grasp slip (the finger force
-  collapses while holding), a motor fault, read latency with jitter.
+* Faults: a block or a container moved, a grasp slip (the jaws' grip on
+  the held block gives way and it falls out), a motor fault, read latency with jitter.
 
 The ``mujoco`` package is the ``mujoco`` extra; nothing imports it until a
 ``mujoco`` arm config is served.
@@ -468,6 +468,9 @@ class MujocoWorld(OneArm):
         self.read_ms, self.jitter_ms = self.sim.read_ms, self.sim.jitter_ms
         self._pending = [fault for fault in self.sim.faults]
         self._slips: list[list[Any]] = []
+        # Arm geoms a slip took the grip from (their own friction, restored once the object has left them).
+        self._slipping: dict[int, Any] = {}
+        self._slipping_objects: set[int] = set()
         self.fault_log: list[dict[str, Any]] = []
         self.positions: dict[str, float] = {}
         self.effort = 0.0
@@ -596,16 +599,72 @@ class MujocoWorld(OneArm):
         squeezing = self.effort >= 50.0
         for slip in list(self._slips):
             spec, since = slip
-            if not squeezing or now < spec.at_s:
+            # Held is carried: squeezed in the jaws and off everything else. A block still resting on the
+            # table cannot slip out of a grip -- the table carries it, and there is nowhere for it to fall.
+            if not squeezing or now < spec.at_s or not self._carried(spec.object_id):
                 slip[1] = None
                 continue
             slip[1] = now if since is None else since
             if now - slip[1] >= spec.after_held_s:
-                # The grip collapses: the fingers keep closing with almost no force, and the block falls.
                 self._slips.remove(slip)
                 self.fault_log.append({"kind": "grasp_slip", "at_s": round(now, 4), "object_id": spec.object_id})
-                for actuator in self._finger_servos:
-                    self.model.actuator_forcerange[actuator] = (-0.02, 0.02)
+                self._slip_out(spec.object_id)
+        self._regrip()
+
+    def _gripping(self, object_id: str | None) -> list[tuple[int, int]]:
+        """``(arm geom, object geom)`` of every contact between the arm and a held object (or the one named)."""
+        model, data = self.model, self.data
+        arm = model.body("base").id
+        pairs = []
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            for mine, theirs in ((contact.geom1, contact.geom2), (contact.geom2, contact.geom1)):
+                body = model.geom_bodyid[theirs]
+                if model.body_rootid[model.geom_bodyid[mine]] != arm or model.body_jntnum[body] == 0:
+                    continue
+                if not object_id or model.body(body).name == object_id:
+                    pairs.append((int(mine), int(theirs)))
+        return pairs
+
+    def _carried(self, object_id: str | None) -> bool:
+        """Whether the arm alone carries an object (or the one named): touched by the arm, by nothing else."""
+        model, data = self.model, self.data
+        arm = model.body("base").id
+        gripped = {int(model.geom_bodyid[theirs]) for _mine, theirs in self._gripping(object_id)}
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            bodies = (int(model.geom_bodyid[contact.geom1]), int(model.geom_bodyid[contact.geom2]))
+            for body, other in (bodies, bodies[::-1]):
+                if body in gripped and model.body_rootid[other] != arm and other != body:
+                    gripped.discard(body)
+        return bool(gripped)
+
+    def _slip_out(self, object_id: str | None) -> None:
+        """The grip gives way: the surfaces holding the object lose their grip on it, so friction no longer
+        carries its weight. It slides out and falls under gravity while the jaw servo, still commanded
+        closed with its full torque, closes on after it -- the reading a real slip gives. Only those
+        surfaces, and only until the object has left them: a later grasp grips again."""
+        for mine, theirs in self._gripping(object_id):
+            if mine not in self._slipping:
+                self._slipping[mine] = (self.model.geom_friction[mine].copy(), int(self.model.geom_priority[mine]))
+            self._slipping_objects.add(int(self.model.geom_bodyid[theirs]))
+            # A contact takes the friction of its higher-priority geom (else the larger of the two).
+            self.model.geom_friction[mine] = 0.0
+            self.model.geom_priority[mine] = int(self.model.geom_priority[theirs]) + 1
+
+    def _regrip(self) -> None:
+        """Give the slipped surfaces their friction back once no object they let go of still touches them."""
+        if not self._slipping:
+            return
+        touching = {mine for mine, theirs in self._gripping(None)
+                    if self.model.geom_bodyid[theirs] in self._slipping_objects}
+        if touching & set(self._slipping):
+            return
+        for geom, (friction, priority) in self._slipping.items():
+            self.model.geom_friction[geom] = friction
+            self.model.geom_priority[geom] = priority
+        self._slipping.clear()
+        self._slipping_objects.clear()
 
     # -- the rendered camera ------------------------------------------------------------------
 

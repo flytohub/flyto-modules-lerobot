@@ -292,3 +292,26 @@ def test_replacing_a_world_makes_no_new_gl_context(data, monkeypatch):
     assert len(made) <= 1, made
     assert all(frame.shape == (36, 48, 3) and frame.any() for frame in frames)
     assert (frames[0] == frames[1]).all(), "the same scene draws the same frame in a reused context"
+
+
+@pytest.mark.parametrize("after_held_s", [0.0, 0.3])
+def test_a_slipped_block_falls_out_of_the_jaws_and_the_gripper_reads_it(data, after_held_s):
+    """A grasp slip is the grip giving way: the block leaves the jaws and drops under gravity, and the
+    gripper's own reading then says nothing is held. A block still wedged between the jaws while the
+    signature says it slipped would make every after-slip look and re-grasp judge a world that is not so."""
+    rig = Rig(data)
+    picked = rig.call("manipulation.pick", {"object_id": "red-1"})
+    assert picked.outcome == OUTCOME_COMPLETED, picked.evidence.get("reason_code")
+    lifted = float(rig.world.data.body("block-red").xpos[2])
+    assert lifted > 0.05
+    rig.world.inject({"kind": "grasp_slip", "after_held_s": after_held_s})
+    for _ in range(30):  # 1.5 s of world time, read every 50 ms as the host's driver reads
+        rig.clock.sleep(0.05)
+        rig.world.step()
+    block = rig.world.data.body("block-red").xpos
+    tip = rig.world.tip().position
+    assert block[2] < 0.03, f"the block stayed at z={block[2]:.3f}, wedged in the jaws"
+    assert ((block[0] - tip[0]) ** 2 + (block[1] - tip[1]) ** 2 + (block[2] - tip[2]) ** 2) ** 0.5 > 0.05
+    # The gripper signature Cloud judges from (the host's ``observe``) says what physically happened.
+    assert rig.adapter.observe(phase="after", execution_id="slip")["object_held"] == 0
+    assert rig.world.fault_log[-1]["kind"] == "grasp_slip"
