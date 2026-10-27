@@ -129,6 +129,8 @@ REASON_SLIPPED = "object_slipped"
 REASON_NOT_RELEASED = "object_not_released"
 #: The camera does not see the object asked for; nothing was sent.
 REASON_OBJECT_NOT_FOUND = "object_not_found"
+#: The look a pick plans on shows its target only in part (the arm covers it); nothing was sent.
+REASON_TARGET_PARTLY_SEEN = "target_partly_seen"
 #: The camera does not see the container asked for; nothing was sent.
 REASON_CONTAINER_NOT_FOUND = "container_not_found"
 #: The container a place is bound to is not where its reference says (beyond both looks' uncertainty).
@@ -185,6 +187,8 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_SLIPPED: "夾爪碰到物品後又繼續閉合：物品已滑落。",
         REASON_NOT_RELEASED: "夾爪張開後仍判定為夾著物品，放開未被確認。",
         REASON_OBJECT_NOT_FOUND: "攝影機沒有看到指定的物品，沒有送出任何動作指令。",
+        REASON_TARGET_PARTLY_SEEN: (
+            "攝影機只看到目標的一部分（被手臂遮住），無法確定它的位置與方向，沒有送出任何動作指令。"),
         REASON_CONTAINER_NOT_FOUND: "攝影機沒有看到指定的容器，沒有送出任何動作指令。",
         REASON_CONTAINER_MOVED: (
             "容器已經不在先前看到的位置（超出兩次觀測的不確定度），沒有放下物品，物品仍夾在夾爪中。"),
@@ -224,6 +228,9 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_SLIPPED: "The jaws met an object and then crept on toward closed; it slipped out",
         REASON_NOT_RELEASED: "The gripper still reads as holding after it was opened",
         REASON_OBJECT_NOT_FOUND: "The camera does not see the object; nothing was sent",
+        REASON_TARGET_PARTLY_SEEN: (
+            "The camera sees the target only in part (the arm covers it), so neither its position nor its "
+            "heading is known; nothing was sent"),
         REASON_CONTAINER_NOT_FOUND: "The camera does not see the container; nothing was sent",
         REASON_CONTAINER_MOVED: (
             "The container is not where its reference says, beyond both looks' uncertainty; nothing was released"),

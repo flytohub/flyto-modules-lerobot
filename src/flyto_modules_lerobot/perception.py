@@ -94,6 +94,9 @@ class Detection:
     # False when the camera could not tell the height (the object looked smaller than its own
     # footprint: something covers it). Such an object is never counted as resting on the table.
     height_known: bool = True
+    # True when the camera saw only part of it (its outline is cut by the arm or another object): its
+    # centre and heading are the visible part's, and its uncertainty says so. Nothing is planned on it.
+    seen_in_part: bool = False
 
     def footprint_contains(self, x: float, y: float) -> bool:
         """Whether a point lies over this object's footprint (its yaw), when its size is known."""
@@ -796,46 +799,72 @@ def _pixel_area_m2(homography: Homography, u: float, v: float) -> float:
     return abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0))
 
 
+def _perimeter_px(outline: Sequence[tuple[float, float]]) -> float:
+    return sum(math.dist(a, b) for a, b in zip(outline, (*outline[1:], *outline[:1]), strict=True))
+
+
 def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) -> list[Detection]:
     """Colour blobs on the table plane; with a known camera height, lifted objects are placed in 3D.
 
     Without ``camera_height_m`` every object is reported on the table plane
-    (``z`` 0, relative to the table). With it, an object whose top face looks
-    ``k`` times wider than its footprint would on the table is at
+    (``z`` 0, relative to the table). With it, a container, or a block seen
+    within :data:`STEEP_WITHIN_DEG` of straight down, whose top face looks ``k``
+    times wider than its footprint would on the table is at
     ``z_top = H (1 - 1/k)``, and its centre is moved toward the point under
-    the camera by the same perspective factor. An object that looks smaller
-    than its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly
-    covered: its height is reported unknown, and its centre is known only
-    within its footprint (half its diagonal more uncertainty). A height read
-    from apparent size moves the centre toward the nadir; a tilted object
-    shows more of itself and reads as raised, so that move is added to its
-    uncertainty too.
+    the camera by the same perspective factor; one that looks smaller than
+    its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly covered.
+
+    A block seen at a slant shows its side faces beside its top, and how
+    much of them the colour takes in varies with the light: apparent size
+    cannot tell its height there (as for a camera on the arm). It is taken to
+    rest on the table and placed by the plane of its top. Unoccluded, a
+    block seen from above shows at least its whole top face; a blob smaller
+    than that face by more than half a pixel along its outline is cut by the
+    arm or another object: it is ``seen_in_part``,
+    its height unknown, its position uncertain by its footprint's
+    half-diagonal and its heading by a quarter turn. The heading is taken
+    before any height correction: placing an object toward the nadir scales
+    its position about that point, which never turns it.
+    A height read from apparent size moves the centre toward the nadir beyond
+    where a resting object's top would put it; a tilted object shows more of
+    itself and reads as raised, so that move is added to its uncertainty.
     """
     classes = {colour.name: colour for colour in settings.classes}
     detections = []
     counts: dict[str, int] = {}
+    height_m, nadir = settings.camera_height_m, settings.nadir
     for blob in find_blobs(frame, settings.classes, stride=settings.stride):
         colour = classes[blob.colour]
         x, y = homography.apply(blob.u, blob.v)
         ax, ay = homography.apply(blob.u + 10.0 * math.cos(blob.angle), blob.v + 10.0 * math.sin(blob.angle))
-        z, height_known, within = 0.0, True, settings.xy_m
-        if settings.camera_height_m and settings.nadir is not None and colour.size[0] * colour.size[1] > 0:
-            footprint_px = colour.size[0] * colour.size[1] / max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
-            k = math.sqrt(max(blob.area_px / footprint_px, 1e-6))
-            height_known = k >= OCCLUDED_BELOW
-            top = settings.camera_height_m * (1.0 - 1.0 / max(k, 1.0))
-            scale = (settings.camera_height_m - max(top, 0.0)) / settings.camera_height_m
-            planar = (x, y)
-            x = settings.nadir[0] + (x - settings.nadir[0]) * scale
-            y = settings.nadir[1] + (y - settings.nadir[1]) * scale
-            z = max(0.0, top - colour.size[2])
-            within += math.hypot(x - planar[0], y - planar[1])
-            if not height_known:
-                within += math.hypot(colour.size[0], colour.size[1]) / 2.0
+        yaw = math.atan2(ay - y, ax - x)
+        z, height_known, cut, raised = 0.0, True, False, 0.0
+        footprint = colour.size[0] * colour.size[1]
+        if height_m and nadir is not None and footprint > 0:
+            pixel_m2 = max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
+            slant = math.degrees(math.atan2(math.hypot(x - nadir[0], y - nadir[1]), height_m))
+            if slant <= STEEP_WITHIN_DEG or colour.kind != "block":
+                k = math.sqrt(max(blob.area_px / (footprint / pixel_m2), 1e-6))
+                height_known = k >= OCCLUDED_BELOW
+                cut = not height_known
+                top = height_m * (1.0 - 1.0 / max(k, 1.0))
+                z = max(0.0, top - colour.size[2])
+                raised = abs(top - colour.size[2]) * math.hypot(x - nadir[0], y - nadir[1]) / height_m
+            else:
+                top = colour.size[2]
+                face_px = footprint / (pixel_m2 * ((height_m - top) / height_m) ** 2)
+                cut = blob.area_px < face_px - 0.5 * settings.stride * _perimeter_px(blob.outline)
+                height_known = not cut
+            scale = (height_m - max(top, 0.0)) / height_m
+            x = nadir[0] + (x - nadir[0]) * scale
+            y = nadir[1] + (y - nadir[1]) * scale
+        xy_m, yaw_rad = settings.xy_m + raised, settings.yaw_rad
+        if cut:
+            xy_m += math.hypot(colour.size[0], colour.size[1]) / 2.0
+            yaw_rad = max(yaw_rad, math.pi / 4.0)
         counts[colour.name] = counts.get(colour.name, 0) + 1
         detections.append(Detection(f"{colour.name}-{counts[colour.name]}", colour.kind, colour.label, x, y, z,
-                                    math.atan2(ay - y, ax - x), colour.size, within, settings.yaw_rad,
-                                    height_known=height_known))
+                                    yaw, colour.size, xy_m, yaw_rad, height_known=height_known, seen_in_part=cut))
     return detections
 
 
@@ -904,6 +933,7 @@ class UsbCamera:
             return self._capture_mounted(joints)
         started = self._clock()
         frame = self._frame()
+        coverage = self._coverage(frame)
         detections = detect(frame, self.settings, self.homography)
         camera = {"camera_id": self.settings.id, "kind": "usb", "width": frame.width, "height": frame.height,
                   "latency_ms": round((self._clock() - started) * 1000.0, 3),
@@ -911,7 +941,7 @@ class UsbCamera:
                   "calibration": {"method": "homography", "points": len(self.settings.image_points),
                                   "residual_m": round(self.residual_m, 5)},
                   "seen": len(detections), "hardware_tested": False}
-        return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera, self._coverage(frame))
+        return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera, coverage)
 
     def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
         """The camera on the arm: place blobs by the arm's chain at the joints read for this capture."""
@@ -1633,7 +1663,7 @@ class RenderedCamera:
         started = time.perf_counter()
         frame = ArrayFrame(self.world.render(settings.width, settings.height))
         rendered = time.perf_counter()
-        detections = detect(frame, self.detection, self.homography)
+        found = detect(frame, self.detection, self.homography)
         done = time.perf_counter()
         timing = {"render_ms": round((rendered - started) * 1000.0, 3),
                   "detect_ms": round((done - rendered) * 1000.0, 3)}
@@ -1642,7 +1672,7 @@ class RenderedCamera:
         camera = {"camera_id": settings.id, "kind": "rendered", "width": frame.width, "height": frame.height,
                   "latency_ms": round(latency, 3), **timing, "height_observed": True,
                   "sim_time_s": round(self.world.elapsed(), 4),
-                  "calibration": {"method": "homography", "points": 4}, "seen": len(detections)}
+                  "calibration": {"method": "homography", "points": 4}, "seen": len(found)}
         limit = settings.arm_max_value
 
         def covered(spot: Spot) -> float | None:
@@ -1652,7 +1682,7 @@ class RenderedCamera:
             radius = settings.focal_px() * spot.radius / max(settings.position[2] - spot.z, 1e-6)
             return dark_fraction(frame, u, v, radius, limit)
 
-        return Capture(tuple(detections), _now(), "simulation", camera, covered)
+        return Capture(tuple(found), _now(), "simulation", camera, covered)
 
     def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
         """The camera on the arm: render from its link, place blobs by the chain at the joints read for it."""

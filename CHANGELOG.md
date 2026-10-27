@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Planar camera: the heading is taken before the height correction (it was
+  measured from a centre moved toward the nadir to an axis point that was
+  not, turning it by up to 45 deg); a block beyond 15 deg of straight down
+  rests on the table, and one smaller than its top face is `seen_in_part`
+  (height unknown, position uncertain by its half-diagonal, heading by a
+  quarter turn). A pick planned on a target seen only in part is refused
+  before anything is sent (`target_partly_seen`).
 - Motion: every move is one time-optimal joint trajectory within each
   servo's no-load speed and acceleration (`trajectory.py`; servo classes
   gain `max_acceleration_rad_s2`), streamed one set point per control period

@@ -531,3 +531,41 @@ origin, the joint and FK error bounds, the look pose (chosen on renders in
 simulation; teach it on the arm) and the USB path of a mounted camera (only
 the rendered one is implemented; a `usb` camera with a `mount` is not yet
 supported).
+
+## 2026-10-28 -- A pick plans only on a target seen whole; a planar camera at a slant rests a block
+
+The regrasp at (0.12, 0.17) in the end-to-end run stopped short or slipped
+in 11 of 50 episodes (7 `target_not_reached`, 4 `object_slipped`). Reach and
+the inverse solution were not the cause: every pose there solves with more
+than 59 deg of margin on every joint and the tool within 1 mm, and no
+convergence came within 0.6 deg/period of being judged still out of
+tolerance. Ground truth showed a jaw landing on the block in the descent
+(the block pushed 11 mm and tipped). Two causes in the planar (overhead)
+camera, which sees (0.12, 0.17) 18 deg off straight down:
+
+- **The heading was turned by the height correction.** `perception.detect`
+  measured the heading from the centre after it was moved toward the nadir
+  to an axis point that was not moved. A block whose sides show at a slant
+  looks larger than its footprint, was judged raised (z 3-13 mm on the
+  table) and its heading came out up to 45 deg off, so the jaws descended
+  onto its corners. Fix: the heading is taken before the correction (a
+  scaling about the nadir never turns a direction).
+- **A blob the arm cuts was reported as a whole block.** After a missed
+  grasp the arm stays where it closed; the look again sees the moved block
+  past it, cut, with its centre up to 14 mm off and its heading 36 deg off,
+  declaring 6 mm and 0.2 rad. The visible sides made up for the lost area,
+  so the size check passed it. Fix: a block seen beyond `STEEP_WITHIN_DEG`
+  of straight down rests on the table and is placed by its top's plane
+  (apparent size tells no height there, as decided for the camera on the
+  arm), and since an unoccluded block shows at least its whole top face, a
+  blob smaller than that face (less half a pixel along its outline) is cut:
+  `Detection.seen_in_part`, height unknown, uncertainty widened by its
+  half-diagonal and a quarter turn. Containers keep the size rule (an open
+  bin is not a solid box; its precision at a slant is the O4 lane's).
+
+A pick planned on a target its look shows only in part is refused, typed
+`target_partly_seen`, before anything is sent: such a target is outside what
+the pick can reliably grasp. A planning look reuses a young frame that saw
+the target whole when there is one. Moving out of the camera's view after a
+missed grasp, so a look again sees the table, is the pick's after-failure
+state (the O3 lane), not decided here.

@@ -33,6 +33,7 @@ from flyto_modules_lerobot.capabilities import (
     REASON_OBJECT_NOT_FOUND,
     REASON_POSE_UNREACHABLE,
     REASON_SIMULATION_ON_HARDWARE,
+    REASON_TARGET_PARTLY_SEEN,
     RELEASE,
     SPECS,
 )
@@ -253,3 +254,39 @@ def test_a_forgotten_in_process_world_is_freed_at_once(sim_data):
         assert ref() is None
     finally:
         gc.enable()
+
+
+class _PartlyCovered:
+    """The rig's camera, with one object cut by the arm in every frame: the camera reports it partly seen."""
+
+    def __init__(self, camera, object_id: str) -> None:
+        self.camera, self.object_id = camera, object_id
+
+    def capture(self, joints=None):
+        from dataclasses import replace
+
+        inner = self.camera.capture(joints)
+        cut = tuple(replace(item, seen_in_part=True, xy_m=item.xy_m + 0.021, yaw_rad=0.786)
+                    if item.id == self.object_id else item for item in inner.detections)
+        return replace(inner, detections=cut)
+
+
+@pytest.mark.parametrize("by_pose", [False, True])
+def test_a_pick_whose_target_the_arm_partly_covers_is_refused_before_moving(sim, by_pose):
+    """A blob cut by the arm gives a centre and a heading the object does not have: jaws sent there land on it.
+
+    The regrasp after a missed pick looked past the arm parked at the old
+    target and planned on a block seen in part (up to 14 mm and 36 degrees
+    off). Such a target is refused, typed, before anything is sent.
+    """
+    seen = sim.call(LOCATE_OBJECTS.capability_id).evidence["objects"]
+    red = next(item for item in seen if item["id"] == "block-red")["pose"]
+    sim.session.camera = _PartlyCovered(sim.adapter._camera(), "block-red")
+    sim.clock.sleep(5.0)  # no young frame that saw it whole is left to plan by
+    before = dict(sim.world.positions)
+    arguments = {"x": red["x"], "y": red["y"], "yaw": red["yaw"]} if by_pose else {"object_id": "block-red"}
+    result = sim.call(PICK.capability_id, arguments)
+    assert result.outcome == OUTCOME_REFUSED, result.detail
+    assert result.evidence["reason_code"] == REASON_TARGET_PARTLY_SEEN
+    assert result.evidence["effect_applied"] is False
+    assert sim.world.positions == before

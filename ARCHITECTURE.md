@@ -90,6 +90,7 @@ the move's `pose` enum when the host next publishes the manifest.
 | Grasp: the jaws closed fully | failed | `no_object_held` | true (`object_held: false`) |
 | Grasp: the jaws met something, then crept on | failed | `object_slipped` | true |
 | Pick / place: the camera does not see the object / container | refused | `object_not_found` / `container_not_found` | false |
+| Pick: the look it plans on shows its target only in part (cut by the arm or another object) | refused | `target_partly_seen` | false |
 | Pick / place: a pose of the plan has no joint solution in the limits | refused | `pose_unreachable` | false |
 | Place: the gripper holds nothing | refused | `nothing_held` | false |
 | Pick: not held after the lift / camera sees it on the table | failed | `object_slipped` / `perception_disagrees` | true |

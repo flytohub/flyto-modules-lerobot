@@ -23,6 +23,7 @@ from flyto_modules_lerobot.perception import (
     RgbImage,
     UsbCamera,
     UsbCameraSettings,
+    detect,
     find_blobs,
     locate_result,
 )
@@ -121,3 +122,53 @@ def test_the_usb_camera_places_blobs_on_the_table_in_the_result_shape():
     assert (red["pose"]["x"], red["pose"]["y"]) == pytest.approx((0.20, 0.0), abs=0.005)
     assert red["source"] == "hardware" and red["uncertainty"] == {"xy_m": 0.01, "yaw_rad": 0.2}
     assert result["capture"]["hardware_tested"] is False and result["capture"]["height_observed"] is False
+
+
+@pytest.mark.parametrize("degrees", [10.0, 25.0, 40.0])
+def test_a_planar_cameras_heading_is_unchanged_by_the_height_correction(degrees):
+    """Placing a raised object toward the nadir is a scaling: it moves the centre, never turns the heading.
+
+    The heading used to be measured from the shifted centre to an axis point
+    that was not shifted, so an object judged raised (here a 30 mm block that
+    looks 40 px wide at 1 px/mm: k = 4/3) came out turned by tens of degrees.
+    """
+    red = ColourClass("red", "block", "red block", (340.0, 20.0), 0.5, 0.4, 40, (0.03, 0.03, 0.03))
+    image = RgbImage(400, 400)
+    turn = math.radians(degrees)
+    for v in range(400):
+        for u in range(400):
+            du, dv = u - 300, v - 300
+            a, b = du * math.cos(turn) + dv * math.sin(turn), dv * math.cos(turn) - du * math.sin(turn)
+            if abs(a) <= 20 and abs(b) <= 20:
+                image.fill(u, v, u + 1, v + 1, (220, 30, 30))
+    corners = ((0.0, 0.0), (400.0, 0.0), (400.0, 400.0), (0.0, 400.0))
+    table = tuple((u / 1000.0, v / 1000.0) for u, v in corners)
+    settings = UsbCameraSettings("cam", 0, 400, 400, 1, corners, table, (red,), 0.005, 0.2,
+                                 camera_height_m=0.7, nadir=(0.25, 0.25))
+    item, = detect(image, settings, Homography.fit(corners, table))
+    assert item.z > 0.0
+    error = (math.degrees(item.yaw) - degrees + 45.0) % 90.0 - 45.0
+    assert abs(error) <= 2.0
+
+
+@pytest.mark.parametrize(("side_px", "cut_px", "whole"), [(33, 33, True), (33, 20, False)])
+def test_a_planar_camera_reports_a_block_smaller_than_its_top_face_as_seen_in_part(side_px, cut_px, whole):
+    """At a slant a block rests on the table; unoccluded it shows at least its top face (982 px here).
+
+    One the arm cuts to 20 px shows less: it is reported seen in part, its
+    position uncertain by its half-diagonal and its heading by a quarter
+    turn, instead of a whole block's centre and heading.
+    """
+    red = ColourClass("red", "block", "red block", (340.0, 20.0), 0.5, 0.4, 40, (0.03, 0.03, 0.03))
+    image = RgbImage(400, 400)
+    image.fill(300 - side_px // 2, 300 - side_px // 2, 300 - side_px // 2 + side_px, 300 - side_px // 2 + cut_px,
+               (220, 30, 30))
+    corners = ((0.0, 0.0), (400.0, 0.0), (400.0, 400.0), (0.0, 400.0))
+    table = tuple((u / 1000.0, v / 1000.0) for u, v in corners)
+    settings = UsbCameraSettings("cam", 0, 400, 400, 1, corners, table, (red,), 0.005, 0.2,
+                                 camera_height_m=0.7, nadir=(0.0, 0.0))
+    item, = detect(image, settings, Homography.fit(corners, table))
+    assert item.z == 0.0  # 31 deg off straight down: resting, apparent size tells no height
+    assert item.seen_in_part is not whole and item.height_known is whole
+    assert (item.xy_m, item.yaw_rad) == ((0.005, 0.2) if whole else pytest.approx((0.005 + 0.0212, math.pi / 4),
+                                                                                   abs=1e-3))

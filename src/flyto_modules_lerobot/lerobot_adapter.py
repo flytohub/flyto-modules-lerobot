@@ -138,6 +138,7 @@ from .capabilities import (
     REASON_SIMULATION_ON_HARDWARE,
     REASON_SLIPPED,
     REASON_STOP_REQUESTED,
+    REASON_TARGET_PARTLY_SEEN,
     REASON_UNREACHABLE,
     REASON_VIEWPOINT_UNSUITABLE,
     SPECS_BY_CAPABILITY,
@@ -1121,7 +1122,8 @@ class LeRobotArmAdapter:
         for taken_at, capture in reversed(self.session.captures):
             if now - taken_at > perception.reuse_within_s:
                 return None
-            if all((item := find(capture, wanted)) is not None and item.height_known for wanted in ids if wanted):
+            if all((item := find(capture, wanted)) is not None and item.height_known and not item.seen_in_part
+                   for wanted in ids if wanted):
                 return capture
         return None
 
@@ -1146,7 +1148,8 @@ class LeRobotArmAdapter:
         """
         capture = (self._recent(*ids) if plan else None) or self._look_for(*ids)
         if plan and capture is not None and any(
-                (item := find(capture, wanted)) is not None and not item.height_known for wanted in ids if wanted):
+                (item := find(capture, wanted)) is not None and (not item.height_known or item.seen_in_part)
+                for wanted in ids if wanted):
             capture = self._recent(*ids) or capture
         if capture is None:
             raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"camera": self.config.perception is not None})
@@ -1393,6 +1396,19 @@ class LeRobotArmAdapter:
                 if capture is not None else None)
         return _Target(pose["x"], pose["y"], self._table_z(), pose.get("yaw"), default, item)
 
+    def _seen_whole(self, capture: Capture | None, target: _Target) -> None:
+        """Refused (nothing sent) when the look the grasp is planned on shows its target only in part.
+
+        A blob cut by the arm or another object has the visible part's centre
+        and outline, not the object's: jaws sent there land on the object. The
+        camera says so (``Detection.seen_in_part``). A requested position
+        with nothing detected at it is planned as asked.
+        """
+        item = target.detection
+        if capture is not None and item is not None and item.seen_in_part:
+            raise _Refused(REASON_TARGET_PARTLY_SEEN, {"object_id": item.id, "seen_at": [round(item.x, 4),
+                                                                                          round(item.y, 4)]})
+
     def _pick(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
         """``manipulation.pick``: locate, plan, open, approach, descend, grasp, verify the grip, lift, verify."""
         object_id, pose = self._position_arguments(arguments, "object_id", frozenset({"x", "y", "yaw"}))
@@ -1402,6 +1418,7 @@ class LeRobotArmAdapter:
         with phases("perceive"):
             capture = self._capture(object_id, plan=True) if object_id is not None else self._look()
             target = self._pick_target(capture, object_id, pose)
+            self._seen_whole(capture, target)
         before = _unsent(self.session.read)
         with phases("plan"):
             started = time.perf_counter()
