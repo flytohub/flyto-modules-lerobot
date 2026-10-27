@@ -7,11 +7,14 @@ fake arm is driven through Cloud's real ``ExternalCapabilityDispatcher``, and
 each completed reply is held to the module's ``output_schema`` by the host's
 own ``local.result_schema.checked``.
 
-``manipulation.mark_pose`` is the row this pack asks Cloud to add
-(``docs/project/DECISIONS.md``). Against a Cloud that does not ship it yet,
-the vocabulary check is an expected failure naming that row, and Cloud's
-``declare`` is shown refusing it as not in the vocabulary while the other four
-declare; the rest runs either way.
+``manipulation.mark_pose``, ``perception.locate_objects``,
+``manipulation.pick`` and ``manipulation.place`` are rows this pack asks
+Cloud to add (``docs/project/DECISIONS.md``). Against a Cloud that does not
+ship them yet, the vocabulary check is an expected failure naming them, and
+Cloud's ``declare`` is shown refusing each as not in the vocabulary while the
+shipped ones declare; the rest runs either way. Grasp and release evidence is
+judged by Cloud's own contract arithmetic from the observations Cloud's own
+dispatcher took around the call.
 
 Cloud is not a dependency of this package. The backend is found at
 ``$FLYTO_CLOUD_BACKEND`` (a checkout's ``src/ui/web/backend`` or a read-only
@@ -63,6 +66,7 @@ try:
     )
     from services.space_tasks.capability_declaration_lifecycle import declare
     from services.space_tasks.capability_results import call_result
+    from services.space_tasks.contract_arithmetic import judge
     from services.space_tasks.direct_verification import judged_items
     from services.space_tasks.evidence_models import EvidenceItem
     from services.space_tasks.module_contracts import contract_facts
@@ -73,10 +77,14 @@ from flyto_modules_lerobot.capabilities import (  # noqa: E402
     ADAPTER_ID,
     CAPABILITY_IDS,
     GRASP,
+    LOCATE_OBJECTS,
     MANIPULATION_STATE,
     MARK_POSE,
     MOVE_JOINTS,
+    PICK,
+    PLACE,
     REASON_EFFECT_UNKNOWN,
+    REASON_NO_OBJECT,
     REASON_OUTSIDE_LIMITS,
     SPECS,
     SPECS_BY_CAPABILITY,
@@ -99,16 +107,17 @@ def _binding(capability_id: str) -> dict:
 
 
 def _pending_in_cloud() -> set[str]:
-    """The pack's ids this Cloud does not ship yet; only the requested mark_pose row may be one."""
+    """The pack's ids this Cloud does not ship yet; only the rows the pack requested may be."""
     pending = set(CAPABILITY_IDS) - set(CAPABILITIES)
-    assert pending <= {MARK_POSE.capability_id}, pending
+    requested = {spec.capability_id for spec in (MARK_POSE, LOCATE_OBJECTS, PICK, PLACE)}
+    assert pending <= requested, pending
     return pending
 
 
 def test_the_pack_provides_clouds_manipulation_rows_as_cloud_resolves_them():
     pending = _pending_in_cloud()
     shipped = {cid for cid, row in CAPABILITIES.items() if row.family == "manipulation"}
-    assert set(CAPABILITY_IDS) - pending == shipped
+    assert {cid for cid in set(CAPABILITY_IDS) - pending if cid.startswith("manipulation.")} == shipped
     for spec in SPECS:
         if spec.capability_id in pending:
             continue
@@ -156,11 +165,11 @@ def test_cloud_refuses_the_arm_declared_as_merely_controlled(arm_config):
         declare(_claim(move, safety_class="controlled"))
 
 
-def test_cloud_reads_every_contract_and_finds_nothing_the_arm_proves_by_itself():
+def test_cloud_reads_every_contract_and_its_evidence_specs():
     for spec in SPECS:
         facts = contract_facts(_binding(spec.capability_id))
         assert facts is not None and facts.declared
-        assert not facts.evidence
+        assert [item["kind"] for item in facts.evidence] == [item["kind"] for item in spec.contract["evidence"]]
 
 
 def test_cloud_admits_the_manifest(arm_config):
@@ -282,10 +291,27 @@ def test_a_pose_marked_through_cloud_is_written_and_its_data_holds_to_its_schema
     assert load_arm_config(path).poses["inspect"].taught is True
 
 
-def test_a_grasp_through_cloud_proves_nothing_by_itself(cloud_session):
-    session, _factory = cloud_session
+def _judged_by_cloud(record: dict, spec) -> list[bool]:
+    """Each evidence spec of ``spec`` judged by Cloud's arithmetic from the observations its host took."""
+    return [judge(item, {}, record["observations"])["usable"] for item in spec.contract["evidence"]]
+
+
+def test_a_grasp_on_an_object_through_cloud_is_proven_by_the_hosts_observations(cloud_session):
+    session, factory = cloud_session
+    session.ensure_connected()
+    factory.arms[session.config.lerobot.port].blocked["gripper"] = 25.0
     record, _results = _dispatch(session, GRASP.capability_id, {})
     assert record["outcome"] == "completed", record.get("detail")
+    assert record["observations"]["before"]["object_held"] == 0
+    assert record["observations"]["after"]["object_held"] == 1
+    assert _judged_by_cloud(record, GRASP) == [True]
+
+
+def test_a_grasp_on_nothing_through_cloud_fails_and_proves_nothing(cloud_session):
+    session, _factory = cloud_session
+    record, _results = _dispatch(session, GRASP.capability_id, {})
+    assert record["outcome"] == "failed", record.get("detail")
+    assert record["adapter_evidence"]["reason_code"] == REASON_NO_OBJECT
     items = [EvidenceItem.from_dict({**item, "resource_id": ARM}) for item in record.get("evidence_items", [])]
     judged = judged_items(items, capability_id=GRASP.capability_id, arguments={}, job_id="lerobot-integration",
                           facts=contract_facts(_binding(GRASP.capability_id)))

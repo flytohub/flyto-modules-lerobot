@@ -10,9 +10,17 @@ resource and approves each capability.
 
 The manifest is built from the arm config alone. Nothing here connects to
 the arm: LeRobot's connect configures the motors with torque briefly off. An
-arm is reported only when its config loads and its serial port exists. The
-move's bounds are the config's: the taught poses by name, and each body
-joint with its limits. The manifest never carries the port.
+arm is reported only when its config loads and its port is there (a device
+for a LeRobot arm, a ``sim:`` name for a simulated one: the backend table).
+The move's bounds are the config's: the taught poses by name, and each body
+joint with its limits. The manifest never carries the port. Its
+``deployment_mode`` is the backend's: ``simulation`` for a simulated arm.
+
+Telemetry: the manifest declares ``capabilities.TELEMETRY_CHANNELS`` (joint
+positions, gripper, held state, fault), and :func:`telemetry_sampler` -- the
+attribute the execution host's telemetry pump looks for on this callable --
+samples them. It reads only an arm this process has already connected; it
+never connects one.
 """
 
 from __future__ import annotations
@@ -20,14 +28,13 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from .arm_config import ArmConfig, ArmConfigError
+from .backends import backend_for
 from .capabilities import (
     ADAPTER_ID,
     CAPABILITY_IDS,
-    DEPLOYMENT_MODE,
     ENV_AUTODISCOVER,
     MODULE_PACK,
     MOVE_JOINTS,
@@ -35,8 +42,11 @@ from .capabilities import (
     PROVIDER_NAME,
     RESOURCE_TYPE,
     SPECS,
+    TELEMETRY_CHANNELS,
+    TELEMETRY_INTERVAL_SECONDS,
 )
-from .plugin import configured_config
+from .driver import ArmFault, ArmUnreachable, MotorsMismatch, NotCalibrated
+from .plugin import configured_config, session_for
 
 MANIFEST_CONTRACT = "flyto.resource-manifest.v1"
 _OFF = frozenset({"0", "false", "off", "no"})
@@ -64,12 +74,12 @@ def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = F
         "display_name": config.display_name,
         "revision": 1,
         "adapter": {"adapter_id": ADAPTER_ID, "version": PACK_VERSION, "provider": PROVIDER_NAME},
-        "deployment_mode": DEPLOYMENT_MODE,
+        "deployment_mode": backend_for(config.lerobot.robot_type).deployment_mode,
         "capability_ids": list(CAPABILITY_IDS),
         "capability_contracts": [spec.manifest_contract(schemas.get(spec.capability_id, spec.input_schema))
                                  for spec in SPECS],
         "settings": [],
-        "telemetry_channels": [],
+        "telemetry_channels": [dict(row) for row in TELEMETRY_CHANNELS],
         "observed_at": observed_at,
         "contract_hash": "",
     }
@@ -86,7 +96,7 @@ def _served() -> ArmConfig | None:
         config = configured_config()
     except (ValueError, ArmConfigError):
         return None
-    return config if Path(config.lerobot.port).expanduser().exists() else None
+    return config if backend_for(config.lerobot.robot_type).port_present(config.lerobot.port) else None
 
 
 def discover_resource_manifests(
@@ -101,8 +111,54 @@ def discover_resource_manifests(
     return [build_manifest(config, observed_at=observed_at, module_pack="module_pack" in extensions)]
 
 
+def _samples(config: ArmConfig, observed_at: str) -> list[dict[str, Any]]:
+    """One sample per declared channel for a connected arm; nothing when it is not connected."""
+    session = session_for(config)
+    source = session.backend.source
+    fault = None if session.fault_code is None else {"reason": session.fault_code, "since": session.fault_since or ""}
+    if fault is not None:
+        payloads = {"arm_fault": {"fault": fault, "source": source}}
+        quality = "error"
+    elif not session.connected:
+        return []
+    else:
+        try:
+            positions = session.read()
+        except (ArmUnreachable, ArmFault, NotCalibrated, MotorsMismatch):
+            return _samples(config, observed_at) if session.fault_code else []
+        gripper = config.gripper
+        goal = session.goals.get(gripper.joint)
+        effort = session.effort if gripper.effort_key else None
+        position = positions[gripper.joint]
+        payloads = {
+            "joint_positions": {"unit": config.unit, "source": source,
+                                "joints": {name: round(positions[name], 3) for name in config.joint_names}},
+            "gripper": {"position": round(position, 3), "state": gripper.state(position), "goal": goal,
+                        "effort": effort, "source": source},
+            "object_held": {"object_held": gripper.holds(position, goal, effort), "source": source},
+            "arm_fault": {"fault": None, "source": source},
+        }
+        quality = "good"
+    return [{"resource_id": config.resource_id, "channel_id": channel, "payload": payload, "quality": quality,
+             "observed_at": observed_at} for channel, payload in payloads.items()]
+
+
+def telemetry_sampler(*, execution_host_id: str) -> list[dict[str, Any]]:
+    """Samples of the declared channels for the arm this computer serves; never connects it."""
+    config = _served()
+    if config is None:
+        return []
+    try:
+        return _samples(config, datetime.now(UTC).isoformat(timespec="milliseconds"))
+    except ValueError:
+        return []
+
+
 discover_resource_manifests.module_pack = MODULE_PACK  # type: ignore[attr-defined]
 discover_resource_manifests.manifest_extensions = ("module_pack",)  # type: ignore[attr-defined]
+discover_resource_manifests.telemetry_sampler = telemetry_sampler  # type: ignore[attr-defined]
+discover_resource_manifests.telemetry_interval_seconds = TELEMETRY_INTERVAL_SECONDS  # type: ignore[attr-defined]
 
 
-__all__ = ["MANIFEST_CONTRACT", "build_manifest", "discover_resource_manifests", "move_input_schema"]
+__all__ = ["MANIFEST_CONTRACT", "build_manifest", "discover_resource_manifests", "move_input_schema",
+           "telemetry_sampler"]

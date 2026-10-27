@@ -28,12 +28,23 @@ except the backup file it keeps.
 Nothing here names an arm. Joint names, limits, the gripper's open and closed
 values and taught poses are the arm's configuration (``arm_config.py``).
 
-No contract lets the arm prove its own effect:
+The sensing closed loop (owner 2026-10-27) adds three rows: ``perception.locate_objects``
+(read only: where objects are on the table, from the arm's camera),
+``manipulation.pick`` and ``manipulation.place`` (Cartesian, planned with the
+arm's declared kinematic chain). Their ids are requested from Cloud's
+vocabulary, as ``manipulation.mark_pose`` was (``docs/project/DECISIONS.md``).
 
-* ``manipulation.grasp`` / ``manipulation.release`` -- the arm can only say
-  where its gripper servo is, never that it holds the part or that the part
-  is in the place zone. No independent observation of either exists in Cloud
-  yet, so these declare no evidence and stay unproven.
+What proves an effect is an observation Cloud judges with core's arithmetic,
+taken by the host before and after the call (``observe``), never the call's
+own outcome:
+
+* ``manipulation.grasp`` / ``manipulation.pick`` -- ``object_held`` goes from
+  0 to 1: the gripper signature of a held object (commanded closed, stopped
+  short of closed by the configured gap, squeezing, staying put). A pick also
+  needs ``objects_on_table`` to drop by one -- the camera's count, which reads
+  nothing from the arm.
+* ``manipulation.release`` / ``manipulation.place`` -- ``object_held`` goes
+  from 1 to 0; a place also needs ``objects_in_containers`` to rise by one.
 * ``manipulation.move_joints`` -- flyto-core's evidence arithmetic compares
   the last phase with a *numeric argument* (``distance_to``) or measures a
   change between phases. A move to a named pose has no numeric argument, and
@@ -110,6 +121,32 @@ REASON_POSE_TAUGHT = "pose_already_taught"
 REASON_CONFIG_NOT_WRITABLE = "arm_config_not_writable"
 #: A command went out and its reply or the readback after it was lost.
 REASON_EFFECT_UNKNOWN = "effect_unknown"
+#: The jaws closed fully: nothing is held.
+REASON_NO_OBJECT = "no_object_held"
+#: The jaws met something and then crept on toward closed: it slipped out.
+REASON_SLIPPED = "object_slipped"
+#: The gripper still reads as holding after it was opened.
+REASON_NOT_RELEASED = "object_not_released"
+#: The camera does not see the object asked for; nothing was sent.
+REASON_OBJECT_NOT_FOUND = "object_not_found"
+#: The camera does not see the container asked for; nothing was sent.
+REASON_CONTAINER_NOT_FOUND = "container_not_found"
+#: The kinematic chain has no solution within the joint limits for a pose of the plan; nothing was sent.
+REASON_POSE_UNREACHABLE = "pose_unreachable"
+#: The gripper does not read as holding anything, so there is nothing to place; nothing was sent.
+REASON_NOTHING_HELD = "nothing_held"
+#: After the release the camera does not see the object inside the container.
+REASON_NOT_IN_CONTAINER = "object_not_in_container"
+#: After the release the camera did not see the object at all: the placement is unverified.
+REASON_PLACEMENT_UNOBSERVED = "placement_not_observed"
+#: The gripper says held, but the camera sees the object still on the table.
+REASON_PERCEPTION_DISAGREES = "perception_disagrees"
+#: The arm config names no camera, or the camera gave no frame; nothing was sent.
+REASON_PERCEPTION_UNAVAILABLE = "perception_unavailable"
+#: The arm config declares no kinematic chain, so no Cartesian target can be planned; nothing was sent.
+REASON_KINEMATICS_UNAVAILABLE = "kinematics_not_configured"
+#: A simulation config names a port that may be real hardware; nothing was built or sent.
+REASON_SIMULATION_ON_HARDWARE = "simulation_targets_hardware"
 #: The arm stopped moving short of the target; it now holds where it is.
 REASON_NOT_REACHED = "target_not_reached"
 #: A stop or cancel was requested; the arm was told to hold where it is.
@@ -136,6 +173,19 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_NOT_REACHED: "手臂停在目標之前，已保持在目前位置。",
         REASON_STOP_REQUESTED: "已要求停止：手臂被指令保持在目前位置（扭力未關閉），並非已確認的實體停止。",
         REASON_DEADLINE: "超過時限，手臂被指令保持在目前位置。",
+        REASON_NO_OBJECT: "夾爪完全閉合，沒有夾到任何物品。",
+        REASON_SLIPPED: "夾爪碰到物品後又繼續閉合：物品已滑落。",
+        REASON_NOT_RELEASED: "夾爪張開後仍判定為夾著物品，放開未被確認。",
+        REASON_OBJECT_NOT_FOUND: "攝影機沒有看到指定的物品，沒有送出任何動作指令。",
+        REASON_CONTAINER_NOT_FOUND: "攝影機沒有看到指定的容器，沒有送出任何動作指令。",
+        REASON_POSE_UNREACHABLE: "手臂在關節範圍內到不了這個位置，沒有送出任何動作指令。",
+        REASON_NOTHING_HELD: "夾爪目前沒有夾著物品，沒有可放置的東西，沒有送出任何動作指令。",
+        REASON_NOT_IN_CONTAINER: "放開後攝影機沒有看到物品在容器內。",
+        REASON_PERCEPTION_DISAGREES: "夾爪判定夾住，但攝影機看到物品仍在桌面上。",
+        REASON_PLACEMENT_UNOBSERVED: "放開後攝影機沒有看到物品，無法確認是否放進容器。",
+        REASON_PERCEPTION_UNAVAILABLE: "沒有可用的攝影機畫面，沒有送出任何動作指令。",
+        REASON_KINEMATICS_UNAVAILABLE: "這支手臂的設定檔沒有運動學鏈，無法規劃座標目標，沒有送出任何動作指令。",
+        REASON_SIMULATION_ON_HARDWARE: "模擬設定指向的不是模擬埠（可能是實體手臂），拒絕執行，沒有送出任何動作指令。",
     }
 )
 
@@ -156,6 +206,19 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_NOT_REACHED: "The arm stopped short of the target and was told to hold",
         REASON_STOP_REQUESTED: "Stop requested: the arm was told to hold with torque on; not a confirmed stop",
         REASON_DEADLINE: "The deadline passed; the arm was told to hold",
+        REASON_NO_OBJECT: "The jaws closed fully; nothing is held",
+        REASON_SLIPPED: "The jaws met an object and then crept on toward closed; it slipped out",
+        REASON_NOT_RELEASED: "The gripper still reads as holding after it was opened",
+        REASON_OBJECT_NOT_FOUND: "The camera does not see the object; nothing was sent",
+        REASON_CONTAINER_NOT_FOUND: "The camera does not see the container; nothing was sent",
+        REASON_POSE_UNREACHABLE: "No joint solution within the limits reaches a pose of the plan; nothing was sent",
+        REASON_NOTHING_HELD: "The gripper holds nothing to place; nothing was sent",
+        REASON_NOT_IN_CONTAINER: "After the release the camera does not see the object inside the container",
+        REASON_PERCEPTION_DISAGREES: "The gripper reads held but the camera sees the object still on the table",
+        REASON_PLACEMENT_UNOBSERVED: "After the release the camera did not see the object; the placement is unverified",
+        REASON_PERCEPTION_UNAVAILABLE: "No camera frame is available; nothing was sent",
+        REASON_KINEMATICS_UNAVAILABLE: "The arm config declares no kinematic chain; nothing was sent",
+        REASON_SIMULATION_ON_HARDWARE: "A simulation config names a port that may be hardware; nothing was sent",
     }
 )
 
@@ -205,7 +268,63 @@ def _output(required: tuple[str, ...], **properties: Any) -> Mapping[str, Any]:
 
 
 _MOVED = {"arm_before": dict(ARM_STATE_SCHEMA), "effect_applied": {"const": True}}
-_GRIPPER_MOVED = {**_MOVED, "gripper_target": _NUMBER, "reached_command": {"type": "boolean"}}
+_SOURCE = {"enum": ["hardware", "simulation"]}
+_GRIP = {
+    "type": "object",
+    "required": ["position", "goal", "gap", "held"],
+    "properties": {"position": _NUMBER, "goal": {"type": ["number", "null"]}, "gap": _NUMBER,
+                   "effort": {"type": ["number", "null"]}, "held": {"type": "boolean"}},
+}
+_GRIPPER_MOVED = {**_MOVED, "gripper_target": _NUMBER, "reached_command": {"type": "boolean"},
+                  "object_held": {"type": "boolean"}, "grip": _GRIP, "source": _SOURCE}
+_TABLE_POSE = {
+    "type": "object",
+    "required": ["frame", "x", "y", "z", "yaw"],
+    "properties": {"frame": {"type": "string"}, "x": _NUMBER, "y": _NUMBER, "z": _NUMBER, "yaw": _NUMBER},
+}
+_PHASES = {
+    "type": "array",
+    "maxItems": 16,
+    "items": {"type": "object", "required": ["phase", "started_ms", "ms"],
+              "properties": {"phase": {"type": "string"}, "started_ms": _NUMBER, "ms": _NUMBER}},
+}
+_LATENCY = {"type": "object", "required": ["total"], "additionalProperties": _NUMBER}
+#: One located object (``perception.locate_objects``), the shape Cloud records as a world-model object instance.
+OBJECT_SCHEMA: Mapping[str, Any] = MappingProxyType({
+    "type": "object",
+    "required": ["id", "kind", "label", "pose", "uncertainty", "observed_at", "source"],
+    "properties": {
+        "id": {"type": "string", "maxLength": 64}, "kind": {"enum": ["block", "container"]},
+        "label": {"type": "string", "maxLength": 64}, "pose": _TABLE_POSE,
+        "uncertainty": {"type": "object", "required": ["xy_m", "yaw_rad"],
+                        "properties": {"xy_m": _NUMBER, "yaw_rad": _NUMBER}},
+        "observed_at": {"type": "string"}, "source": _SOURCE,
+    },
+})
+
+
+def _held_change(kind: str, field: str, value: int, observe: str, english: str, chinese: str) -> dict[str, Any]:
+    """An evidence spec: ``field`` changes by exactly ``value`` from before the call to after it."""
+    return {
+        "kind": kind, "observe": observe, "phases": ["before", "after"],
+        "measure": {"op": "delta", "fields": [field]}, "expect": {"value": value},
+        "tolerance": {"absolute": 0.0}, "observer": "self",
+        "label": {"en": english, "zh-TW": chinese}, "unit": "",
+    }
+
+
+#: What the adapter's ``observe`` reports, numerically, for these specs to be judged from.
+OBSERVED_HELD = "object_held"
+OBSERVED_ON_TABLE = "objects_on_table"
+OBSERVED_IN_CONTAINERS = "objects_in_containers"
+EVIDENCE_HELD = _held_change("manipulation.object_held", OBSERVED_HELD, 1, "gripper",
+                             "Gripper holds an object", "夾爪夾住物品")
+EVIDENCE_RELEASED = _held_change("manipulation.object_released", OBSERVED_HELD, -1, "gripper",
+                                 "Gripper let go of the object", "夾爪放開物品")
+EVIDENCE_LEFT_TABLE = _held_change("perception.object_left_table", OBSERVED_ON_TABLE, -1, "table_objects",
+                                   "One object left the table", "桌面上少了一個物品")
+EVIDENCE_INTO_CONTAINER = _held_change("perception.object_in_container", OBSERVED_IN_CONTAINERS, 1, "table_objects",
+                                       "One more object inside a container", "容器內多了一個物品")
 
 #: What a pose may be called: the arm config's own name rule (``arm_config.valid_name``).
 POSE_NAME_PATTERN = "^[A-Za-z][A-Za-z0-9_]{0,63}$"
@@ -248,6 +367,8 @@ class CapabilitySpec:
     # The manifest's arguments when they do not depend on the arm's config
     # (a move's do, and are built by ``discovery.move_input_schema``).
     input_schema: Mapping[str, Any] = NO_ARGUMENTS
+    # Core parameters whose entries travel as one argument each (``joints``, ``pose``).
+    flattened: tuple[str, ...] = ()
 
     @property
     def safety_class(self) -> str:
@@ -281,7 +402,7 @@ def _contract(**fields: Any) -> Mapping[str, Any]:
     return MappingProxyType({"schema": CONTRACT_SCHEMA, **fields})
 
 
-def _moving(*effects: str) -> Mapping[str, Any]:
+def _moving(*effects: str, evidence: tuple[Mapping[str, Any], ...] = (), idempotent: bool = True) -> Mapping[str, Any]:
     """The contract of a capability that moves the arm, as Cloud's manipulation rows resolve."""
     return _contract(
         actuates=True,
@@ -291,10 +412,10 @@ def _moving(*effects: str) -> Mapping[str, Any]:
         # cancel makes the arm hold where it is (see the adapter).
         cancellable=True,
         # An absolute target: sending it twice leaves the arm in the same place.
-        idempotent=True,
+        idempotent=idempotent,
         effects=list(effects),
         requires=[],
-        evidence=[],
+        evidence=[dict(item) for item in evidence],
     )
 
 
@@ -368,6 +489,7 @@ MOVE_JOINTS = CapabilitySpec(
     timeout_ms=60_000,
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
     exactly_one_of=("pose", "joints"),
+    flattened=("joints",),
 )
 
 GRASP = CapabilitySpec(
@@ -376,18 +498,21 @@ GRASP = CapabilitySpec(
     action="grasp",
     label="Close gripper",
     display_name="夾取",
-    description="Close the gripper where it is; whether it holds anything is not the arm's to say",
+    description=(
+        "Close the gripper where it is; completed only when the gripper signature shows an object held "
+        "(closing on nothing is a failed grasp)"
+    ),
     manifest_description=(
-        "在目前位置閉合夾爪；是否真的夾住物品不是手臂自己能證明的。"
-        "Close the gripper; whether it holds the part is not proven by the arm."
+        "在目前位置閉合夾爪；只有夾爪讀數顯示夾住物品才算完成（閉合到底代表沒夾到）。"
+        "Close the gripper; completed only when its readings show an object held."
     ),
     icon="Grab",
     color="#FFA16F",
     tags=("manipulation", "gripper", "grasp"),
     params_schema=MappingProxyType({}),
-    contract=_moving("manipulation.gripper.changed"),
-    output_schema=_output(("arm", "arm_before", "gripper_target", "reached_command", "effect_applied"),
-                          **_GRIPPER_MOVED),
+    contract=_moving("manipulation.gripper.changed", evidence=(EVIDENCE_HELD,)),
+    output_schema=_output(("arm", "arm_before", "gripper_target", "reached_command", "object_held", "grip",
+                           "effect_applied"), **_GRIPPER_MOVED),
     timeout_ms=20_000,
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
 )
@@ -404,9 +529,9 @@ RELEASE = CapabilitySpec(
     color="#FFA16F",
     tags=("manipulation", "gripper", "release"),
     params_schema=MappingProxyType({}),
-    contract=_moving("manipulation.gripper.changed"),
-    output_schema=_output(("arm", "arm_before", "gripper_target", "reached_command", "effect_applied"),
-                          **_GRIPPER_MOVED),
+    contract=_moving("manipulation.gripper.changed", evidence=(EVIDENCE_RELEASED,)),
+    output_schema=_output(("arm", "arm_before", "gripper_target", "reached_command", "object_held", "grip",
+                           "effect_applied"), **_GRIPPER_MOVED),
     timeout_ms=20_000,
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
 )
@@ -480,11 +605,171 @@ MARK_POSE = CapabilitySpec(
     ),
 )
 
-SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE)
+_ID_TEXT = {"type": "string", "maxLength": 64, "minLength": 1}
+_PERCEIVED = {"perception_before": {"type": ["object", "null"]}, "perception_after": {"type": "object"}}
+_PLANNED = {"target": _TABLE_POSE, "phases": _PHASES, "latency_ms": _LATENCY, "source": _SOURCE,
+            "plan": {"type": "object"}}
+
+LOCATE_OBJECTS = CapabilitySpec(
+    capability_id="perception.locate_objects",
+    module_id="perception.locate_objects",
+    action="locate_objects",
+    label="Locate objects",
+    display_name="辨識桌面物品",
+    description="Locate the objects on the table in the table frame, as the arm's camera sees them now",
+    manifest_description=(
+        "用手臂的攝影機找出桌面上的物品（積木、容器）在桌面座標中的位置與不確定度。"
+        "Locate the objects on the table, in the table frame, from the arm's camera."
+    ),
+    icon="ScanSearch",
+    color="#5CE4C8",
+    tags=("perception", "camera", "objects", "read"),
+    params_schema=MappingProxyType({
+        "kind": {"type": "string", "label": "Kind", "description": "Only objects of this kind (block or container)",
+                 "required": False},
+        "label": {"type": "string", "label": "Label", "description": "Only objects with this label",
+                  "required": False},
+    }),
+    contract=_contract(actuates=False, safety_class="read_only", requires_safe_stop=False, cancellable=True,
+                       idempotent=True, effects=[], requires=[], evidence=[]),
+    output_schema=MappingProxyType({
+        "type": "object",
+        "required": ["objects", "frame", "capture", "source"],
+        "properties": {
+            "objects": {"type": "array", "maxItems": 64, "items": dict(OBJECT_SCHEMA)},
+            "frame": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}},
+            "capture": {"type": "object"},
+            "source": _SOURCE,
+        },
+    }),
+    timeout_ms=10_000,
+    input_schema=MappingProxyType({
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["block", "container"]},
+                       "label": {"type": "string", "maxLength": 64}},
+        "required": [],
+        "additionalProperties": False,
+    }),
+)
+
+PICK = CapabilitySpec(
+    capability_id="manipulation.pick",
+    module_id="manipulation.pick",
+    action="pick",
+    label="Pick an object",
+    display_name="拾取物品",
+    description=(
+        "Pick a located object (by id) or whatever is at a table position: approach, descend, grasp, lift, "
+        "and verify it is held by the gripper signature and the camera"
+    ),
+    manifest_description=(
+        "拾取指定物品（物品 ID 或桌面座標）：接近、下降、夾取、抬起，並以夾爪讀數與攝影機確認夾住。"
+        "Pick an object by id or table position, verified by gripper and camera."
+    ),
+    icon="Grab",
+    color="#FFA16F",
+    tags=("manipulation", "pick", "cartesian"),
+    params_schema=MappingProxyType({
+        "object_id": {"type": "string", "label": "Object", "description": "A located object's id",
+                      "required": False},
+        "pose": {"type": "object", "label": "Table position",
+                 "description": "x, y (and optionally yaw) in the table frame, metres and radians",
+                 "required": False},
+    }),
+    contract=_moving("manipulation.object.picked", evidence=(EVIDENCE_HELD, EVIDENCE_LEFT_TABLE), idempotent=False),
+    output_schema=_output(
+        ("arm", "arm_before", "object_held", "grip", "target", "phases", "latency_ms", "effect_applied", "source"),
+        object_id={"type": ["string", "null"]}, object_held={"const": True}, grip=_GRIP, **_PLANNED, **_PERCEIVED,
+        **_MOVED,
+    ),
+    timeout_ms=90_000,
+    required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
+    exactly_one_of=("object_id", "pose"),
+    input_schema=MappingProxyType({
+        "type": "object",
+        "properties": {"object_id": _ID_TEXT, "x": {"type": "number", "unit": "m"},
+                       "y": {"type": "number", "unit": "m"}, "yaw": {"type": "number", "unit": "rad"}},
+        "required": [],
+        "additionalProperties": False,
+    }),
+    flattened=("pose",),
+)
+
+PLACE = CapabilitySpec(
+    capability_id="manipulation.place",
+    module_id="manipulation.place",
+    action="place",
+    label="Place the held object",
+    display_name="放置物品",
+    description=(
+        "Place the held object into a located container (by id) or at a table position: move, descend, release, "
+        "retreat, and verify it was let go and, for a container, that the camera sees it inside"
+    ),
+    manifest_description=(
+        "把夾著的物品放進指定容器（容器 ID）或桌面座標：移動、下降、放開、退回，並確認已放開且物品在容器內。"
+        "Place the held object into a container or at a table position, verified."
+    ),
+    icon="Hand",
+    color="#FFA16F",
+    tags=("manipulation", "place", "cartesian"),
+    params_schema=MappingProxyType({
+        "container_id": {"type": "string", "label": "Container", "description": "A located container's id",
+                         "required": False},
+        "pose": {"type": "object", "label": "Table position",
+                 "description": "x, y in the table frame, metres", "required": False},
+    }),
+    contract=_moving("manipulation.object.placed", evidence=(EVIDENCE_RELEASED, EVIDENCE_INTO_CONTAINER),
+                     idempotent=False),
+    output_schema=_output(
+        ("arm", "arm_before", "released", "object_held", "grip", "target", "phases", "latency_ms", "effect_applied",
+         "source"),
+        container_id={"type": ["string", "null"]}, released={"const": True}, object_held={"const": False},
+        grip=_GRIP, **_PLANNED, **_PERCEIVED, **_MOVED,
+    ),
+    timeout_ms=90_000,
+    required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
+    exactly_one_of=("container_id", "pose"),
+    input_schema=MappingProxyType({
+        "type": "object",
+        "properties": {"container_id": _ID_TEXT, "x": {"type": "number", "unit": "m"},
+                       "y": {"type": "number", "unit": "m"}},
+        "required": [],
+        "additionalProperties": False,
+    }),
+    flattened=("pose",),
+)
+
+SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS,
+                                     PICK, PLACE)
 SPECS_BY_CAPABILITY: Mapping[str, CapabilitySpec] = MappingProxyType({spec.capability_id: spec for spec in SPECS})
 SPECS_BY_MODULE: Mapping[str, CapabilitySpec] = MappingProxyType({spec.module_id: spec for spec in SPECS})
 CAPABILITY_IDS: tuple[str, ...] = tuple(spec.capability_id for spec in SPECS)
 MODULE_IDS: tuple[str, ...] = tuple(spec.module_id for spec in SPECS)
+
+
+# -- telemetry (``flyto.resource-manifest.v1`` ``telemetry_channels``) -------------------------
+
+_FAULT_FIELD = {"type": ["object", "null"], "properties": {"reason": {"type": "string"}, "since": {"type": "string"}}}
+#: What the execution host may publish for this arm, sampled by ``discovery``'s ``telemetry_sampler``.
+TELEMETRY_CHANNELS: tuple[Mapping[str, Any], ...] = tuple(MappingProxyType(row) for row in (
+    {"channel_id": "joint_positions", "display_name": "Joint positions",
+     "payload_schema": {"type": "object", "properties": {"unit": {"type": "string"}, "joints": _JOINT_MAP,
+                                                         "source": _SOURCE}},
+     "max_age_seconds": 5.0},
+    {"channel_id": "gripper", "display_name": "Gripper",
+     "payload_schema": {"type": "object", "properties": {"position": _NUMBER, "state": {"type": "string"},
+                                                         "goal": {"type": ["number", "null"]},
+                                                         "effort": {"type": ["number", "null"]}, "source": _SOURCE}},
+     "max_age_seconds": 5.0},
+    {"channel_id": "object_held", "display_name": "Object held",
+     "payload_schema": {"type": "object", "properties": {"object_held": {"type": "boolean"}, "source": _SOURCE}},
+     "max_age_seconds": 5.0},
+    {"channel_id": "arm_fault", "display_name": "Arm fault",
+     "payload_schema": {"type": "object", "properties": {"fault": _FAULT_FIELD, "source": _SOURCE}},
+     "max_age_seconds": 30.0},
+))
+#: Seconds between samples (the host clamps it to 0.5..30).
+TELEMETRY_INTERVAL_SECONDS = 1.0
 
 
 def contract_of(capability_id: str) -> dict[str, Any] | None:
@@ -497,16 +782,25 @@ __all__ = [
     "ADAPTER_ID",
     "CAPABILITY_IDS",
     "CONTRACT_SCHEMA",
+    "EVIDENCE_HELD",
+    "EVIDENCE_INTO_CONTAINER",
+    "EVIDENCE_LEFT_TABLE",
+    "EVIDENCE_RELEASED",
     "GRASP",
+    "LOCATE_OBJECTS",
     "MANIPULATION_STATE",
     "MARK_POSE",
     "MODULE_IDS",
     "MODULE_PACK",
     "MOVE_JOINTS",
+    "OBJECT_SCHEMA",
+    "PICK",
+    "PLACE",
     "RELEASE",
     "SPECS",
     "SPECS_BY_CAPABILITY",
     "SPECS_BY_MODULE",
+    "TELEMETRY_CHANNELS",
     "CapabilitySpec",
     "contract_of",
     "refusal_detail",

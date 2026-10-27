@@ -6,7 +6,10 @@ family's safety class, stop and permission defaults applied). Change it only
 together with that file; ``tests/integration`` checks the copy against a
 Cloud checkout. ``manipulation.mark_pose`` is the row this pack asks Cloud to
 add (``docs/project/DECISIONS.md``), written here as Cloud is asked to resolve
-it: stated ``controlled`` with no permission, as ``places.mark`` is.
+it: stated ``controlled`` with no permission, as ``places.mark`` is. The
+sensing closed loop (owner 2026-10-27) asks for three more, ``REQUESTED_ROWS``:
+``perception.locate_objects`` (read only) and ``manipulation.pick`` /
+``manipulation.place`` (the manipulation family's movement defaults).
 """
 
 from __future__ import annotations
@@ -18,10 +21,17 @@ import pytest
 from flyto_modules_lerobot.capabilities import (
     CAPABILITY_IDS,
     CONTRACT_SCHEMA,
+    EVIDENCE_HELD,
+    EVIDENCE_INTO_CONTAINER,
+    EVIDENCE_LEFT_TABLE,
+    EVIDENCE_RELEASED,
     GRASP,
+    LOCATE_OBJECTS,
     MANIPULATION_STATE,
     MARK_POSE,
     MOVE_JOINTS,
+    PICK,
+    PLACE,
     RELEASE,
     SPECS,
     contract_of,
@@ -39,12 +49,22 @@ CLOUD_MANIPULATION_ROWS = {
     "manipulation.mark_pose": {"actuates": False, "safety_class": "controlled", "requires_safe_stop": False,
                                "cancellable": True, "required_permissions": ()},
 }
+#: Requested from Cloud's vocabulary for the sensing closed loop (``docs/project/DECISIONS.md`` 2026-10-27).
+REQUESTED_ROWS = {
+    "perception.locate_objects": {"actuates": False, "safety_class": "read_only", "requires_safe_stop": False,
+                                  "cancellable": True, "required_permissions": ()},
+    "manipulation.pick": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
+                          "cancellable": True, "required_permissions": ("equipment.motion",)},
+    "manipulation.place": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
+                           "cancellable": True, "required_permissions": ("equipment.motion",)},
+}
 
 
-def test_the_pack_provides_exactly_clouds_manipulation_vocabulary():
-    assert set(CAPABILITY_IDS) == set(CLOUD_MANIPULATION_ROWS)
+def test_the_pack_provides_exactly_clouds_manipulation_vocabulary_and_the_requested_rows():
+    rows = {**CLOUD_MANIPULATION_ROWS, **REQUESTED_ROWS}
+    assert set(CAPABILITY_IDS) == set(rows)
     for spec in SPECS:
-        row = CLOUD_MANIPULATION_ROWS[spec.capability_id]
+        row = rows[spec.capability_id]
         assert spec.actuates is row["actuates"]
         assert spec.safety_class == row["safety_class"]
         assert spec.contract["requires_safe_stop"] is row["requires_safe_stop"]
@@ -53,7 +73,8 @@ def test_the_pack_provides_exactly_clouds_manipulation_vocabulary():
 
 
 def test_no_vendor_or_invented_id():
-    assert not [cid for cid in CAPABILITY_IDS if cid.startswith("vendor.") or not cid.startswith("manipulation.")]
+    assert not [cid for cid in CAPABILITY_IDS
+                if cid.startswith("vendor.") or not cid.startswith(("manipulation.", "perception."))]
 
 
 def test_every_contract_declares_the_v1_schema():
@@ -61,11 +82,17 @@ def test_every_contract_declares_the_v1_schema():
         assert spec.contract["schema"] == CONTRACT_SCHEMA == "flyto.capability-contract.v1"
 
 
-def test_no_contract_lets_the_arm_prove_a_grasp_or_a_place_by_itself():
-    """No independent observation of an object in the gripper or the place zone exists in Cloud yet."""
-    for spec in (GRASP, RELEASE):
-        assert spec.contract["evidence"] == []
-        assert not [item for item in spec.contract["evidence"] if item.get("observer", "self") == "self"]
+def test_grasp_release_pick_and_place_declare_the_observations_they_are_proven_by():
+    """A completed call is not proof: Cloud judges these specs from the host's before/after observations."""
+    assert GRASP.contract["evidence"] == [EVIDENCE_HELD]
+    assert RELEASE.contract["evidence"] == [EVIDENCE_RELEASED]
+    assert PICK.contract["evidence"] == [EVIDENCE_HELD, EVIDENCE_LEFT_TABLE]
+    assert PLACE.contract["evidence"] == [EVIDENCE_RELEASED, EVIDENCE_INTO_CONTAINER]
+    for spec in (GRASP, RELEASE, PICK, PLACE):
+        for item in spec.contract["evidence"]:
+            assert item["phases"] == ["before", "after"] and item["measure"]["op"] == "delta"
+            assert item["tolerance"] == {"absolute": 0.0} and item["observer"] == "self"
+    assert LOCATE_OBJECTS.contract["evidence"] == [] and LOCATE_OBJECTS.actuates is False
 
 
 def test_move_joints_declares_no_evidence_core_cannot_judge_for_a_named_pose():
@@ -130,9 +157,11 @@ def test_every_capability_declares_a_readable_output_schema():
     (MOVE_JOINTS, {"arm": ARM, "arm_before": ARM, "target": {"elbow_flex": 45.0}, "pose": None,
                    "max_error": 0.4, "effect_applied": True}),
     (GRASP, {"arm": ARM, "arm_before": ARM, "gripper_target": 2.0, "reached_command": False,
-             "effect_applied": True}),
+             "object_held": True, "grip": {"position": 26.9, "goal": 2.0, "gap": 24.9, "effort": 60.0, "held": True},
+             "effect_applied": True, "source": "simulation"}),
     (RELEASE, {"arm": ARM, "arm_before": ARM, "gripper_target": 60.0, "reached_command": True,
-               "effect_applied": True}),
+               "object_held": False, "grip": {"position": 60.0, "goal": 60.0, "gap": 58.0, "effort": None,
+                                              "held": False}, "effect_applied": True, "source": "hardware"}),
     (MARK_POSE, {"arm": ARM, "pose": "ready", "joints": {"elbow_flex": 45.0}, "replaced": False,
                  "backup": "arm.json.20261023T000000Z.bak", "effect_applied": True}),
 ])
@@ -166,7 +195,7 @@ def test_flyto_core_accepts_every_contract():
     for spec in SPECS:
         normalized = core.validate_contract(dict(spec.contract), spec.core_params_schema())
         assert normalized["safety_class"] == spec.safety_class
-        assert normalized["evidence"] == []
+        assert normalized["evidence"] == [core.validate_evidence(dict(item)) for item in spec.contract["evidence"]]
 
 
 def test_a_mark_reply_without_its_backup_is_caught():

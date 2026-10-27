@@ -34,6 +34,17 @@ it:
 Connecting is itself a LeRobot behaviour worth knowing: its ``configure()``
 writes motor settings with torque briefly disabled. So the session connects
 once per arm per process, lazily, and nothing here reconnects on its own.
+
+Which robot a config gets is the backend table (``backends.py``): LeRobot's
+own for every robot type it registers, the simulator for ``sim``. A
+simulation config that names a port which is not a ``sim:`` name -- a device,
+real hardware -- is refused before anything is built
+(:class:`SimulationTargetsHardware`), and latched like a fault.
+
+Every fault the session latches carries a typed ``fault_code``
+(:data:`FAULT_CODES`) and the instant it was latched, which the adapter's
+``connection_status()`` reports in the shape the execution host's fault
+latch reads (``{"reason": <code>, "since": <ISO 8601>}``).
 """
 
 from __future__ import annotations
@@ -42,9 +53,24 @@ import importlib
 import math
 import threading
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from .arm_config import ArmConfig
+from .backends import backend_for
+
+#: LeRobot's protection tripped on a read (over-current: it cut torque and disconnected).
+FAULT_PROTECTION = "protection_tripped"
+#: The robot was connected and is no longer (only LeRobot's protection disconnects it).
+FAULT_DISCONNECTED = "disconnected"
+#: The observation carried no finite position for a configured motor.
+FAULT_POSITION_UNREADABLE = "position_unreadable"
+#: LeRobot's robot drives other motors than the config names.
+FAULT_MOTORS_MISMATCH = "motors_mismatch"
+#: A simulation config names a port that may be hardware.
+FAULT_SIMULATION_ON_HARDWARE = "simulation_targets_hardware"
+FAULT_CODES = frozenset({FAULT_PROTECTION, FAULT_DISCONNECTED, FAULT_POSITION_UNREADABLE, FAULT_MOTORS_MISMATCH,
+                         FAULT_SIMULATION_ON_HARDWARE})
 
 
 class ArmUnreachable(ConnectionError):
@@ -56,7 +82,24 @@ class CommandLost(ConnectionError):
 
 
 class ArmFault(RuntimeError):
-    """LeRobot's protection tripped; the session refuses until the host restarts."""
+    """LeRobot's protection tripped; the session refuses until the host restarts.
+
+    ``fault_code`` is the typed reason (the execution host latches an
+    exception that carries one as an equipment fault).
+    """
+
+    def __init__(self, message: str, *, fault_code: str = FAULT_PROTECTION) -> None:
+        """The message and the typed fault code."""
+        super().__init__(message)
+        self.fault_code = fault_code
+
+
+class SimulationTargetsHardware(ArmFault):
+    """A simulation config names a port that is not a simulator's; nothing is built, nothing moves."""
+
+    def __init__(self, message: str) -> None:
+        """Latched with :data:`FAULT_SIMULATION_ON_HARDWARE`."""
+        super().__init__(message, fault_code=FAULT_SIMULATION_ON_HARDWARE)
 
 
 class NotCalibrated(RuntimeError):
@@ -94,8 +137,20 @@ def reported_motors(robot: Any) -> tuple[str, ...]:
 def _position(observation: Mapping[str, Any], motor: str) -> float:
     value = observation.get(f"{motor}.pos")
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-        raise ArmFault(f"LeRobot's observation carries no finite position for {motor!r}")
+        raise ArmFault(f"LeRobot's observation carries no finite position for {motor!r}",
+                       fault_code=FAULT_POSITION_UNREADABLE)
     return float(value)
+
+
+def _effort(observation: Mapping[str, Any], key: str | None) -> float | None:
+    value = observation.get(key) if key else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    return float(value)
+
+
+def _instant() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 class ArmSession:
@@ -108,6 +163,7 @@ class ArmSession:
     def __init__(self, config: ArmConfig, *, robot_factory: RobotFactory | None = None) -> None:
         """Wire the session; nothing is built or connected yet."""
         self.config = config
+        self.backend = backend_for(config.lerobot.robot_type)
         self._factory = robot_factory or lerobot_robot
         self._robot: Any = None
         self.lock = threading.RLock()
@@ -115,8 +171,18 @@ class ArmSession:
         # ``lock`` so a stop never waits on a file write.
         self.config_lock = threading.Lock()
         self.fault: str | None = None
+        # The typed code and the instant of the latched fault (``connection_status``).
+        self.fault_code: str | None = None
+        self.fault_since: str | None = None
         # Set when LeRobot's robot drives other motors than the config names.
         self.mismatch: MotorsMismatch | None = None
+        # The last goal this session commanded per motor, and the gripper effort of the last reading.
+        self.goals: dict[str, float] = {}
+        self.effort: float | None = None
+        # The camera of this arm (``perception.build_camera``), built when first used.
+        self.camera: Any = None
+        # The id of the object a completed pick left in the gripper (None: unknown or nothing).
+        self.held_object: str | None = None
         # Calls in flight on this arm, from every adapter: a stop interrupts them all.
         self.calls_in_flight: set[Any] = set()
 
@@ -131,11 +197,17 @@ class ArmSession:
         return (robot is not None and bool(getattr(robot, "is_connected", False)) and self.fault is None
                 and self.mismatch is None)
 
+    def latch(self, message: str, code: str) -> ArmFault:
+        """Record a fault (the first one stays) and return it to raise."""
+        if self.fault is None:
+            self.fault, self.fault_code, self.fault_since = message[:300], code, _instant()
+        return ArmFault(self.fault, fault_code=self.fault_code or code)
+
     def ensure_connected(self) -> None:
         """Connect once; raise the typed error that says why the arm cannot be used."""
         with self.lock:
             if self.fault is not None:
-                raise ArmFault(self.fault)
+                raise ArmFault(self.fault, fault_code=self.fault_code or FAULT_PROTECTION)
             if self.mismatch is not None:
                 raise MotorsMismatch(str(self.mismatch), reported=self.mismatch.reported,
                                      configured=self.mismatch.configured)
@@ -143,12 +215,14 @@ class ArmSession:
                 return
             if self._robot is not None:
                 # It was connected and is no longer: only LeRobot's protection disconnects it.
-                self.fault = "LeRobot disconnected the arm"
-                raise ArmFault(self.fault)
+                raise self.latch("LeRobot disconnected the arm", FAULT_DISCONNECTED)
             lerobot = self.config.lerobot
+            if self.backend.refuses_port(lerobot.port):
+                self.latch("a simulation config names a port that is not a simulator's; it may be hardware",
+                           FAULT_SIMULATION_ON_HARDWARE)
+                raise SimulationTargetsHardware(self.fault or "")
             try:
-                robot = self._factory(robot_module=lerobot.robot_module, robot_type=lerobot.robot_type,
-                                      settings=lerobot.robot_settings())
+                robot = self.backend.build(self.config, self._factory)
                 robot.connect(calibrate=False)
             except (OSError, ConnectionError) as error:
                 raise ArmUnreachable(f"the arm's port did not open ({type(error).__name__})") from error
@@ -156,6 +230,7 @@ class ArmSession:
             reported = reported_motors(robot)
             configured = self.config.motor_names
             if set(reported) != set(configured):
+                self.fault_code, self.fault_since = FAULT_MOTORS_MISMATCH, _instant()
                 self.mismatch = MotorsMismatch(
                     "LeRobot's robot drives other motors than the arm config names",
                     reported=reported, configured=configured,
@@ -175,9 +250,14 @@ class ArmSession:
             except ConnectionError as error:
                 raise ArmUnreachable(f"reading the arm failed ({type(error).__name__})") from error
             except RuntimeError as error:
-                self.fault = f"LeRobot protection: {error}"[:300]
-                raise ArmFault(self.fault) from error
-            return {motor: _position(observation, motor) for motor in self.config.motor_names}
+                code = getattr(error, "fault_code", None) or FAULT_PROTECTION
+                raise self.latch(f"LeRobot protection: {error}", str(code)) from error
+            try:
+                positions = {motor: _position(observation, motor) for motor in self.config.motor_names}
+            except ArmFault as error:
+                raise self.latch(str(error), error.fault_code) from error
+            self.effort = _effort(observation, self.config.gripper.effort_key)
+            return positions
 
     def command(self, targets: Mapping[str, float]) -> None:
         """Send goal positions for these motors only; others keep their goals."""
@@ -188,6 +268,9 @@ class ArmSession:
                 self._robot.send_action(action)
             except (ConnectionError, OSError) as error:
                 raise CommandLost(f"sending the command failed ({type(error).__name__})") from error
+            finally:
+                # Whatever was asked is the goal now, as far as anyone can tell.
+                self.goals.update({motor: float(value) for motor, value in targets.items()})
 
     def hold(self, motors: tuple[str, ...]) -> dict[str, float]:
         """Command these motors to stay where they are now, torque on; the reading it held at."""
@@ -197,5 +280,7 @@ class ArmSession:
             return positions
 
 
-__all__ = ["ArmFault", "ArmSession", "ArmUnreachable", "CommandLost", "MotorsMismatch", "NotCalibrated",
-           "lerobot_robot", "reported_motors"]
+__all__ = ["FAULT_CODES", "FAULT_DISCONNECTED", "FAULT_MOTORS_MISMATCH", "FAULT_POSITION_UNREADABLE",
+           "FAULT_PROTECTION", "FAULT_SIMULATION_ON_HARDWARE", "ArmFault", "ArmSession", "ArmUnreachable",
+           "CommandLost", "MotorsMismatch", "NotCalibrated", "SimulationTargetsHardware", "lerobot_robot",
+           "reported_motors"]

@@ -12,8 +12,9 @@ At run time a step validates its arguments against its row, then hands
 ``{resource_id, capability_id, arguments}`` to the opaque dispatcher the AI
 Space execution host injected into the step context; the host's dispatcher
 calls the ``lerobot.arm`` adapter. Without a dispatcher a step only declares
-the request it would make. A move's ``joints`` parameter travels as one
-argument per joint, the shape the arm's manifest declares; whether a joint
+the request it would make. A move's ``joints`` parameter (and a pick's or a
+place's ``pose``) travels as one argument per entry, the shape the arm's
+manifest declares; whether a joint
 exists and is within its limits is the arm's config, checked by the adapter.
 
 A flyto-core whose ``register_module`` cannot carry a contract gets only the
@@ -45,8 +46,6 @@ MAX_RESOURCE_ID_LENGTH = 128
 MAX_TEXT_LENGTH = 64
 MAX_JOINTS = 16
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
-# The parameter whose entries become one argument each.
-_FLATTENED = "joints"
 
 OUTCOME_COMPLETED = "completed"
 _OUTCOME_ERRORS = {
@@ -114,7 +113,7 @@ def capability_request(spec: CapabilitySpec, params: Mapping[str, Any], *, resou
     arguments: dict[str, Any] = {}
     for name in given:
         value = _ARGUMENT_CHECKS[schema[name]["type"]](name, params[name])
-        arguments.update(value if name == _FLATTENED else {name: value})
+        arguments.update(value if name in spec.flattened else {name: value})
     return {"resource_id": resource_id.strip(), "capability_id": spec.capability_id, "arguments": arguments}
 
 
