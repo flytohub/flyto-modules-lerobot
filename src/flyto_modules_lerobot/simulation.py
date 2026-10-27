@@ -60,13 +60,14 @@ SIM_PORT_PREFIX = "sim:"
 SIMULATION_SOURCE = "simulation"
 
 SIMULATION_KEYS = frozenset({"seed", "initial_pose", "joint_speed", "gripper_speed", "gripper", "table_z_m",
-                             "objects", "latency", "faults", "physics"})
+                             "objects", "latency", "faults", "physics", "collision", "arm_rgba"})
 #: The MuJoCo backend's physics settings (``mujoco_sim``), with their defaults.
 PHYSICS_DEFAULTS: Mapping[str, float] = {"timestep": 0.002, "joint_kp": 40.0, "joint_damping": 1.0,
                                          "finger_kp": 300.0, "grip_force": 6.0, "friction": 1.5}
 _GRIPPER_KEYS = frozenset({"max_opening_m", "free_effort", "contact_effort", "reach_m"})
 _OBJECT_KEYS = frozenset({"id", "kind", "label", "colour", "x", "y", "yaw", "size_m"})
 _LATENCY_KEYS = frozenset({"read_ms", "jitter_ms"})
+_COLLISION_KEYS = frozenset({"link", "pos", "rpy", "half_size"})
 OBJECT_KINDS = frozenset({"block", "container"})
 #: The fault code a simulated motor fault carries unless the fault names one.
 DEFAULT_MOTOR_FAULT = "overcurrent"
@@ -120,6 +121,20 @@ class GripperPhysics:
 
 
 @dataclass(frozen=True)
+class CollisionBox:
+    """A box that collides, on a link of the arm's robot description (MuJoCo; metres, radians, link frame).
+
+    The description's meshes are drawn but never collide: a jaw mesh's convex
+    hull is the whole gripper. What touches an object is declared here.
+    """
+
+    link: str
+    pos: tuple[float, float, float]
+    rpy: tuple[float, float, float]
+    half_size: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """The simulated world as an arm config describes it."""
 
@@ -134,6 +149,9 @@ class SimulationConfig:
     jitter_ms: float
     faults: tuple[FaultSpec, ...]
     physics: Mapping[str, float] = field(default_factory=lambda: dict(PHYSICS_DEFAULTS))
+    collision: tuple[CollisionBox, ...] = ()
+    # The colour the arm is drawn in (MuJoCo), replacing the description's; None keeps the description's.
+    arm_rgba: tuple[float, float, float, float] | None = None
 
 
 def _number(value: Any, where: str) -> float:
@@ -239,6 +257,8 @@ def parse_simulation(raw: Any, *, poses: Sequence[str]) -> SimulationConfig:
     physics_raw = _keys(body.get("physics") or {}, "simulation.physics", frozenset(PHYSICS_DEFAULTS))
     physics = {key: _positive(physics_raw.get(key, default), f"simulation.physics.{key}")
                for key, default in PHYSICS_DEFAULTS.items()}
+    collision = tuple(_collision(item, f"simulation.collision[{index}]")
+                      for index, item in enumerate(body.get("collision") or ()))
     return SimulationConfig(
         seed=seed, initial_pose=initial,
         joint_speed=_positive(body.get("joint_speed", 90.0), "simulation.joint_speed"),
@@ -255,7 +275,37 @@ def parse_simulation(raw: Any, *, poses: Sequence[str]) -> SimulationConfig:
         jitter_ms=_non_negative(latency.get("jitter_ms", 0.0), "simulation.latency.jitter_ms"),
         faults=faults,
         physics=physics,
+        collision=collision,
+        arm_rgba=_rgba(body.get("arm_rgba")),
     )
+
+
+def _triple(value: Any, where: str, *, positive: bool = False) -> tuple[float, float, float]:
+    if not isinstance(value, Sequence) or isinstance(value, str) or len(value) != 3:
+        raise SimulationError(f"{where} must be three numbers")
+    check = _positive if positive else _number
+    return (check(value[0], where), check(value[1], where), check(value[2], where))
+
+
+def _rgba(raw: Any) -> tuple[float, float, float, float] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Sequence) or isinstance(raw, str) or len(raw) != 4:
+        raise SimulationError("simulation.arm_rgba must be four numbers in 0..1")
+    values = tuple(_number(value, "simulation.arm_rgba") for value in raw)
+    if not all(0.0 <= value <= 1.0 for value in values):
+        raise SimulationError("simulation.arm_rgba must be four numbers in 0..1")
+    return values  # type: ignore[return-value]
+
+
+def _collision(raw: Any, where: str) -> CollisionBox:
+    body = _keys(raw, where, _COLLISION_KEYS)
+    link = body.get("link")
+    if not isinstance(link, str) or not link:
+        raise SimulationError(f"{where}.link must name a link of the robot description")
+    return CollisionBox(link, _triple(body.get("pos"), f"{where}.pos"),
+                        _triple(body.get("rpy", (0.0, 0.0, 0.0)), f"{where}.rpy"),
+                        _triple(body.get("half_size"), f"{where}.half_size", positive=True))
 
 
 def port_is_simulated(port: str) -> bool:

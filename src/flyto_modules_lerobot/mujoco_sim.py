@@ -8,17 +8,24 @@ the same way, by ``lerobot.robot_type`` in the backend table. The in-process
 world stays the fast deterministic backend for statistics and fault
 injection; this one adds real contact physics and a rendered camera:
 
-* The model is MJCF generated from the arm config itself (:func:`build_mjcf`):
-  the declared kinematic chain as hinge joints with the config's limits, a
-  parallel two-finger gripper on slide joints at the tool point, a table
-  plane, the scene's blocks as free bodies and its containers as open boxes,
-  and an overhead camera. No third-party model is vendored
-  (``docs/project/DECISIONS.md`` 2026-10-27 records why and what was checked).
-* Grasping is contact physics: the fingers are force-limited position servos;
-  closing on a block stops them at its width and saturates their force, and
-  friction lifts it. The gripper reading is the finger separation and the
-  effort is the finger force, so the adapter's ``object_held`` comes from the
-  gripper signature, never from the scene.
+* The arm is the one the config's kinematics names. With a robot description
+  (``kinematics.model``, a URDF such as the packaged one under ``models/``) it
+  is built from that file (:func:`build_mjcf`): every link with the
+  description's masses, inertias and meshes (drawn, never colliding), every
+  mapped joint a hinge with the config's limits, driven by a position servo
+  whose torque is the joint's servo class's stall torque and whose goal moves
+  no faster than the class's no-load speed, and the jaw a hinge on the
+  description's moving-jaw joint. What touches an object are the boxes the
+  config declares on the jaws (``simulation.collision``). Without a
+  description, a written-out chain is drawn as capsules with two slide
+  fingers.
+* Around it: a table plane, the scene's blocks as free bodies, its containers
+  as open boxes, and an overhead camera.
+* Grasping is contact physics: the jaw servo is force-limited; closing on a
+  block stops the jaw at its width and saturates the force, and friction lifts
+  it. The gripper reading is the jaw's position and the effort its force, so
+  the adapter's ``object_held`` comes from the gripper signature, never from
+  the scene.
 * The camera (``perception.camera.kind: rendered``) renders an RGB frame
   offscreen; ``perception.detect`` -- the same colour-blob and homography
   pipeline as a USB camera -- locates objects in it. It never reads where the
@@ -40,6 +47,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, SimulatedArm, SimulationError, parse_fault
+from .urdf_model import matrix_quaternion, rpy_matrix
 
 #: The robot type an arm config names to be served by MuJoCo.
 MUJOCO_ROBOT_TYPE = "mujoco"
@@ -50,6 +58,10 @@ COLOURS: Mapping[str, tuple[float, float, float]] = {
 }
 _ARM_RGBA = "0.45 0.45 0.48 1"
 _FINGER_HALF = (0.004, 0.012, 0.013)
+#: Jaw pads are hard (printed plastic): a stiff contact, so a held block does not let the jaw creep on.
+_PAD_SOLREF, _PAD_SOLIMP = "0.004 1", "0.95 0.99 0.0005"
+#: The MuJoCo joint of a robot description's moving jaw.
+_JAW = "gripper_jaw"
 
 
 def _mujoco() -> Any:
@@ -68,8 +80,8 @@ def _joint_range(link: Any, limit: Any, to_radians: float) -> tuple[float, float
     return min(ends), max(ends)
 
 
-def build_mjcf(config: Any) -> str:
-    """The MJCF of this arm config's simulated world: arm, gripper, table, objects and overhead camera."""
+def _written_arm(config: Any) -> tuple[str, str, str]:
+    """A written-out chain as capsules with two slide fingers: (assets, arm body, actuators)."""
     chain, sim = config.kinematics, config.simulation
     physics = sim.physics
     limits = {joint.name: joint for joint in config.joints}
@@ -80,7 +92,8 @@ def build_mjcf(config: Any) -> str:
         low, high = _joint_range(link, limits[link.joint], chain.to_radians)
         child = links[index + 1].origin if index + 1 < len(links) else chain.tool
         body_xml.append(
-            f'<body name="link_{link.joint}" pos="{_v(link.origin)}" gravcomp="1">'
+            f'<body name="link_{link.joint}" pos="{_v(link.origin)}" quat="{_v(matrix_quaternion(link.rotation))}" '
+            f'gravcomp="1">'
             f'<joint name="{link.joint}" type="hinge" axis="{_v(link.axis)}" range="{low:.6g} {high:.6g}" '
             f'damping="{physics["joint_damping"]}" armature="0.01"/>'
             f'<geom type="capsule" fromto="0 0 0 {_v(child)}" size="0.012" rgba="{_ARM_RGBA}" '
@@ -100,6 +113,120 @@ def build_mjcf(config: Any) -> str:
     base = chain.base_position
     arm = (f'<body name="base" pos="{_v(base)}" euler="0 0 {chain.base_yaw:.6g}">'
            f'{"".join(body_xml)}{hand}{close}</body>')
+    actuators = "".join(
+        f'<position name="servo_{link.joint}" joint="{link.joint}" kp="{physics["joint_kp"]}" '
+        f'ctrlrange="{_joint_range(link, limits[link.joint], chain.to_radians)[0]:.6g} '
+        f'{_joint_range(link, limits[link.joint], chain.to_radians)[1]:.6g}"/>'
+        for link in links)
+    actuators += "".join(
+        f'<position name="servo_finger_{side}" joint="finger_{side}" kp="{physics["finger_kp"]}" '
+        f'ctrlrange="0 {opening:.6g}" forcelimited="true" forcerange="-{physics["grip_force"]} '
+        f'{physics["grip_force"]}"/>' for side in ("left", "right"))
+    return "", arm, actuators
+
+
+def _inertial(link: Any, override: float | None) -> str:
+    if override is not None:
+        # The description's mass for this link is not trusted (the config says so): a small solid at its origin.
+        side = 0.02
+        moment = override * side * side / 6.0
+        return f'<inertial pos="0 0 0" mass="{override:.6g}" diaginertia="{moment:.6g} {moment:.6g} {moment:.6g}"/>'
+    inertial = link.inertial
+    if inertial is None or inertial.mass <= 0:
+        return '<inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>'
+    ixx, iyy, izz, ixy, ixz, iyz = inertial.inertia
+    tensor = ((ixx, ixy, ixz), (ixy, iyy, iyz), (ixz, iyz, izz))
+    turn = rpy_matrix(inertial.rpy)
+    # The tensor in the link frame: R I R^T (MJCF takes a full inertia only without an orientation).
+    turned = [[sum(turn[i][k] * tensor[k][m] * turn[j][m] for k in range(3) for m in range(3)) for j in range(3)]
+              for i in range(3)]
+    full = (turned[0][0], turned[1][1], turned[2][2], turned[0][1], turned[0][2], turned[1][2])
+    return f'<inertial pos="{_v(inertial.origin)}" mass="{inertial.mass:.6g}" fullinertia="{_v(full)}"/>'
+
+
+def _model_arm(config: Any) -> tuple[str, str, str]:
+    """The arm built from its robot description: (assets, arm body, actuators)."""
+    chain, sim = config.kinematics, config.simulation
+    binding = chain.binding
+    model = binding.model
+    physics = sim.physics
+    limits = {joint.name: joint for joint in config.joints}
+    mapped = {link.model_joint: link for link in chain.links}
+    jaw = binding.gripper
+    if jaw is None:
+        raise SimulationError("a MuJoCo arm built from a robot description needs kinematics.model.gripper")
+    boxes: dict[str, list[Any]] = {}
+    for box in sim.collision:
+        if box.link not in model.links:
+            raise SimulationError(f"simulation.collision names link {box.link!r}, not in the robot description")
+        boxes.setdefault(box.link, []).append(box)
+    assets: list[str] = []
+    if sim.arm_rgba is not None:
+        # Printed parts are matte: little specular light.
+        assets.append(f'<material name="arm" rgba="{_v(sim.arm_rgba)}" specular="0.12" shininess="0.15" '
+                      'reflectance="0"/>')
+    friction = f'{physics["friction"]} 0.02 0.001'
+
+    def body(link_name: str) -> str:
+        link = model.links[link_name]
+        parts = [_inertial(link, binding.mass_overrides_kg.get(link_name))]
+        for index, visual in enumerate(link.visuals):
+            mesh = f"mesh_{link_name}_{index}"
+            assets.append(f'<mesh name="{mesh}" file="{visual.mesh}"/>')
+            look = ('material="arm"' if sim.arm_rgba is not None
+                    else f'rgba="{_v(visual.rgba) if visual.rgba is not None else _ARM_RGBA}"')
+            parts.append(f'<geom type="mesh" mesh="{mesh}" pos="{_v(visual.origin)}" '
+                         f'quat="{_v(matrix_quaternion(rpy_matrix(visual.rpy)))}" {look} '
+                         'contype="0" conaffinity="0" group="1" mass="0"/>')
+        for box in boxes.get(link_name, ()):
+            parts.append(f'<geom type="box" pos="{_v(box.pos)}" quat="{_v(matrix_quaternion(rpy_matrix(box.rpy)))}" '
+                         f'size="{_v(box.half_size)}" rgba="0.2 0.2 0.22 0.0" friction="{friction}" condim="4" '
+                         f'solref="{_PAD_SOLREF}" solimp="{_PAD_SOLIMP}" group="3" mass="0"/>')
+        for joint in model.children(link_name):
+            pose = f'pos="{_v(joint.origin)}" quat="{_v(matrix_quaternion(rpy_matrix(joint.rpy)))}"'
+            hinge = ""
+            if joint.name in mapped:
+                chain_link = mapped[joint.name]
+                low, high = _joint_range(chain_link, limits[chain_link.joint], chain.to_radians)
+                hinge = (f'<joint name="{chain_link.joint}" type="hinge" axis="{_v(joint.axis)}" '
+                         f'range="{low:.6g} {high:.6g}" damping="{physics["joint_damping"]}" armature="0.01"/>')
+            elif joint.name == jaw.joint:
+                low, high = _jaw_range(config, jaw)
+                hinge = (f'<joint name="{_JAW}" type="hinge" axis="{_v(joint.axis)}" range="{low:.6g} {high:.6g}" '
+                         f'damping="{physics["joint_damping"]}" armature="0.002"/>')
+            parts.append(f'<body name="{joint.child}" {pose}>{hinge}{body(joint.child)}</body>')
+        return "".join(parts)
+
+    base = chain.base_position
+    arm = (f'<body name="base" pos="{_v(base)}" euler="0 0 {chain.base_yaw:.6g}">'
+           f'<body name="{model.root}">{body(model.root)}</body></body>')
+    actuators = []
+    for link in chain.links:
+        low, high = _joint_range(link, limits[link.joint], chain.to_radians)
+        servo = config.servos.get(link.joint)
+        torque = servo.stall_torque_nm if servo is not None else physics["joint_kp"]
+        actuators.append(f'<position name="servo_{link.joint}" joint="{link.joint}" kp="{physics["joint_kp"]}" '
+                         f'ctrlrange="{low:.6g} {high:.6g}" forcelimited="true" '
+                         f'forcerange="{-torque:.6g} {torque:.6g}"/>')
+    low, high = _jaw_range(config, jaw)
+    actuators.append(f'<position name="servo_{_JAW}" joint="{_JAW}" kp="{physics["finger_kp"]}" '
+                     f'ctrlrange="{low:.6g} {high:.6g}" forcelimited="true" '
+                     f'forcerange="-{physics["grip_force"]} {physics["grip_force"]}"/>')
+    return "".join(assets), arm, "".join(actuators)
+
+
+def _jaw_range(config: Any, jaw: Any) -> tuple[float, float]:
+    gripper = config.gripper
+    ends = [jaw.angle(value, gripper.closed, gripper.open) for value in (gripper.minimum, gripper.maximum)]
+    return min(ends), max(ends)
+
+
+def build_mjcf(config: Any) -> str:
+    """The MJCF of this arm config's simulated world: arm, gripper, table, objects and overhead camera."""
+    sim = config.simulation
+    physics = sim.physics
+    binding = getattr(config.kinematics, "binding", None)
+    assets, arm, actuators = _model_arm(config) if binding is not None else _written_arm(config)
     objects = []
     for item in sim.objects:
         rgba = _v((*COLOURS.get(item.colour, (0.5, 0.5, 0.5)), 1.0))
@@ -124,19 +251,11 @@ def build_mjcf(config: Any) -> str:
     if getattr(rendered, "position", None) is not None:
         camera = (f'<camera name="overhead" pos="{_v(rendered.position)}" xyaxes="1 0 0 0 1 0" '
                   f'fovy="{rendered.fovy_deg:.6g}"/>')
-    actuators = "".join(
-        f'<position name="servo_{link.joint}" joint="{link.joint}" kp="{physics["joint_kp"]}" '
-        f'ctrlrange="{_joint_range(link, limits[link.joint], chain.to_radians)[0]:.6g} '
-        f'{_joint_range(link, limits[link.joint], chain.to_radians)[1]:.6g}"/>'
-        for link in links)
-    actuators += "".join(
-        f'<position name="servo_finger_{side}" joint="finger_{side}" kp="{physics["finger_kp"]}" '
-        f'ctrlrange="0 {opening:.6g}" forcelimited="true" forcerange="-{physics["grip_force"]} '
-        f'{physics["grip_force"]}"/>' for side in ("left", "right"))
     return (
-        '<mujoco model="flyto-sim-arm"><compiler angle="radian"/>'
+        '<mujoco model="flyto-sim-arm"><compiler angle="radian" boundmass="0.0001" boundinertia="1e-9"/>'
         f'<option timestep="{physics["timestep"]}" integrator="implicitfast" cone="elliptic"/>'
-        '<visual><global offwidth="1280" offheight="960"/></visual>'
+        '<visual><global offwidth="1280" offheight="960"/><quality shadowsize="2048"/></visual>'
+        f'<asset>{assets}</asset>'
         '<worldbody><light pos="0.2 0 1.5" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>'
         f'<geom name="table" type="plane" pos="0 0 {sim.table_z_m:.6g}" size="1 1 0.05" rgba="0.86 0.86 0.84 1" '
         f'friction="1 0.02 0.001"/>{camera}{arm}{"".join(objects)}</worldbody>'
@@ -167,8 +286,14 @@ class MujocoWorld:
         self.data = mujoco.MjData(self.model)
         self._joint = {link.joint: self.model.joint(link.joint) for link in self.chain.links}
         self._servo = {link.joint: self.model.actuator(f"servo_{link.joint}").id for link in self.chain.links}
-        self._fingers = [self.model.joint(f"finger_{side}") for side in ("left", "right")]
-        self._finger_servos = [self.model.actuator(f"servo_finger_{side}").id for side in ("left", "right")]
+        binding = getattr(self.chain, "binding", None)
+        self._jaw = binding.gripper if binding is not None else None
+        sides = (_JAW,) if self._jaw is not None else ("finger_left", "finger_right")
+        self._fingers = [self.model.joint(name) for name in sides]
+        self._finger_servos = [self.model.actuator(f"servo_{name}").id for name in sides]
+        # How fast each servo's goal may move (rad/s): its class's no-load speed, when the config names one.
+        self._speed = {name: servo.no_load_speed_rad_s for name, servo in config.servos.items()
+                       if name in self._servo}
         gripper = config.gripper
         start = dict(config.poses[self.sim.initial_pose].joints) if self.sim.initial_pose else {}
         self.goals: dict[str, float] = {name: float(start.get(name, 0.0)) for name in config.joint_names}
@@ -178,7 +303,8 @@ class MujocoWorld:
                 self.data.qpos[self._joint[name].qposadr[0]] = self._to_q(name, value)
         for finger in self._fingers:
             self.data.qpos[finger.qposadr[0]] = self._to_opening(gripper.open)
-        self._apply_goals()
+        self._ctrl = {name: self._to_q(name, self.goals[name]) for name in self._servo}
+        self._apply_goals(0.0)
         mujoco.mj_forward(self.model, self.data)
         for _ in range(int(0.3 / self.model.opt.timestep)):
             mujoco.mj_step(self.model, self.data)
@@ -209,19 +335,32 @@ class MujocoWorld:
         return (q / self.chain.to_radians - link.offset) * link.sign
 
     def _to_opening(self, value: float) -> float:
+        """The jaw's joint position (a hinge angle, or each slide finger's travel) for a gripper reading."""
         gripper = self.config.gripper
+        if self._jaw is not None:
+            return self._jaw.angle(value, gripper.closed, gripper.open)
         fraction = (value - gripper.closed) / (gripper.open - gripper.closed)
         return max(0.0, min(1.0, fraction)) * self.sim.gripper.max_opening_m / 2.0
 
     def _from_opening(self, half: float) -> float:
         gripper = self.config.gripper
+        if self._jaw is not None:
+            return self._jaw.reading(half, gripper.closed, gripper.open)
         return gripper.closed + (gripper.open - gripper.closed) * (2.0 * half / self.sim.gripper.max_opening_m)
 
     # -- stepping ------------------------------------------------------------------------
 
-    def _apply_goals(self) -> None:
+    def _apply_goals(self, dt: float | None = None) -> None:
+        """Move each servo's set point toward its goal, no faster than its servo class turns (``dt`` seconds)."""
         for name, actuator in self._servo.items():
-            self.data.ctrl[actuator] = self._to_q(name, self.goals[name])
+            goal = self._to_q(name, self.goals[name])
+            speed = self._speed.get(name)
+            if dt is None or speed is None:
+                self._ctrl[name] = goal
+            else:
+                step = speed * dt
+                self._ctrl[name] += max(-step, min(step, goal - self._ctrl[name]))
+            self.data.ctrl[actuator] = self._ctrl[name]
         opening = self._to_opening(self.goals[self.config.gripper.joint])
         for actuator in self._finger_servos:
             self.data.ctrl[actuator] = opening
@@ -229,7 +368,7 @@ class MujocoWorld:
     def _read(self) -> None:
         self.positions = {name: self._from_q(name, float(self.data.qpos[joint.qposadr[0]]))
                           for name, joint in self._joint.items()}
-        half = sum(float(self.data.qpos[finger.qposadr[0]]) for finger in self._fingers) / 2.0
+        half = sum(float(self.data.qpos[finger.qposadr[0]]) for finger in self._fingers) / len(self._fingers)
         self.positions[self.config.gripper.joint] = self._from_opening(half)
         force = max(abs(float(self.data.actuator_force[actuator])) for actuator in self._finger_servos)
         self.effort = 100.0 * force / float(self.sim.physics["grip_force"])
@@ -244,8 +383,9 @@ class MujocoWorld:
             now = self.clock()
             steps = int((now - self._stepped_at) / self.model.opt.timestep)
             if steps > 0:
-                self._apply_goals()
+                timestep = self.model.opt.timestep
                 for _ in range(steps):
+                    self._apply_goals(timestep)
                     self.mj.mj_step(self.model, self.data)
                 self._stepped_at += steps * self.model.opt.timestep
                 self._read()

@@ -37,8 +37,10 @@ from flyto_modules_lerobot.capabilities import (
     SPECS,
 )
 
-PICK_PHASES = ("perceive", "plan", "open", "approach", "descend", "grasp", "verify_grip", "lift", "verify")
-PLACE_PHASES = ("perceive", "plan", "approach", "descend", "release", "verify_release", "retreat", "verify")
+PICK_PHASES = ("perceive", "plan", "open", "approach", "descend", "grasp", "verify_grip", "lift", "clear_view",
+               "verify")
+PLACE_PHASES = ("perceive", "plan", "approach", "descend", "release", "verify_release", "retreat", "clear_view",
+                "verify")
 
 
 def test_locate_objects_returns_instances_in_the_table_frame(sim):
@@ -90,7 +92,7 @@ def test_a_block_moved_by_a_hand_during_the_approach_is_not_picked(sim):
 @pytest.mark.parametrize(("after_held_s", "reason"), [
     (0.1, REASON_NO_OBJECT),               # gone before the jaws settled: they closed fully
     (0.3, "object_slipped"),               # gone during the hold window: the jaws crept on
-    (0.7, "perception_disagrees"),         # gone during the lift: the camera sees it back on the table
+    (2.1, "perception_disagrees"),         # gone just before the look: the camera sees it back on the table
 ])
 def test_a_grasp_that_slips_is_never_completed(sim, after_held_s, reason):
     sim.world.inject({"kind": "grasp_slip", "after_held_s": after_held_s})
