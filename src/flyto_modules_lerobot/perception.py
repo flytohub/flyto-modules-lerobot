@@ -50,14 +50,15 @@ from itertools import pairwise
 from typing import Any, Protocol
 
 PERCEPTION_KEYS = frozenset({"frame", "camera", "on_table_tolerance_m", "match_radius_m", "max_captures",
-                             "observe_pose", "arm_clearance_m", "reuse_within_s"})
+                             "observe_pose", "arm_clearance_m", "reuse_within_s", "verify_height_m"})
 _FRAME_KEYS = frozenset({"id", "description", "table_z_m"})
 _SIMULATED_KEYS = frozenset({"kind", "id", "xy_sigma_m", "yaw_sigma_rad", "miss_rate", "occlusion_radius_m",
                              "latency_ms", "jitter_ms"})
 _RENDERED_KEYS = frozenset({"kind", "id", "width", "height", "stride", "position", "fovy_deg", "classes",
-                            "arm_max_value", "uncertainty", "latency_ms", "jitter_ms"})
+                            "arm_max_value", "uncertainty", "latency_ms", "jitter_ms", "mount"})
+_MOUNT_KEYS = frozenset({"link", "origin", "forward", "up", "joint_error_deg", "fk_error_m", "fovy_source"})
 _USB_KEYS = frozenset({"kind", "id", "device", "width", "height", "stride", "calibration", "classes", "arm_max_value",
-                       "uncertainty", "camera_height_m", "nadir_xy"})
+                       "uncertainty", "camera_height_m", "nadir_xy", "mount", "fovy_deg"})
 _CLASS_KEYS = frozenset({"kind", "label", "hue_deg", "min_saturation", "min_value", "min_area_px", "size_m"})
 _KINDS = frozenset({"block", "container"})
 
@@ -117,8 +118,8 @@ class Capture:
 class Camera(Protocol):
     """What the adapter needs from a camera: one capture of the table, or :class:`CameraUnavailable`."""
 
-    def capture(self) -> Capture:
-        """Look at the table now."""
+    def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
+        """Look at the table now; ``joints`` is the arm's reading at the capture (a camera on the arm needs it)."""
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,9 @@ class PerceptionConfig:
     arm_clearance_m: float | None = None
     # How old a frame may be and still serve a look that plans (never one that verifies); 0: always a new frame.
     reuse_within_s: float = 0.0
+    # A camera on the arm verifies a placement looking straight down from this high over the target (metres);
+    # None: from the observe pose.
+    verify_height_m: float | None = None
 
 
 def _now() -> str:
@@ -199,18 +203,33 @@ def container_holding(item: Detection, detections: Sequence[Detection]) -> Detec
                 None)
 
 
+def resting_inside(item: Detection, holder: Detection, settings: PerceptionConfig) -> bool:
+    """Whether a block rests inside a container: on its floor, and clear of its walls.
+
+    Its centre lies at least half its own width inside the container's
+    footprint, and its bottom is nearer the container's floor than half the
+    wall's height -- so a block lying on a wall, or across it, is not inside.
+    """
+    if not item.height_known or holder.size is None:
+        return False
+    half = min(item.size[0], item.size[1]) / 2.0 if item.size is not None else 0.0
+    dx, dy = item.x - holder.x, item.y - holder.y
+    c, s = math.cos(-holder.yaw), math.sin(-holder.yaw)
+    local_x, local_y = c * dx - s * dy, s * dx + c * dy
+    clear = abs(local_x) <= holder.size[0] / 2.0 - half and abs(local_y) <= holder.size[1] / 2.0 - half
+    floor = holder.z
+    return clear and item.z <= floor + min(settings.on_table_tolerance_m, holder.size[2] / 2.0)
+
+
 def scene_counts(capture: Capture, settings: PerceptionConfig) -> dict[str, int]:
     """Blocks resting on the table outside any container, and blocks inside a container: the camera's word alone."""
     blocks = [item for item in capture.detections if item.kind == "block"]
-    inside = [item for item in blocks if container_holding(item, capture.detections) is not None
-              and item.z <= settings.frame.table_z_m + settings.on_table_tolerance_m + _rim(item, capture)]
-    loose = [item for item in blocks if item not in inside and on_table(item, settings)]
+    inside = [item for item in blocks
+              if (holder := container_holding(item, capture.detections)) is not None
+              and resting_inside(item, holder, settings)]
+    loose = [item for item in blocks if item not in inside and container_holding(item, capture.detections) is None
+             and on_table(item, settings)]
     return {"objects_on_table": len(loose), "objects_in_containers": len(inside)}
-
-
-def _rim(item: Detection, capture: Capture) -> float:
-    holder = container_holding(item, capture.detections)
-    return holder.size[2] if holder is not None and holder.size is not None else 0.0
 
 
 def find(capture: Capture, object_id: str) -> Detection | None:
@@ -372,7 +391,7 @@ class SimulatedCamera:
         # Separate from the world's own generators, seeded from the same seed.
         self.rng: random.Random = world.camera_rng
 
-    def capture(self) -> Capture:
+    def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
         """Ground truth plus noise, minus misses and occluded objects, after the capture latency."""
         settings = self.settings
         latency = settings.latency_ms + self.rng.uniform(0.0, settings.jitter_ms)
@@ -531,6 +550,8 @@ class Blob:
     v: float
     area_px: float
     angle: float
+    # The region's convex hull, full-resolution pixels (counter-clockwise).
+    outline: tuple[tuple[float, float], ...] = ()
 
 
 #: One row's run of a colour class on the sampling grid: (row, first column, one past the last column).
@@ -646,7 +667,7 @@ def _blob(colour: ColourClass, region: Sequence[Run], stride: int) -> Blob | Non
     # The ends of every run bound the region: its convex hull is theirs.
     ends = [(column * stride, row * stride) for row, start, stop in region for column in (start, stop - 1)]
     angle = _blob_angle([u for u, _v in ends], [v for _u, v in ends], mu20, mu02, mu11)
-    return Blob(colour.name, mean_u * stride, mean_v * stride, float(area), angle)
+    return Blob(colour.name, mean_u * stride, mean_v * stride, float(area), angle, tuple(_hull(ends)))
 
 
 def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2) -> list[Blob]:
@@ -670,17 +691,17 @@ def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2)
 _ISOTROPIC = 0.15
 
 
-def _hull(points: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
-    """The convex hull of pixel points, counter-clockwise (monotone chain)."""
+def _hull(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """The convex hull of points, counter-clockwise (monotone chain)."""
     ordered = sorted(set(points))
     if len(ordered) < 3:
         return ordered
 
-    def turn(o: tuple[int, int], a: tuple[int, int], b: tuple[int, int]) -> int:
+    def turn(o: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 
-    lower: list[tuple[int, int]] = []
-    upper: list[tuple[int, int]] = []
+    lower: list[tuple[float, float]] = []
+    upper: list[tuple[float, float]] = []
     for point in ordered:
         while len(lower) >= 2 and turn(lower[-2], lower[-1], point) <= 0:
             lower.pop()
@@ -692,7 +713,7 @@ def _hull(points: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
     return lower[:-1] + upper[:-1]
 
 
-def _min_area_heading(us: Sequence[int], vs: Sequence[int]) -> float:
+def _min_area_heading(us: Sequence[float], vs: Sequence[float]) -> float:
     """The side direction of the smallest rectangle around the points, in ``[0, pi/2)``.
 
     Closed form: the smallest enclosing rectangle has a side along an edge of
@@ -731,7 +752,7 @@ def _blob_angle(us: Sequence[int], vs: Sequence[int], mu20: float, mu02: float, 
 
 @dataclass(frozen=True)
 class UsbCameraSettings:
-    """A fixed overhead USB camera, its calibration and its colour classes."""
+    """A USB camera -- fixed over the table (a homography) or on the arm (a mount) -- and its colour classes."""
 
     id: str
     device: int | str
@@ -749,6 +770,9 @@ class UsbCameraSettings:
     nadir: tuple[float, float] | None = None
     # Pixels no brighter than this (0..1) are the arm (it is matte black); None: the frame is not checked for it.
     arm_max_value: float | None = None
+    # On the arm (eye-in-hand) instead of fixed over the table: its mount and vertical field of view (degrees).
+    mount: CameraMount | None = None
+    fovy_deg: float | None = None
 
 
 #: A blob whose linear size is under this fraction of its footprint's is taken as partly covered.
@@ -814,6 +838,11 @@ def opencv_frames(settings: UsbCameraSettings) -> Callable[[], Frame]:
             blue, green, red = self.image[v, u][:3]
             return int(red), int(green), int(blue)
 
+        @property
+        def array(self) -> Any:
+            """The frame as RGB (OpenCV's BGR reversed), for the vectorised segmentation."""
+            return self.image[:, :, 2::-1]
+
     def read() -> Frame:
         ok, image = capture.read()
         if not ok or image is None:
@@ -827,24 +856,33 @@ class UsbCamera:
     """Colour blobs from a fixed overhead camera, mapped to the table by a 4-point homography."""
 
     def __init__(self, settings: UsbCameraSettings, frames: Callable[[], Frame] | None = None,
-                 clock: Callable[[], float] | None = None) -> None:
-        """``frames`` gives one frame per call; OpenCV's capture of the configured device by default."""
+                 clock: Callable[[], float] | None = None, chain: Any = None, table_z: float = 0.0) -> None:
+        """``frames`` gives one frame per call; OpenCV's capture of the configured device by default.
+
+        A camera on the arm needs the arm's chain; a fixed one is calibrated by its homography.
+        """
         import time
 
         self.settings = settings
+        self.chain = chain
+        self.table_z = table_z
+        self._frames = frames
+        self._clock = clock or time.monotonic
+        if settings.mount is not None:
+            return
         self.homography = Homography.fit(settings.image_points, settings.table_points)
         self.to_image = Homography.fit(settings.table_points, settings.image_points)
         self.residual_m = self.homography.residual(settings.image_points, settings.table_points)
-        self._frames = frames
-        self._clock = clock or time.monotonic
 
     def _frame(self) -> Frame:
         if self._frames is None:
             self._frames = opencv_frames(self.settings)
         return self._frames()
 
-    def capture(self) -> Capture:
-        """Segment one frame and place each blob on the table plane."""
+    def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
+        """Segment one frame and place each blob on the table plane. NOT TESTED ON HARDWARE."""
+        if self.settings.mount is not None:
+            return self._capture_mounted(joints)
         started = self._clock()
         frame = self._frame()
         detections = detect(frame, self.settings, self.homography)
@@ -855,6 +893,25 @@ class UsbCamera:
                                   "residual_m": round(self.residual_m, 5)},
                   "seen": len(detections), "hardware_tested": False}
         return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera, self._coverage(frame))
+
+    def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
+        """The camera on the arm: place blobs by the arm's chain at the joints read for this capture."""
+        settings, mount = self.settings, self.settings.mount
+        if joints is None:
+            raise CameraUnavailable("a camera on the arm needs the joints read at the capture")
+        started = self._clock()
+        frame = self._frame()
+        view = mounted_view(self.chain, mount, joints, fovy_deg=settings.fovy_deg, width=frame.width,
+                            height=frame.height)
+        detections, in_hand = detect_mounted(frame, settings.classes, settings.stride, view, table_z=self.table_z,
+                                             tool=self.chain.forward(joints).position, xy_m=settings.xy_m,
+                                             yaw_rad=settings.yaw_rad, mount=mount, joints=len(self.chain.links))
+        camera = {"camera_id": settings.id, "kind": "usb", "mount": mount.link, "width": frame.width,
+                  "height": frame.height, "latency_ms": round((self._clock() - started) * 1000.0, 3),
+                  "height_observed": True, "calibration": {"method": "forward_kinematics", "link": mount.link},
+                  "joints_at_capture": {name: round(float(value), 3) for name, value in joints.items()},
+                  "in_hand": in_hand, "seen": len(detections), "hardware_tested": False}
+        return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera)
 
     def _coverage(self, frame: Frame) -> Callable[[Spot], float | None]:
         """How much of a table spot this frame shows covered by the arm (its dark pixels)."""
@@ -946,8 +1003,13 @@ def _colour_class(name: str, raw: Any) -> ColourClass:
 
 def _parse_usb(raw: Mapping[str, Any]) -> UsbCameraSettings:
     body = _keys(raw, "perception.camera", _USB_KEYS)
-    calibration = _keys(body.get("calibration"), "perception.camera.calibration",
-                        frozenset({"image_points", "table_points"}))
+    mount = _mount(body["mount"]) if body.get("mount") is not None else None
+    if mount is not None:
+        if body.get("calibration") is not None or body.get("fovy_deg") is None:
+            raise PerceptionError("a USB camera on the arm takes fovy_deg and no homography calibration")
+        empty: Mapping[str, Any] = {"image_points": [], "table_points": []}
+    calibration = empty if mount is not None else _keys(body.get("calibration"), "perception.camera.calibration",
+                                                        frozenset({"image_points", "table_points"}))
     classes = _keys(body.get("classes"), "perception.camera.classes", frozenset(body.get("classes") or {}))
     if not classes:
         raise PerceptionError("perception.camera.classes must name at least one colour")
@@ -976,20 +1038,45 @@ def _parse_usb(raw: Mapping[str, Any]) -> UsbCameraSettings:
         xy_m=_non_negative(uncertainty.get("xy_m", 0.01), "perception.camera.uncertainty.xy_m"),
         yaw_rad=_non_negative(uncertainty.get("yaw_rad", 0.2), "perception.camera.uncertainty.yaw_rad"),
         arm_max_value=_arm_max_value(body),
+        mount=mount,
+        fovy_deg=None if mount is None else _non_negative(body["fovy_deg"], "perception.camera.fovy_deg"),
     )
-    Homography.fit(settings.image_points, settings.table_points)
+    if mount is None:
+        Homography.fit(settings.image_points, settings.table_points)
     return settings
 
 
 @dataclass(frozen=True)
+class CameraMount:
+    """A camera fixed to a link of the arm (eye-in-hand): which link, and how it looks out of it.
+
+    ``forward`` (the optical axis) and ``up`` (the image's up) are in the
+    link's frame. Where the camera is at a capture is the robot description's
+    chain at the joints read at that capture -- never a calibration constant.
+    ``joint_error_deg`` and ``fk_error_m`` bound how wrong that chain may be
+    (each joint's reading, the description against the real arm); a located
+    object's uncertainty is widened by them.
+    """
+
+    link: str
+    forward: tuple[float, float, float]
+    up: tuple[float, float, float]
+    joint_error_deg: float
+    fk_error_m: float
+    fovy_source: str
+    # The lens's centre in the link's frame (metres).
+    origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True)
 class RenderedCameraSettings:
-    """The MuJoCo world's overhead camera: where it is, its field of view, and the colours it segments."""
+    """A MuJoCo camera: fixed overhead (``position``) or on the arm (``mount``), its field of view and colours."""
 
     id: str
     width: int
     height: int
     stride: int
-    position: tuple[float, float, float]
+    position: tuple[float, float, float] | None
     fovy_deg: float
     classes: tuple[ColourClass, ...]
     xy_m: float
@@ -998,6 +1085,8 @@ class RenderedCameraSettings:
     jitter_ms: float
     # Pixels no brighter than this (0..1) are the arm; None: the frame is not checked for it.
     arm_max_value: float | None = None
+    # On the arm (eye-in-hand) instead of fixed over the table.
+    mount: CameraMount | None = None
 
     def focal_px(self) -> float:
         """The focal length in pixels."""
@@ -1027,6 +1116,189 @@ class ArrayFrame:
         return int(red), int(green), int(blue)
 
 
+def _cross(a: Sequence[float], b: Sequence[float]) -> tuple[float, float, float]:
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _turn(rotation: Sequence[Sequence[float]], vector: Sequence[float]) -> tuple[float, float, float]:
+    return tuple(sum(rotation[i][k] * vector[k] for k in range(3)) for i in range(3))  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class MountedView:
+    """Where a camera on the arm is and how it looks, at one capture (table frame, metres, pixels)."""
+
+    position: tuple[float, float, float]
+    forward: tuple[float, float, float]
+    up: tuple[float, float, float]
+    right: tuple[float, float, float]
+    focal: float
+    width: int
+    height: int
+
+    def ray(self, u: float, v: float) -> tuple[float, float, float]:
+        """The unit direction a pixel looks along."""
+        a, b = (u - self.width / 2.0) / self.focal, (v - self.height / 2.0) / self.focal
+        ray = tuple(self.forward[i] + a * self.right[i] - b * self.up[i] for i in range(3))
+        length = math.sqrt(sum(value * value for value in ray))
+        return tuple(value / length for value in ray)  # type: ignore[return-value]
+
+    def project(self, point: Sequence[float]) -> tuple[float, float, float] | None:
+        """``(u, v, depth)`` of a point in front of the camera, or None behind it."""
+        offset = [point[i] - self.position[i] for i in range(3)]
+        depth = sum(offset[i] * self.forward[i] for i in range(3))
+        if depth <= 1e-3:
+            return None
+        across = sum(offset[i] * self.right[i] for i in range(3))
+        rise = sum(offset[i] * self.up[i] for i in range(3))
+        return self.width / 2.0 + self.focal * across / depth, self.height / 2.0 - self.focal * rise / depth, depth
+
+    def onto(self, u: float, v: float, plane_z: float) -> tuple[float, float, float] | None:
+        """Where a pixel's ray meets the plane ``z = plane_z``: ``(x, y, range)``, or None when it looks away."""
+        ray = self.ray(u, v)
+        if ray[2] >= -1e-6 or self.position[2] <= plane_z:
+            return None
+        reach = (plane_z - self.position[2]) / ray[2]
+        return self.position[0] + reach * ray[0], self.position[1] + reach * ray[1], reach
+
+
+def _box_area(size: Sequence[float], ray: Sequence[float], yaw: float) -> float:
+    """How much area a box shows along a viewing direction (its three visible faces, foreshortened)."""
+    along = (math.cos(yaw), math.sin(yaw), 0.0)
+    across = (-math.sin(yaw), math.cos(yaw), 0.0)
+    facing_x = abs(sum(a * b for a, b in zip(ray, along, strict=True)))
+    facing_y = abs(sum(a * b for a, b in zip(ray, across, strict=True)))
+    return size[0] * size[1] * abs(ray[2]) + size[1] * size[2] * facing_x + size[0] * size[2] * facing_y
+
+
+#: Apparent size tells an object's height only when it is seen within this angle of straight down (degrees).
+STEEP_WITHIN_DEG = 15.0
+
+
+def _placed_from_arm(blob: Blob, colour: ColourClass, view: MountedView, *, table_z: float, xy_m: float,
+                     yaw_rad: float, spread: float, fk_error_m: float, name: str) -> Detection:
+    """An object the camera on the arm sees off the jaws: where it is, how it is turned, whether it rests.
+
+    The heading is taken in the table plane (the blob's outline cast onto the
+    object's top plane), free of the image's perspective. Seen at a slant,
+    the object is taken to rest on the table. Seen from nearly straight above
+    (within :data:`STEEP_WITHIN_DEG`), the distance along the blob's ray
+    comes from the object's known size: a box of that size,
+    so turned, shows a known area for its distance. Resting on the table,
+    that distance agrees with where the ray meets the table-top plane, and
+    the plane gives the position. Nearer than that, the object is raised (on
+    a rim, another object) and is placed at that distance, off the table.
+    Further than that cannot be (it would be under the table): part of it is
+    out of view or covered, and its height is reported unknown.
+    """
+    size = colour.size
+    top = table_z + size[2] if colour.kind == "block" else table_z + size[2] / 2.0
+    corners = [view.onto(u, v, top) for u, v in blob.outline]
+    flat = [(x, y) for x, y, _reach in (corner for corner in corners if corner is not None)]
+    yaw = _min_area_heading([x for x, _y in flat], [y for _x, y in flat]) if len(flat) >= 3 else 0.0
+    ray = view.ray(blob.u, blob.v)
+    resting = view.onto(blob.u, blob.v, table_z + size[2] / 2.0)
+    shown = _box_area(size, ray, yaw)
+    reach = view.focal * math.sqrt(shown / max(blob.area_px, 1.0))
+    centre = tuple(view.position[i] + reach * ray[i] for i in range(3))
+    tolerance = size[2] / 2.0
+    uncertainty = xy_m + reach * spread + fk_error_m
+    if resting is not None and abs(ray[2]) < math.cos(math.radians(STEEP_WITHIN_DEG)):
+        # Seen at a slant the sides show as much as the top, and how much of them the colour takes in varies
+        # with the light: apparent size cannot tell height. The object is taken to rest on the table, as a
+        # planar camera takes it; looking straight down tells (``verify_height_m``).
+        # The colour takes in the lit top more than the shaded sides: the top's plane places it best.
+        x, y, reach = view.onto(blob.u, blob.v, top) or resting
+        expected = shown * (view.focal / reach) ** 2
+        return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, xy_m + reach * spread
+                         + fk_error_m, yaw_rad,
+                         height_known=math.sqrt(blob.area_px / max(expected, 1e-9)) >= OCCLUDED_BELOW)
+    if resting is None:
+        return Detection(name, colour.kind, colour.label, centre[0], centre[1], centre[2] - size[2] / 2.0, yaw,
+                         size, uncertainty, yaw_rad, height_known=False)
+    bottom = centre[2] - size[2] / 2.0
+    if bottom > table_z + tolerance:
+        return Detection(name, colour.kind, colour.label, centre[0], centre[1], bottom, yaw, size, uncertainty,
+                         yaw_rad, height_known=True)
+    if colour.kind == "block":
+        hit = view.onto(blob.u, blob.v, top)
+        x, y = (hit[0], hit[1]) if hit is not None else (resting[0], resting[1])
+    else:
+        x, y = resting[0], resting[1]
+    return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, uncertainty, yaw_rad,
+                     height_known=bottom >= table_z - tolerance)
+
+
+def mounted_view(chain: Any, mount: CameraMount, joints: Mapping[str, float], *, fovy_deg: float, width: int,
+                 height: int) -> MountedView:
+    """The camera on the arm for these joint readings: the robot description's chain to its link."""
+    link, rotation = chain.link_pose(joints, mount.link)
+    lens = _turn(rotation, mount.origin)
+    position = tuple(link[i] + lens[i] for i in range(3))
+    forward, up = _turn(rotation, mount.forward), _turn(rotation, mount.up)
+    focal = (height / 2.0) / math.tan(math.radians(fovy_deg) / 2.0)
+    return MountedView(tuple(position), forward, up, _cross(forward, up), focal, width, height)  # type: ignore[arg-type]
+
+
+def detect_mounted(frame: Frame, classes: Sequence[ColourClass], stride: int, view: MountedView, *, table_z: float,
+                   tool: Sequence[float] | None, xy_m: float, yaw_rad: float, mount: CameraMount,
+                   joints: int) -> tuple[list[Detection], list[str]]:
+    """Colour blobs seen by a camera on the arm, placed in the table frame; and which of them sit in the jaws.
+
+    A blob centred where the tool point projects and as large as an object
+    that close to the lens looks is between the jaws: it is placed at the
+    tool point (forward kinematics), off the table. Any other blob is placed
+    where its pixel's ray meets the plane of the object's top (a block) or
+    half height (a container), resting on the table; when it looks smaller
+    than its top face would from there, part of it is out of view or covered,
+    and its height is reported unknown. Each position's uncertainty is the
+    camera's own plus how far the ray may be off: ``range * sqrt(joints) *
+    joint_error`` and ``fk_error_m``.
+    """
+    by_name = {colour.name: colour for colour in classes}
+    hand = view.project(tool) if tool is not None else None
+    detections: list[Detection] = []
+    in_hand: list[str] = []
+    counts: dict[str, int] = {}
+    angular = math.sqrt(max(joints, 1)) * math.radians(mount.joint_error_deg)
+    for blob in find_blobs(frame, classes, stride=stride):
+        colour = by_name[blob.colour]
+        counts[colour.name] = counts.get(colour.name, 0) + 1
+        name = f"{colour.name}-{counts[colour.name]}"
+        size = colour.size
+        if hand is not None and tool is not None and colour.kind == "block":
+            # In the jaws: centred where the tool point projects, and as large as an object that close looks.
+            reach_px = view.focal * math.hypot(size[0], size[1]) / max(hand[2], 1e-3)
+            close = (view.focal / max(hand[2], 1e-3)) ** 2 * size[0] * size[1]
+            if math.hypot(blob.u - hand[0], blob.v - hand[1]) <= reach_px / 2.0 and blob.area_px >= 0.3 * close:
+                in_hand.append(name)
+                detections.append(Detection(name, colour.kind, colour.label, tool[0], tool[1],
+                                            tool[2] - size[2] / 2.0, 0.0, size, mount.fk_error_m + xy_m, math.pi,
+                                            height_known=True))
+                continue
+        detections.append(_placed_from_arm(blob, colour, view, table_z=table_z, xy_m=xy_m, yaw_rad=yaw_rad,
+                                           spread=angular, fk_error_m=mount.fk_error_m, name=name))
+    return _merged_containers(detections), in_hand
+
+
+def _merged_containers(detections: list[Detection]) -> list[Detection]:
+    """One container seen as several pieces (an object inside cuts its floor in two) is one container."""
+    merged: list[Detection] = []
+    for item in detections:
+        twin = next((other for other in merged if other.kind == "container" == item.kind
+                     and other.label == item.label and other.size is not None
+                     and math.hypot(other.x - item.x, other.y - item.y) <= min(other.size[0], other.size[1]) / 2.0),
+                    None)
+        if twin is None:
+            merged.append(item)
+            continue
+        merged[merged.index(twin)] = Detection(twin.id, twin.kind, twin.label, (twin.x + item.x) / 2.0,
+                                               (twin.y + item.y) / 2.0, twin.z, twin.yaw, twin.size,
+                                               max(twin.xy_m, item.xy_m), twin.yaw_rad,
+                                               height_known=twin.height_known or item.height_known)
+    return merged
+
+
 class RenderedCamera:
     """The MuJoCo overhead camera, located from its rendered frames alone. SIMULATION ONLY.
 
@@ -1036,11 +1308,16 @@ class RenderedCamera:
     frame is segmented (:func:`detect`). Nothing reads where the objects are.
     """
 
-    def __init__(self, settings: RenderedCameraSettings, world: Any, table_z: float) -> None:
-        """Bind to a MuJoCo world and calibrate."""
+    def __init__(self, settings: RenderedCameraSettings, world: Any, table_z: float, chain: Any = None) -> None:
+        """Bind to a MuJoCo world and calibrate (a fixed camera); a camera on the arm needs the arm's chain."""
         self.settings = settings
         self.world = world
         self.rng: random.Random = world.camera_rng
+        self.table_z = table_z
+        self.chain = chain
+        self.timings: list[dict[str, float]] = []
+        if settings.mount is not None:
+            return
         cx, cy, _ = settings.position
         span = 0.15
         table = [(cx - span, cy - span), (cx + span, cy - span), (cx + span, cy + span), (cx - span, cy + span)]
@@ -1052,8 +1329,10 @@ class RenderedCamera:
                                            nadir=(cx, cy))
         self.timings: list[dict[str, float]] = []
 
-    def capture(self) -> Capture:
+    def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
         """Render one frame and locate the colour blobs in it."""
+        if self.settings.mount is not None:
+            return self._capture_mounted(joints)
         settings = self.settings
         latency = settings.latency_ms + self.rng.uniform(0.0, settings.jitter_ms)
         self.world.sleep(latency / 1000.0)
@@ -1080,6 +1359,37 @@ class RenderedCamera:
 
         return Capture(tuple(detections), _now(), "simulation", camera, covered)
 
+    def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
+        """The camera on the arm: render from its link, place blobs by the chain at the joints read for it."""
+        settings, mount = self.settings, self.settings.mount
+        if joints is None:
+            raise CameraUnavailable("a camera on the arm needs the joints read at the capture")
+        latency = settings.latency_ms + self.rng.uniform(0.0, settings.jitter_ms)
+        self.world.sleep(latency / 1000.0)
+        started = time.perf_counter()
+        frame = ArrayFrame(self.world.render(settings.width, settings.height, camera=MOUNTED_CAMERA))
+        rendered = time.perf_counter()
+        view = mounted_view(self.chain, mount, joints, fovy_deg=settings.fovy_deg, width=frame.width,
+                            height=frame.height)
+        detections, in_hand = detect_mounted(frame, settings.classes, settings.stride, view, table_z=self.table_z,
+                                             tool=self.chain.forward(joints).position, xy_m=settings.xy_m,
+                                             yaw_rad=settings.yaw_rad, mount=mount, joints=len(self.chain.links))
+        done = time.perf_counter()
+        timing = {"render_ms": round((rendered - started) * 1000.0, 3),
+                  "detect_ms": round((done - rendered) * 1000.0, 3)}
+        self.timings.append(timing)
+        camera = {"camera_id": settings.id, "kind": "rendered", "mount": mount.link, "width": frame.width,
+                  "height": frame.height, "latency_ms": round(latency, 3), **timing, "height_observed": True,
+                  "sim_time_s": round(self.world.elapsed(), 4),
+                  "calibration": {"method": "forward_kinematics", "link": mount.link},
+                  "joints_at_capture": {name: round(float(value), 3) for name, value in joints.items()},
+                  "in_hand": in_hand, "seen": len(detections)}
+        return Capture(tuple(detections), _now(), "simulation", camera)
+
+
+#: The MuJoCo camera name of a camera on the arm.
+MOUNTED_CAMERA = "wrist"
+
 
 def _parse_rendered(raw: Mapping[str, Any]) -> RenderedCameraSettings:
     body = _keys(raw, "perception.camera", _RENDERED_KEYS)
@@ -1087,7 +1397,11 @@ def _parse_rendered(raw: Mapping[str, Any]) -> RenderedCameraSettings:
     if not classes:
         raise PerceptionError("perception.camera.classes must name at least one colour")
     position = body.get("position")
-    if not isinstance(position, Sequence) or isinstance(position, str) or len(position) != 3:
+    mount = _mount(body["mount"]) if body.get("mount") is not None else None
+    if (mount is None) == (position is None):
+        raise PerceptionError("perception.camera needs a position (fixed over the table) or a mount (on the arm)")
+    if position is not None and (not isinstance(position, Sequence) or isinstance(position, str)
+                                 or len(position) != 3):
         raise PerceptionError("perception.camera.position must be three numbers")
     uncertainty = _keys(body.get("uncertainty") or {}, "perception.camera.uncertainty",
                         frozenset({"xy_m", "yaw_rad"}))
@@ -1099,7 +1413,9 @@ def _parse_rendered(raw: Mapping[str, Any]) -> RenderedCameraSettings:
         integers[key] = value
     return RenderedCameraSettings(
         id=_text(body.get("id", "overhead-render"), "perception.camera.id"), **integers,
-        position=tuple(_number(value, "perception.camera.position") for value in position),  # type: ignore[arg-type]
+        position=(None if position is None
+                  else tuple(_number(value, "perception.camera.position") for value in position)),  # type: ignore[arg-type]
+        mount=mount,
         fovy_deg=_non_negative(body.get("fovy_deg", 45.0), "perception.camera.fovy_deg"),
         classes=tuple(_colour_class(str(name), value) for name, value in classes.items()),
         xy_m=_non_negative(uncertainty.get("xy_m", 0.005), "perception.camera.uncertainty.xy_m"),
@@ -1108,6 +1424,37 @@ def _parse_rendered(raw: Mapping[str, Any]) -> RenderedCameraSettings:
         jitter_ms=_non_negative(body.get("jitter_ms", 0.0), "perception.camera.jitter_ms"),
         arm_max_value=_arm_max_value(body),
     )
+
+
+def _direction(value: Any, where: str) -> tuple[float, float, float]:
+    if not isinstance(value, Sequence) or isinstance(value, str) or len(value) != 3:
+        raise PerceptionError(f"{where} must be three numbers")
+    numbers = tuple(_number(item, where) for item in value)
+    length = math.sqrt(sum(item * item for item in numbers))
+    if length <= 0:
+        raise PerceptionError(f"{where} must not be zero")
+    return tuple(item / length for item in numbers)  # type: ignore[return-value]
+
+
+def _mount(raw: Any) -> CameraMount:
+    body = _keys(raw, "perception.camera.mount", _MOUNT_KEYS)
+    forward = _direction(body.get("forward"), "perception.camera.mount.forward")
+    up = _direction(body.get("up"), "perception.camera.mount.up")
+    if abs(sum(a * b for a, b in zip(forward, up, strict=True))) > 1e-6:
+        raise PerceptionError("perception.camera.mount.forward and up must be perpendicular")
+    return CameraMount(
+        link=_text(body.get("link"), "perception.camera.mount.link"), forward=forward, up=up,
+        joint_error_deg=_non_negative(body.get("joint_error_deg", 0.5), "perception.camera.mount.joint_error_deg"),
+        fk_error_m=_non_negative(body.get("fk_error_m", 0.005), "perception.camera.mount.fk_error_m"),
+        fovy_source=str(body.get("fovy_source") or "")[:500],
+        origin=_point(body.get("origin", (0.0, 0.0, 0.0)), "perception.camera.mount.origin"),
+    )
+
+
+def _point(value: Any, where: str) -> tuple[float, float, float]:
+    if not isinstance(value, Sequence) or isinstance(value, str) or len(value) != 3:
+        raise PerceptionError(f"{where} must be three numbers")
+    return tuple(_number(item, where) for item in value)  # type: ignore[return-value]
 
 
 def _arm_max_value(body: Mapping[str, Any]) -> float | None:
@@ -1129,16 +1476,16 @@ def _build_simulated(settings: SimulatedCameraSettings, config: Any) -> Camera:
 def _build_rendered(settings: RenderedCameraSettings, config: Any) -> Camera:
     from .mujoco_sim import world_for
 
-    return RenderedCamera(settings, world_for(config), config.perception.frame.table_z_m)
+    return RenderedCamera(settings, world_for(config), config.perception.frame.table_z_m, config.kinematics)
 
 
 def _build_usb(settings: UsbCameraSettings, config: Any) -> Camera:
-    return UsbCamera(settings)
+    return UsbCamera(settings, chain=config.kinematics, table_z=config.perception.frame.table_z_m)
 
 
 def _usb_geometry(settings: UsbCameraSettings, table_z: float) -> CameraGeometry | None:
-    """A USB camera's eye: over its nadir at its height, when both are configured."""
-    if settings.camera_height_m is None or settings.nadir is None:
+    """A fixed USB camera's eye: over its nadir at its height, when both are configured."""
+    if settings.mount is not None or settings.camera_height_m is None or settings.nadir is None:
         return None
     return CameraGeometry((settings.nadir[0], settings.nadir[1], table_z + settings.camera_height_m))
 
@@ -1161,7 +1508,8 @@ CAMERA_KINDS: Mapping[str, CameraKind] = {
     "simulated": CameraKind(_parse_simulated, _build_simulated, robot_types=frozenset({"sim"}),
                             geometry=lambda _settings, _table_z: CameraGeometry(None)),
     "rendered": CameraKind(_parse_rendered, _build_rendered, robot_types=frozenset({"mujoco"}), renders=True,
-                           geometry=lambda settings, _table_z: CameraGeometry(tuple(settings.position))),
+                           geometry=lambda settings, _table_z: (None if settings.mount is not None
+                                                                 else CameraGeometry(tuple(settings.position)))),
     "usb": CameraKind(_parse_usb, _build_usb, robot_types=None, geometry=_usb_geometry),
 }
 
@@ -1198,6 +1546,8 @@ def parse_perception(raw: Any, *, robot_type: str) -> PerceptionConfig:
         arm_clearance_m=(_non_negative(body["arm_clearance_m"], "perception.arm_clearance_m")
                          if body.get("arm_clearance_m") is not None else None),
         reuse_within_s=_non_negative(body.get("reuse_within_s", 0.0), "perception.reuse_within_s"),
+        verify_height_m=(_non_negative(body["verify_height_m"], "perception.verify_height_m")
+                         if body.get("verify_height_m") is not None else None),
     )
 
 
@@ -1220,12 +1570,14 @@ __all__ = [
     "HARDWARE_SOURCE",
     "Camera",
     "CameraGeometry",
+    "CameraMount",
     "CameraUnavailable",
     "Capture",
     "ColourClass",
     "Detection",
     "FrameConfig",
     "Homography",
+    "MountedView",
     "PerceptionConfig",
     "PerceptionError",
     "RgbImage",
@@ -1237,12 +1589,15 @@ __all__ = [
     "camera_geometry",
     "container_holding",
     "dark_fraction",
+    "detect_mounted",
     "find",
     "find_blobs",
     "locate_result",
+    "mounted_view",
     "nearest",
     "object_record",
     "on_table",
     "parse_perception",
+    "resting_inside",
     "scene_counts",
 ]

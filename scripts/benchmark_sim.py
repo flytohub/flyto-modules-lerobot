@@ -26,7 +26,13 @@ then ``manipulation.place`` through the real adapter, and the script prints:
 * for the cancel scenario, stop latency (cancel -> hold command sent, and
   cancel -> still) and overshoot.
 
-Usage: python scripts/benchmark_sim.py [--backend sim|mujoco] [--episodes 50] [--seed 1000] [--config PATH]
+``mujoco-wrist`` is the arm as shipped: its own camera on the fixed jaw
+(eye-in-hand), perceiving and verifying from a look pose; it also reports
+whether the camera saw the object between the jaws after each grasp.
+Every backend reports the target's localisation error against the
+simulator's ground truth (``locate error``).
+
+Usage: python scripts/benchmark_sim.py [--backend sim|mujoco|mujoco-wrist] [--episodes 50] [--seed 1000] [--config PATH]
 """
 
 from __future__ import annotations
@@ -80,12 +86,30 @@ def _mujoco_truth(world: Any) -> tuple[bool, bool]:
     return bool(held), bool(inside)
 
 
+def _sim_where(world: Any) -> tuple[float, float]:
+    """Where the block truly is on the table (the in-process world)."""
+    block = world.objects[BLOCK]
+    return block.x, block.y
+
+
+def _mujoco_where(world: Any) -> tuple[float, float]:
+    """Where the block truly is on the table (MuJoCo's body)."""
+    block = world.data.body(BLOCK).xpos
+    return float(block[0]), float(block[1])
+
+
 # What differs between the backends, as data: example config, world, ground truth, and the ids the camera reports.
 BACKEND_RUNS: dict[str, dict[str, Any]] = {
     "sim": {"config": ROOT / "examples" / "am-arm200-sim.json", "world": _sim_world, "truth": _sim_truth,
+            "where": _sim_where,
             "block": BLOCK, "bin": BIN, "camera_edits": True},
     "mujoco": {"config": ROOT / "examples" / "am-arm200-mujoco.json", "world": _mujoco_world,
-               "truth": _mujoco_truth, "block": "red-1", "bin": "blue-1", "camera_edits": False},
+               "truth": _mujoco_truth, "where": _mujoco_where, "block": "red-1", "bin": "blue-1",
+               "camera_edits": False},
+    # The arm as shipped: its own camera on the fixed jaw (eye-in-hand), no overhead camera.
+    "mujoco-wrist": {"config": ROOT / "examples" / "am-arm200-mujoco-wrist.json", "world": _mujoco_world,
+                     "truth": _mujoco_truth, "where": _mujoco_where, "block": "red-1", "bin": "blue-1",
+               "camera_edits": False},
 }
 
 
@@ -180,13 +204,21 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
     holds: list[float] = []
     overshoot: list[float] = []
     frames: dict[str, list[float]] = defaultdict(list)
+    located: list[float] = []
     false_completions = 0
     successes = 0
     truth = backend["truth"]
     for index in range(episodes):
         episode = Episode(data, base_seed + index, backend)
         inject(episode)
+        truly = backend["where"](episode.world)
         pick = episode.call("manipulation.pick", {"object_id": backend["block"]})
+        seen = (pick.evidence.get("perception_before") or {}).get("pose")
+        if seen is not None:
+            located.append(1000.0 * ((seen["x"] - truly[0]) ** 2 + (seen["y"] - truly[1]) ** 2) ** 0.5)
+        in_jaws = (pick.evidence.get("grip") or {}).get("camera_sees_object", "-")
+        if in_jaws != "-":
+            outcomes[f"pick grip camera_sees_object={in_jaws}"] += 1
         outcomes[f"pick {pick.outcome}:{pick.evidence.get('reason_code', '-')}"] += 1
         if pick.outcome == OUTCOME_COMPLETED and not truth(episode.world)[0]:
             false_completions += 1
@@ -218,7 +250,7 @@ def run(data: dict[str, Any], name: str, inject: Callable[[Episode], None], epis
             phases["episode.total"].append(pick.evidence["latency_ms"]["total"] + place.evidence["latency_ms"]["total"])
     return {"name": name, "episodes": episodes, "successes": successes, "false_completions": false_completions,
             "outcomes": dict(sorted(outcomes.items())), "phases": dict(phases), "plan_wall": plan_wall,
-            "stops": stops, "holds": holds, "overshoot": overshoot, "frames": dict(frames)}
+            "stops": stops, "holds": holds, "located": located, "overshoot": overshoot, "frames": dict(frames)}
 
 
 def _row(label: str, values: list[float]) -> str:
@@ -232,6 +264,8 @@ def report(result: dict) -> str:
     lines += [f"  {key:<45} {count}" for key, count in result["outcomes"].items()]
     lines.append("  phase (simulated ms)")
     lines += [_row(name, values) for name, values in result["phases"].items()]
+    if result["located"]:
+        lines.append(_row("locate error (mm)", result["located"]))
     if result["plan_wall"]:
         lines.append(_row("plan wall (real ms)", result["plan_wall"]))
     for key, values in result["frames"].items():

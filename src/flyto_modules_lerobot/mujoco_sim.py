@@ -47,6 +47,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .perception import MOUNTED_CAMERA
 from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, SimulatedArm, SimulationError, parse_fault
 from .urdf_model import matrix_quaternion, rpy_matrix
 
@@ -183,9 +184,13 @@ def _model_arm(config: Any) -> tuple[str, str, str]:
                       'reflectance="0"/>')
     friction = f'{physics["friction"]} 0.02 0.001'
 
+    mount = getattr(getattr(config.perception, "camera", None), "mount", None) if config.perception else None
+
     def body(link_name: str) -> str:
         link = model.links[link_name]
         parts = [_inertial(link, binding.mass_overrides_kg.get(link_name))]
+        if mount is not None and mount.link == link_name:
+            parts.append(_mounted_camera(mount, config.perception.camera.fovy_deg))
         for index, visual in enumerate(link.visuals):
             mesh = f"mesh_{link_name}_{index}"
             assets.append(f'<mesh name="{mesh}" file="{visual.mesh}"/>')
@@ -230,6 +235,17 @@ def _model_arm(config: Any) -> tuple[str, str, str]:
                      f'ctrlrange="{low:.6g} {high:.6g}" forcelimited="true" '
                      f'forcerange="-{physics["grip_force"]} {physics["grip_force"]}"/>')
     return "".join(assets), arm, "".join(actuators)
+
+
+def _mounted_camera(mount: Any, fovy_deg: float) -> str:
+    """The camera on the arm, in its link's frame: MuJoCo looks along its -z with +y up."""
+    forward, up = mount.forward, mount.up
+    right = (forward[1] * up[2] - forward[2] * up[1], forward[2] * up[0] - forward[0] * up[2],
+             forward[0] * up[1] - forward[1] * up[0])
+    back = tuple(-value for value in forward)
+    rotation = tuple((right[i], up[i], back[i]) for i in range(3))
+    return (f'<camera name="{MOUNTED_CAMERA}" pos="{_v(mount.origin)}" quat="{_v(matrix_quaternion(rotation))}" '
+            f'fovy="{fovy_deg:.6g}"/>')
 
 
 def _jaw_range(config: Any, jaw: Any) -> tuple[float, float]:
@@ -469,15 +485,15 @@ class MujocoWorld:
 
     # -- the rendered camera ------------------------------------------------------------------
 
-    def render(self, width: int, height: int) -> Any:
-        """One RGB frame from the overhead camera (``height x width x 3`` uint8)."""
+    def render(self, width: int, height: int, camera: str = "overhead") -> Any:
+        """One RGB frame from a named camera, the overhead one by default (``height x width x 3`` uint8)."""
         self.step()
         with self.lock:
             if self._renderer is None or (self._renderer.width, self._renderer.height) != (width, height):
                 if self._renderer is not None:
                     self._renderer.close()
                 self._renderer = self.mj.Renderer(self.model, height, width)
-            self._renderer.update_scene(self.data, camera="overhead")
+            self._renderer.update_scene(self.data, camera=camera)
             return self._renderer.render().copy()
 
     def render_with(self, renderer: Any, camera: Any) -> Any:

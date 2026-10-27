@@ -136,6 +136,10 @@ to the observe pose) is planned as one trajectory through its via points:
   waits out the rest of the period. Nothing waits for a set point to be
   reached.
 
+The one place a motion converges before the next begins is above the target
+of a pick or a place: the servos lag their set points, and a descent begun
+while the arm still trails sideways lands a jaw on the object.
+
 A motion ends when the arm has **converged**: within tolerance and still (it
 moved no more than `motion.still_drift` since the reading one
 `motion.poll_interval_s` earlier). A reading inside the tolerance that is
@@ -209,9 +213,10 @@ when the config loads and its serial port exists; it never names the port.
 A pick runs timed phases -- `perceive`, `plan`, `open`, `approach`,
 `descend`, `grasp`, `verify_grip`, `lift`, `clear_view`, `verify` -- and a
 place `perceive`, `plan`, `approach`, `descend`, `release`,
-`verify_release`, `retreat`, `clear_view`, `verify`. `approach` and
-`descend` are one motion (the phase switches as the set points pass the
-point above the target); so are `lift`/`retreat` and `clear_view`.
+`verify_release`, `retreat`, `clear_view`, `verify` (`look_pose` instead of
+`clear_view` when the camera is on the arm). The descent is one motion
+through its solved points, begun from an arm converged above the target;
+`lift`/`retreat` and `clear_view` are one motion.
 
 `clear_view` heads for `perception.observe_pose` (a taught pose) and stops
 as soon as the camera's view of the table is clear: the occlusion model
@@ -274,3 +279,43 @@ arm geometry that touches anything. Each joint's position servo is limited
 to its servo class's stall torque, and its set point moves no faster than
 the class's no-load speed. Without `model`, a written-out chain is drawn as
 capsules with slide fingers as before.
+
+## The camera on the arm (eye-in-hand, 2026-10-28)
+
+The AM-ARM200's own camera (720p USB, 36 x 36 mm) is the URDF link
+`left_camera`, fixed to `left_Fixed_Jaw`. `perception.camera.mount` names
+that link, the lens's `origin`, its optical axis (`forward`) and image `up`
+in the link's frame, and how wrong the chain may be (`joint_error_deg`,
+`fk_error_m`). There is no calibration constant: at every capture the
+adapter reads the joints, and the camera's pose is the robot description's
+chain at that reading (`KinematicChain.link_pose`, `perception.mounted_view`);
+the capture records `joints_at_capture`.
+
+- MuJoCo renders a camera in that link (`kind: rendered` with a `mount`);
+  a real arm uses `kind: usb` with a `mount` and `fovy_deg` (not tested on
+  hardware). A fixed overhead camera (`position`, or a USB homography) stays
+  a configuration of its own.
+- Locating (`perception.detect_mounted`): a blob in the jaws (centred where
+  the tool point projects, as large as something that close looks) is
+  placed at the tool point; any other is placed where its ray meets the
+  plane of its top, its heading measured in the table plane, its height
+  observed from apparent size only when seen within 15 deg of straight down
+  (else taken to rest on the table), its uncertainty widened by the chain's
+  error over the ray's range. A container cut in two by an object inside is
+  one container.
+- Pick and place perceive from where the arm is (a taught `look` pose; the
+  arm should be moved there with `move_joints`); a planning look takes the
+  newest frame within `perception.reuse_within_s` that saw its target whole,
+  because what the jaws hold covers the middle of the image. The pick
+  verifies from the look pose; the place looks straight down from
+  `perception.verify_height_m` over the container (the camera as the chain's
+  tool: `KinematicChain.mounted`, the same IK).
+- A grip the signature confirms must also show an object between the jaws
+  in the wrist camera's image (`grip.camera_sees_object`), else
+  `object_not_seen_in_jaws`.
+- "Inside a container" means resting there: centre at least half its width
+  inside the walls, bottom below half the wall's height
+  (`perception.resting_inside`), for the verdict and for the counts.
+- The camera is part of the arm, so its counts are the arm's own word:
+  evidence stays `observer: "self"`; `observe` says `camera_on_arm`.
+

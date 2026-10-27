@@ -12,3 +12,8 @@
 - [ ] Mount and calibrate the overhead USB camera (four marked table points, colour classes, camera height).
 - [ ] Make the camera its own resource so the perception specs become `other_resource`.
 - [ ] Gripper effort: find whether the fork exposes a load/current reading; set `gripper.effort_key`.
+- [ ] On the arm: measure `stop_to_hold_ms`, `stop_to_still_ms` and `overshoot` at the 20 ms control period before relying on servo-speed trajectories; confirm the STS acceleration (register 254 at 100 steps/s^2 per unit is an estimate).
+- [ ] On the arm: find the wrist camera's device index, field of view and image orientation; confirm the lens origin on `left_camera`; teach the `look` pose; set colour classes from real frames.
+- [ ] Measure the joint and forward-kinematics error bounds (`perception.camera.mount.joint_error_deg`, `fk_error_m`).
+- [ ] One config with both the wrist camera and a fixed overhead camera (if the owner buys one), the fixed one as an independent observer in Cloud.
+

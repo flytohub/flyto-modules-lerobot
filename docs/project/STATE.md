@@ -65,6 +65,20 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   jaw-angle mapping and the joint limits are unverified; a real arm refuses
   pick and place until the chain is marked verified.
 
+2026-10-28 -- latency and eye-in-hand, SIMULATION ONLY (branch `claude/perf-motion`):
+
+- Every motion is a time-optimal trajectory within each servo's speed and
+  (estimated) acceleration, streamed every 20 ms; moves end on convergence;
+  stop acted on within one period (`stop_to_hold_ms` P95 24 ms in both
+  simulators). Nominal pick+place P50: MuJoCo 12.5 s -> 3.7 s, in-process
+  8.3 s -> 3.4 s; zero false completions in every scenario on every backend.
+- The arm's own camera (URDF `left_camera`) is modelled: MuJoCo renders it,
+  objects are placed through the chain at the joints read per capture.
+  Eye-in-hand MuJoCo nominal 49/50, P50 3.3 s, localisation error P50 1.0 mm
+  / P95 6.0 mm, zero false completions.
+- Not on hardware: control period, acceleration, convergence thresholds,
+  the wrist camera's lens, orientation and look pose are unverified.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.

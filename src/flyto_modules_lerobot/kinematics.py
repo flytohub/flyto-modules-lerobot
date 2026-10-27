@@ -34,6 +34,7 @@ Standard library only.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -233,6 +234,8 @@ class KinematicChain:
     tool_pointing: Vector = (0.0, 0.0, 1.0)
     tool_jaw: Vector = (1.0, 0.0, 0.0)
     binding: ModelBinding | None = None
+    # The tool link's frame in the last joint's frame (a robot description's fixed joints after it).
+    tool_link_frame: tuple[Vector, Matrix] = ((0.0, 0.0, 0.0), _IDENTITY)
 
     @property
     def unverified_joints(self) -> tuple[str, ...]:
@@ -246,6 +249,12 @@ class KinematicChain:
 
     def _frames(self, joints: Mapping[str, float]) -> tuple[list[tuple[Vector, Vector]], ToolPose]:
         """Each joint's (position, world axis), and the tool pose."""
+        frames, tool, _last = self._walk(joints)
+        return frames, tool
+
+    def _walk(self, joints: Mapping[str, float]
+              ) -> tuple[list[tuple[Vector, Vector]], ToolPose, tuple[Vector, Matrix]]:
+        """Each joint's (position, world axis), the tool pose, and the last joint's frame (after it turned)."""
         rotation = _rotation(_AXES["z"], self.base_yaw)
         position = self.base_position
         frames: list[tuple[Vector, Vector]] = []
@@ -256,7 +265,50 @@ class KinematicChain:
             frames.append((position, axis))
             rotation = _matmul(rotation, _rotation(link.axis, self.angle(link, joints.get(link.joint, 0.0))))
         tip = _add(position, _apply(rotation, self.tool))
-        return frames, ToolPose(tip, _apply(rotation, self.tool_pointing), _apply(rotation, self.tool_jaw))
+        return (frames, ToolPose(tip, _apply(rotation, self.tool_pointing), _apply(rotation, self.tool_jaw)),
+                (position, rotation))
+
+    def _fixed_below_tool(self, link: str) -> tuple[Vector, Matrix]:
+        """A link fixed to the tool link, as (origin, rotation) in the last joint's frame."""
+        if self.binding is None:
+            raise KinematicsError("a mounted link needs the arm's robot description (kinematics.model)")
+        model = self.binding.model
+        if link not in model.links:
+            raise KinematicsError(f"{link!r} is not a link of the robot description")
+        above = model.path_to(self.binding.tool_link)
+        below = model.path_to(link)
+        if below[:len(above)] != above:
+            raise KinematicsError(f"{link!r} does not hang off the tool link {self.binding.tool_link!r}")
+        position, rotation = self.tool_link_frame
+        for joint in below[len(above):]:
+            if joint.type != "fixed":
+                raise KinematicsError(f"{link!r} is moved by joint {joint.name!r}, not fixed to the tool link")
+            position = _add(position, _apply(rotation, joint.origin))
+            rotation = _matmul(rotation, _rpy(joint.rpy))
+        return position, rotation
+
+    def mounted(self, link: str, origin: Vector, forward: Vector, up: Vector) -> KinematicChain:
+        """This chain with its tool replaced by something fixed on ``link`` (a camera): its point and axes.
+
+        Solving it puts that point at a target with ``forward`` pointing down
+        -- a camera looking straight down from where it is asked to be.
+        """
+        position, rotation = self._fixed_below_tool(link)
+        return dataclasses.replace(self, tool=_add(position, _apply(rotation, origin)),
+                                   tool_pointing=_apply(rotation, forward), tool_jaw=_apply(rotation, up))
+
+    def link_pose(self, joints: Mapping[str, float], link: str) -> tuple[Vector, Matrix]:
+        """Where a link fixed to the tool link (a wrist camera) is, for these joints: (position, rotation).
+
+        Read from the robot description: the tool link's frame, then the fixed
+        joints from it down to ``link``. A link that a moving joint separates
+        from the tool link, or a chain without a description, is
+        :class:`KinematicsError`.
+        """
+        offset, turn = self._fixed_below_tool(link)
+        _frames, _tool, (position, rotation) = self._walk(joints)
+        position, rotation = _add(position, _apply(rotation, offset)), _matmul(rotation, turn)
+        return position, rotation
 
     def angle(self, link: Link, value: float) -> float:
         """A joint reading (the config's unit) as the chain's angle (radians)."""
@@ -561,6 +613,7 @@ def parse_kinematics(raw: Any, *, body_joints: Sequence[str], unit: str, config_
         tool_pointing=pointing,
         tool_jaw=jaw,
         binding=binding,
+        tool_link_frame=(offset, turn),
     )
 
 

@@ -1,0 +1,441 @@
+{
+  "schema": "flyto.lerobot.arm.v1",
+  "resource_id": "am-arm200-mujoco-wrist",
+  "display_name": "AM-ARM200 (MuJoCo simulation, wrist camera)",
+  "notes": "SIMULATION ONLY, on MuJoCo: the AM-ARM200 as shipped, EYE-IN-HAND. The arm's camera (BOM: 720p USB, 36 x 36 mm) is the URDF link left_camera fixed to left_Fixed_Jaw (left_camera_joint8); MuJoCo renders it from that link, and every located object is placed through the URDF chain at the joints read at the capture. The 'look' pose, from which the camera sees the work area, was chosen in simulation; pick and place perceive and verify from it. Field of view and image up are estimates (perception.camera.mount.fovy_source). Same arm, servos and scene as am-arm200-mujoco.json, which keeps the optional fixed overhead camera.",
+  "lerobot": {
+    "robot_module": "flyto_modules_lerobot.mujoco_sim",
+    "robot_type": "mujoco",
+    "port": "sim:am-arm200-mujoco-wrist",
+    "id": "mujoco-wrist"
+  },
+  "unit": "deg",
+  "joints": {
+    "shoulder_pan": {
+      "min": -150.0,
+      "max": 150.0
+    },
+    "shoulder_lift": {
+      "min": -150.0,
+      "max": 150.0
+    },
+    "elbow_flex": {
+      "min": -150.0,
+      "max": 150.0
+    },
+    "wrist_flex": {
+      "min": -150.0,
+      "max": 150.0
+    },
+    "wrist_yaw": {
+      "min": -150.0,
+      "max": 150.0
+    },
+    "wrist_roll": {
+      "min": -150.0,
+      "max": 150.0
+    }
+  },
+  "gripper": {
+    "joint": "gripper",
+    "min": 0.0,
+    "max": 100.0,
+    "open": 60.0,
+    "closed": 2.0,
+    "tolerance": 3.0,
+    "held_min_gap": 6.0,
+    "effort_key": "gripper.effort",
+    "held_min_effort": 20.0,
+    "hold_samples": 3
+  },
+  "motion": {
+    "max_step": 6.0,
+    "step_interval_s": 0.02,
+    "tolerance": 1.5,
+    "settle_timeout_s": 3.0,
+    "poll_interval_s": 0.02,
+    "still_drift": 0.3
+  },
+  "poses": {
+    "ready": {
+      "taught": true,
+      "joints": {
+        "shoulder_pan": 0.0,
+        "shoulder_lift": 0.0,
+        "elbow_flex": 0.0,
+        "wrist_flex": -90.0,
+        "wrist_yaw": 0.0,
+        "wrist_roll": 0.0
+      }
+    },
+    "observe": {
+      "taught": true,
+      "joints": {
+        "shoulder_pan": -5.0,
+        "shoulder_lift": -44.0,
+        "elbow_flex": 98.7,
+        "wrist_flex": 144.7,
+        "wrist_yaw": 0.0,
+        "wrist_roll": -66.9
+      }
+    },
+    "look": {
+      "taught": true,
+      "joints": {
+        "shoulder_pan": -1.4,
+        "shoulder_lift": -67.8,
+        "elbow_flex": 120.2,
+        "wrist_flex": 142.5,
+        "wrist_yaw": 0.0,
+        "wrist_roll": -88.6
+      }
+    }
+  },
+  "servos": {
+    "classes": {
+      "sts3095": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/399",
+        "stall_torque_nm": 9.32,
+        "rated_torque_nm": 2.21,
+        "no_load_speed_rad_s": 3.25,
+        "max_acceleration_rad_s2": 38.97,
+        "estimated": [
+          "max_acceleration_rad_s2"
+        ],
+        "source": "Feetech STS3095-C002 at 12 V as listed by the OpenELAB reseller (95 kg.cm stall, 22.5 kg.cm rated, 31 rpm no load); no Feetech datasheet was found. Gear ratio 1/399 from the AM-ARM README (liyiteng/AM-ARM 5b03af1); that repository's bom.md says 1/345. Acceleration: LeRobot's FeetechMotorsBus.configure_motors writes Acceleration 254 (and Maximum_Acceleration 254 on protocol 0) to every motor at lerobot_alohamini ec65318; at 100 steps/s^2 per unit (Feetech STS register convention, 4096 steps per turn) that is 38.97 rad/s^2 at the shaft. The unit is not from a Feetech datasheet, and under load the stall torque may limit it further: estimated."
+      },
+      "sts3215": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/345",
+        "stall_torque_nm": 2.94,
+        "rated_torque_nm": 0.98,
+        "no_load_speed_rad_s": 4.72,
+        "max_acceleration_rad_s2": 38.97,
+        "estimated": [
+          "max_acceleration_rad_s2"
+        ],
+        "source": "Feetech STS3215 (C018, 12 V, 1/345) as listed by RobotShop and OpenELAB (30 kg.cm stall, 10 kg.cm rated, 0.222 s/60 deg no load); no Feetech datasheet was found. Gear ratio from the AM-ARM README and bom.md (liyiteng/AM-ARM 5b03af1). Acceleration: LeRobot's FeetechMotorsBus.configure_motors writes Acceleration 254 (and Maximum_Acceleration 254 on protocol 0) to every motor at lerobot_alohamini ec65318; at 100 steps/s^2 per unit (Feetech STS register convention, 4096 steps per turn) that is 38.97 rad/s^2 at the shaft. The unit is not from a Feetech datasheet, and under load the stall torque may limit it further: estimated."
+      }
+    },
+    "joints": {
+      "shoulder_pan": "sts3095",
+      "shoulder_lift": "sts3095",
+      "elbow_flex": "sts3095",
+      "wrist_flex": "sts3215",
+      "wrist_yaw": "sts3215",
+      "wrist_roll": "sts3215",
+      "gripper": "sts3215"
+    }
+  },
+  "kinematics": {
+    "frame": "table",
+    "base": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 1.5708
+    },
+    "model": {
+      "source": {
+        "packaged": "am-arm200"
+      },
+      "joints": {
+        "shoulder_pan": "left_shoulder_pan",
+        "shoulder_lift": "left_shoulder_lift",
+        "elbow_flex": "left_elbow_flex",
+        "wrist_flex": "left_wrist_flex",
+        "wrist_yaw": "left_wrist_yaw_joint",
+        "wrist_roll": "left_wrist_roll"
+      },
+      "tool_link": "left_Fixed_Jaw",
+      "gripper": {
+        "joint": "left_gripper",
+        "closed_rad": 1.17,
+        "open_rad": 0.0,
+        "verified_on_hardware": false
+      },
+      "mass_overrides_kg": {
+        "left_camera": 0.03
+      }
+    },
+    "chain": [
+      {
+        "joint": "shoulder_pan",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "shoulder_lift",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "elbow_flex",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_flex",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_yaw",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_roll",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      }
+    ],
+    "tool": {
+      "origin": [
+        0.012,
+        0.0,
+        0.09
+      ],
+      "pointing": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "jaw": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    "grasp": {
+      "approach_height_m": 0.08,
+      "lift_height_m": 0.1,
+      "place_clearance_m": 0.015,
+      "path_step_m": 0.02,
+      "default_object_height_m": 0.03
+    },
+    "ik": {
+      "max_iterations": 200,
+      "position_tolerance_m": 0.002,
+      "axis_tolerance": 0.03,
+      "damping": 0.05
+    }
+  },
+  "perception": {
+    "frame": {
+      "id": "table",
+      "description": "Table plane: origin under the arm base, x forward, y to the arm's left, z up, metres. An object's pose is its bottom centre.",
+      "table_z_m": 0.0
+    },
+    "camera": {
+      "kind": "rendered",
+      "id": "wrist-render",
+      "width": 1280,
+      "height": 720,
+      "stride": 2,
+      "fovy_deg": 60.0,
+      "latency_ms": 15.0,
+      "jitter_ms": 5.0,
+      "uncertainty": {
+        "xy_m": 0.006,
+        "yaw_rad": 0.2
+      },
+      "classes": {
+        "red": {
+          "kind": "block",
+          "label": "red block",
+          "hue_deg": [
+            340.0,
+            15.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.25,
+          "min_area_px": 60,
+          "size_m": [
+            0.03,
+            0.03,
+            0.03
+          ]
+        },
+        "green": {
+          "kind": "block",
+          "label": "green block",
+          "hue_deg": [
+            90.0,
+            160.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.25,
+          "min_area_px": 60,
+          "size_m": [
+            0.03,
+            0.03,
+            0.03
+          ]
+        },
+        "blue": {
+          "kind": "container",
+          "label": "blue bin",
+          "hue_deg": [
+            200.0,
+            250.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.2,
+          "min_area_px": 400,
+          "size_m": [
+            0.09,
+            0.09,
+            0.04
+          ]
+        }
+      },
+      "mount": {
+        "link": "left_camera",
+        "origin": [
+          0.0,
+          0.0,
+          0.02
+        ],
+        "forward": [
+          0,
+          0,
+          1
+        ],
+        "up": [
+          0,
+          1,
+          0
+        ],
+        "joint_error_deg": 0.5,
+        "fk_error_m": 0.005,
+        "fovy_source": "ESTIMATE: the AM-ARM200 bill of materials lists a 720p USB camera, 36 x 36 mm, without a lens; 60 deg vertical (about 91 deg horizontal at 16:9) is a common board-camera lens, not a measured value. The optical axis is the camera mesh's +z (its lens barrel stands out of the board on that side); image up is the mesh's +y, unverified. The lens centre is put 20 mm out along +z, just past the barrel's end on the mesh (19.1 mm)."
+      }
+    },
+    "on_table_tolerance_m": 0.03,
+    "match_radius_m": 0.04,
+    "max_captures": 3,
+    "observe_pose": "look",
+    "reuse_within_s": 3.0,
+    "verify_height_m": 0.25
+  },
+  "simulation": {
+    "seed": 7,
+    "initial_pose": "look",
+    "gripper": {
+      "max_opening_m": 0.077,
+      "free_effort": 4.0,
+      "contact_effort": 60.0,
+      "reach_m": 0.02
+    },
+    "table_z_m": 0.0,
+    "objects": [
+      {
+        "id": "block-red",
+        "kind": "block",
+        "label": "red block",
+        "colour": "red",
+        "x": 0.24,
+        "y": 0.08,
+        "yaw": 0.0,
+        "size_m": [
+          0.03,
+          0.03,
+          0.03
+        ]
+      },
+      {
+        "id": "block-green",
+        "kind": "block",
+        "label": "green block",
+        "colour": "green",
+        "x": 0.28,
+        "y": -0.03,
+        "yaw": 0.3,
+        "size_m": [
+          0.03,
+          0.03,
+          0.03
+        ]
+      },
+      {
+        "id": "bin-blue",
+        "kind": "container",
+        "label": "blue bin",
+        "colour": "blue",
+        "x": 0.2,
+        "y": -0.14,
+        "yaw": 0.0,
+        "size_m": [
+          0.09,
+          0.09,
+          0.04
+        ]
+      }
+    ],
+    "latency": {
+      "read_ms": 2.0,
+      "jitter_ms": 1.0
+    },
+    "faults": [],
+    "physics": {
+      "timestep": 0.002,
+      "joint_kp": 100.0,
+      "joint_damping": 2.0,
+      "finger_kp": 30.0,
+      "grip_force": 1.47,
+      "friction": 1.5
+    },
+    "collision": [
+      {
+        "link": "left_Fixed_Jaw",
+        "pos": [
+          -0.016,
+          0.0,
+          0.079
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "half_size": [
+          0.004,
+          0.009,
+          0.021
+        ]
+      },
+      {
+        "link": "left_Moving_Jaw",
+        "pos": [
+          -0.0396,
+          -0.0415,
+          0.002
+        ],
+        "rpy": [
+          -1.5708,
+          0.0,
+          2.3916
+        ],
+        "half_size": [
+          0.004,
+          0.009,
+          0.021
+        ]
+      }
+    ],
+    "arm_rgba": [
+      0.13,
+      0.13,
+      0.14,
+      1.0
+    ]
+  }
+}

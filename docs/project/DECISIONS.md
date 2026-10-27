@@ -422,14 +422,15 @@ long axis.
 Owner directive: compress every latency the pack controls; only the real
 physics of the STS3095 / STS3215 servos may remain. Stop latency,
 verification honesty (zero false completions) and limits never give way.
-A MuJoCo pick-and-place took 12.5 s (P50); it now takes 3.5 s, and the
-in-process one 8.3 s -> 3.2 s, with zero false completions in every
-benchmark scenario on both backends. Each latency was traced to its cause,
+A MuJoCo pick-and-place took 12.5 s (P50); it now takes 3.7 s, and the
+in-process one 8.3 s -> 3.4 s, with zero false completions in every
+benchmark scenario on every backend. Each latency was traced to its cause,
 and the cause was changed, not the waits:
 
 | Latency | Cause | Fix |
 |---|---|---|
-| Stop-and-go motion | The move model was a sequence of independent blocking moves: each straight piece cut into equal steps, each step sent, slept on and read back, every piece brought to rest before the next. | `trajectory.py`: one time-optimal joint trajectory per continuous motion (approach+descend, lift/retreat+clear_view), every joint within its own servo's speed and acceleration, all joints in step, via points on a straight path passed at speed, corners no faster than each joint can turn in one period; streamed one set point per period, nothing waits for a set point. |
+| Stop-and-go motion | The move model was a sequence of independent blocking moves: each straight piece cut into equal steps, each step sent, slept on and read back, every piece brought to rest before the next. | `trajectory.py`: one time-optimal joint trajectory per continuous motion (the approach; the descent through all its solved points; lift/retreat+clear_view), every joint within its own servo's speed and acceleration, all joints in step, via points on a straight path passed at speed, corners no faster than each joint can turn in one period; streamed one set point per period, nothing waits for a set point. |
+| A jaw landing on the object (found while measuring eye-in-hand) | Blending the approach into the descent let the descent begin while the servos still trailed their set points sideways (12 mm measured in MuJoCo), so the fixed jaw's pad came down on the block whenever that lag pointed toward it. | The arm converges above the target before it descends toward contact; free-space motion stays continuous. |
 | Uniform pacing | Pacing was one `max_step / step_interval_s` for every joint, so the fastest joint set the pace of all and a config could not use a servo's rating. | Each joint is paced by its own servo class (`servo_speed`, `servo_acceleration`); `max_step` per period stays as a cap. The refusal "pacing faster than a servo" is gone because pacing is per servo now. |
 | Settling | There was no convergence criterion: a move accepted the first reading inside the tolerance (moving or not) and otherwise polled until a fixed timeout. | `_converge`: arrived = within tolerance *and* still (no more than `still_drift` between readings one poll apart); `settle_timeout_s` only bounds a servo that never converges. |
 | clear_view moved every time, the whole way | Occlusion was not modelled, so the arm always drove to the observe pose. | `perception.arm_hides`: the arm's links (capsules of `perception.arm_clearance_m` round the chain's polyline) cast along the camera's rays onto every object the call first saw. After the lift/retreat, the motion brakes along its path at the first reading the model calls clear (or does not move on at all). The look's own frame must show every spot free of the arm (`Capture.covered`: grey pixels no brighter than `camera.arm_max_value`), and give a settled answer, or the arm goes on to the observe pose and looks again. Never a skipped verify. |
@@ -457,3 +458,76 @@ Hardware: the same adapter code drives a real arm, and `examples/am-arm200.json`
 now streams at 20 ms with `max_step` 6 per period; none of it has run on an
 arm. Measure `stop_to_hold_ms`, `stop_to_still_ms` and `overshoot` on the arm
 before relying on the pace.
+
+## 2026-10-28 -- The arm's camera is on the arm: eye-in-hand (owner)
+
+The AM-ARM200 ships with its camera: the bill of materials lists a 720p USB
+camera, 36 x 36 mm, and the URDF has it as the fixed link `left_camera` on
+`left_Fixed_Jaw` (`left_camera_joint8`, origin (0.0018122, -0.07041,
+-0.0052089), rpy (-0.42318, 0, 0)). There is no overhead camera unless the
+owner buys one. Cause: perception modelled a camera fixed over the table
+because where the camera is had never been part of the arm model. Fix: a
+camera may be mounted on a link of the arm's robot description
+(`perception.camera.mount`); where it is at a capture is the URDF chain at the
+joints read for that capture, never a calibration constant.
+
+- **MuJoCo renders it from the URDF link** (`<camera name="wrist">` inside
+  the `left_camera` body): 1280 x 720. The field of view is an estimate (60
+  deg vertical, about 91 deg horizontal; the BOM names no lens) and so is
+  the image's up; the optical axis is the mesh's +z (the lens barrel stands
+  out of the board that way) and the lens centre 20 mm out along it, past
+  the barrel (19.1 mm on the mesh). All recorded in
+  `perception.camera.mount.fovy_source`. The fixed overhead camera stays
+  available as a configuration of its own (`am-arm200-mujoco.json`); one
+  config does not yet combine both.
+- **Locating** (`perception.detect_mounted`): each blob's pixel ray, from the
+  chain's camera pose, meets the plane of the object's top; its heading is
+  taken in the table plane (its outline cast there), so perspective does
+  not skew it; its uncertainty is the camera's own plus `range * sqrt(joints)
+  * joint_error_deg` and `fk_error_m` (0.5 deg and 5 mm, estimates). The
+  capture records `joints_at_capture`, `mount` and `calibration.method:
+  forward_kinematics`. `perception.locate_objects` stays read-only: it
+  captures from wherever the arm is (its Cloud row is a read); moving to the
+  look pose is a `move_joints` to the taught `look` pose.
+- **The look pose replaces clear_view.** With the camera on the arm, the arm
+  does not hide the table; what limits a look is the field of view and what
+  the jaws hold. Pick and place perceive from where the arm is (the
+  benchmark starts at `look`); the pick verifies from the look pose (phase
+  `look_pose`); the place verifies looking straight down from
+  `perception.verify_height_m` over the container (the camera as the chain's
+  tool, solved by the same IK), because from a slant an object's height
+  cannot be told.
+- **Height.** Cause of seven false completions in the first eye-in-hand run:
+  every object was placed on the table plane, so a block that came to rest
+  on the bin's wall was reported inside it. Fix: (1) apparent size gives an
+  object's distance -- and so its height -- only when it is seen within 15
+  deg of straight down (`STEEP_WITHIN_DEG`; at a slant the shaded sides make
+  size unreliable, and the object is taken to rest on the table, as a planar
+  camera takes it); (2) "inside" means resting: centre at least half its
+  width inside the container's walls and bottom below half the wall's height
+  (`perception.resting_inside`), for `_placed` and for the evidence counts,
+  on both cameras.
+- **What the jaws hold hides the work area.** A held block fills the middle
+  of the wrist camera's image, so the place's perceive saw the bin only in
+  part and planned against a shifted centre. Cause: a partly seen target was
+  treated as a whole one. Fix: a look that plans takes the newest frame
+  within `perception.reuse_within_s` (3 s on the wrist config) that saw the
+  target whole; positions are in the table frame, so the arm having moved
+  since does not matter, only the frame's age. A container cut in two by an
+  object inside it is merged back into one.
+- **Grasp confirmation.** A blob centred where the tool point projects and
+  as large as an object that close looks is in the jaws (placed at the tool
+  point by the chain). After the signature confirms a grip, the wrist camera
+  must also see an object between the jaws: otherwise `failed` /
+  `object_not_seen_in_jaws` (new reason). `grip.camera_sees_object` reports
+  it.
+- **Evidence honesty.** The camera is part of the arm, so what it counts is
+  the arm's own word: every evidence spec stays `observer: "self"` (a test
+  holds it), and `observe` reports `camera_on_arm`. Cloud may treat a
+  separately bought fixed camera as an independent observer.
+
+Not verified on hardware: the lens, the image orientation, the mount's
+origin, the joint and FK error bounds, the look pose (chosen on renders in
+simulation; teach it on the arm) and the USB path of a mounted camera (only
+the rendered one is implemented; a `usb` camera with a `mount` is not yet
+supported).

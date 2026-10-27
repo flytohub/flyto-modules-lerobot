@@ -42,7 +42,10 @@ acceleration (`trajectory.py`, arithmetic over the arm config; it plans
 *how* a move is timed, not *what* to do -- not a task planner), ending on a
 convergence criterion; the verifying look moves away from the table only as
 far as an occlusion model and the look's own frame say it must. Stop
-latency, verification honesty and limits never give way to speed.
+latency, verification honesty and limits never give way to speed. The arm's
+camera is on the arm (eye-in-hand, `perception.camera.mount`): where it is
+comes from the robot description's chain at the joints read for each
+capture, never a calibration constant.
 Commissioning an arm is done through the capabilities, not beside them (owner
 2026-10-23): the motor check runs on every connect, `manipulation.mark_pose`
 teaches a pose, `manipulation.move_joints` jogs, and every hold-stop of a

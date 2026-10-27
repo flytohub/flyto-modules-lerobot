@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Motion: every move is one time-optimal joint trajectory within each
+  servo's no-load speed and acceleration (`trajectory.py`; servo classes
+  gain `max_acceleration_rad_s2`), streamed one set point per control period
+  with a stop check before each; a move ends on convergence (within
+  tolerance and still); the arm converges above a target before descending;
+  `stop_to_hold_ms` on every interrupted move.
+- Gripper: closes at its servo's speed, squeezes on contact, grip confirmed
+  from the first still reading; the pick reads the gripper after its look.
+- Observation: an occlusion model (`perception.arm_hides`,
+  `perception.arm_clearance_m`) and a frame check (`Capture.covered`,
+  `camera.arm_max_value`) stop the move away from the table as soon as the
+  camera sees it; looks again from the observe pose otherwise; planning
+  looks may reuse a young frame (`perception.reuse_within_s`).
+- Perception: blobs from row runs with closed-form moments and the
+  smallest-rectangle heading; hue only for candidate pixels.
+- Eye-in-hand: the arm's own camera (URDF `left_camera`) as
+  `perception.camera.mount` (rendered in MuJoCo, USB on the arm), placed by
+  the chain at the joints read for each capture; `look` pose; straight-down
+  verification (`perception.verify_height_m`); grip confirmed in the camera
+  (`object_not_seen_in_jaws`); `examples/am-arm200-mujoco-wrist.json`; the
+  hardware example names the arm's camera.
+- "Inside a container" requires resting on its floor clear of its walls.
+- MuJoCo joint damping is each servo's speed-torque line; the in-process
+  world moves each joint at its servo's speed.
+- `scripts/benchmark_sim.py --backend mujoco-wrist`, localisation error,
+  stop-to-hold.
+
 - The arm is the official AM-ARM200 robot description: its URDF and meshes
   (liyiteng/AM-ARM 5b03af1, Apache-2.0, `NOTICE`) ship under
   `models/am-arm200`; `kinematics.model` reads the planner's chain from a

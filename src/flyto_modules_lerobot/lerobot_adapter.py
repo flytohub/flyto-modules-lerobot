@@ -120,6 +120,7 @@ from .capabilities import (
     REASON_NOT_IN_CONTAINER,
     REASON_NOT_REACHED,
     REASON_NOT_RELEASED,
+    REASON_NOT_SEEN_IN_JAWS,
     REASON_NOTHING_HELD,
     REASON_OBJECT_NOT_FOUND,
     REASON_OUTSIDE_LIMITS,
@@ -161,6 +162,7 @@ from .perception import (
     nearest,
     object_record,
     on_table,
+    resting_inside,
     scene_counts,
 )
 from .trajectory import Trajectory, motion_limits
@@ -572,6 +574,8 @@ class LeRobotArmAdapter:
         if capture is not None:
             observation.update(scene_counts(capture, self.config.perception))
             observation["perception_source"] = capture.source
+            # The camera is part of this device when it is on the arm: the counts are the arm's own word.
+            observation["camera_on_arm"] = self._mounted
         return observation
 
     def served_identity(self) -> dict[str, str]:
@@ -890,6 +894,9 @@ class LeRobotArmAdapter:
         stop short of their set point (contact), the closed value is
         commanded at once: the squeeze is the servo's own torque limit. The
         signature is then judged reading by reading (:meth:`_judge_grip`).
+        With the camera on the arm, a grip the signature confirms must also
+        show an object between the jaws in the camera's image
+        (``object_not_seen_in_jaws`` otherwise; ``grip.camera_sees_object``).
         """
         gripper = self.config.gripper
         target = {gripper.joint: gripper.closed}
@@ -909,7 +916,15 @@ class LeRobotArmAdapter:
         if contact is not None:
             counter[0] += 1
             self._after_send(lambda: self.session.command(target))
-        return self._judge_grip(call, positions, phases)
+        positions, grip, verdict, closed = self._judge_grip(call, positions, phases)
+        if verdict is None and self._mounted:
+            # The camera rides on the fixed jaw: a held object sits between the jaws in its image.
+            look = self._look()
+            seen = None if look is None else bool(look.camera.get("in_hand"))
+            grip = {**grip, "camera_sees_object": seen}
+            if seen is False:
+                verdict = REASON_NOT_SEEN_IN_JAWS
+        return positions, grip, verdict, closed
 
     def _judge_grip(self, call: _Call, positions: dict[str, float], phases: _Phases | None
                     ) -> tuple[dict[str, float], dict[str, Any], str | None, bool]:
@@ -973,29 +988,52 @@ class LeRobotArmAdapter:
             self.session.camera = build_camera(self.config)
         return self.session.camera
 
+    @property
+    def _mounted(self) -> bool:
+        """Whether the arm's camera is on the arm (eye-in-hand) rather than fixed over the table."""
+        perception = self.config.perception
+        return perception is not None and getattr(perception.camera, "mount", None) is not None
+
+    @property
+    def _view_phase(self) -> str:
+        """The phase that moves the arm for a verifying look: to the look pose (eye-in-hand) or clear of the view."""
+        return "look_pose" if self._mounted else "clear_view"
+
     def _look(self) -> Capture | None:
-        """One capture, or None when there is no camera or it gave no frame."""
+        """One capture, or None when there is no camera or it gave no frame.
+
+        A camera on the arm is placed by the arm's chain at the joints read
+        for the capture; that reading is recorded with it.
+        """
         camera = self._camera()
         if camera is None:
             return None
         try:
-            capture = camera.capture()
-        except (CameraUnavailable, OSError, ImportError):
+            joints = self.session.read() if self._mounted else None
+            capture = camera.capture(joints)
+        except (CameraUnavailable, OSError, ImportError, *_DRIVER_ERRORS):
             return None
-        self.session.last_capture = (self._clock(), capture)
+        self.session.captures.append((self._clock(), capture))
         return capture
 
     def _recent(self, *ids: str | None) -> Capture | None:
-        """The last frame, when it is young enough to plan by (``perception.reuse_within_s``) and shows ``ids``.
+        """The newest frame young enough to plan by (``perception.reuse_within_s``) that saw all of ``ids`` whole.
 
         Only a look that plans may take it; a look that verifies always takes
-        a new frame.
+        a new frame. Positions are in the table frame, so a frame from a
+        camera on the arm serves wherever the arm is now; what makes it stale
+        is only its age.
         """
-        perception, last = self.config.perception, self.session.last_capture
-        if perception is None or last is None or self._clock() - last[0] > perception.reuse_within_s:
+        perception = self.config.perception
+        if perception is None:
             return None
-        capture = last[1]
-        return capture if all(find(capture, item) is not None for item in ids if item) else None
+        now = self._clock()
+        for taken_at, capture in reversed(self.session.captures):
+            if now - taken_at > perception.reuse_within_s:
+                return None
+            if all((item := find(capture, wanted)) is not None and item.height_known for wanted in ids if wanted):
+                return capture
+        return None
 
     def _look_for(self, *ids: str | None) -> Capture | None:
         """Up to ``perception.max_captures`` looks, until every named object is seen; the last capture."""
@@ -1009,8 +1047,17 @@ class LeRobotArmAdapter:
         return capture
 
     def _capture(self, *ids: str | None, plan: bool = False) -> Capture:
-        """A capture (to plan by: a young enough last frame may serve); refused (nothing sent) without one."""
+        """A capture; refused (nothing sent) without one.
+
+        To plan by, a young enough frame that saw the named objects whole
+        serves; failing that, a new look, and when that one sees them only in
+        part (behind the jaws or what they hold), the newest young frame that
+        saw them whole.
+        """
         capture = (self._recent(*ids) if plan else None) or self._look_for(*ids)
+        if plan and capture is not None and any(
+                (item := find(capture, wanted)) is not None and not item.height_known for wanted in ids if wanted):
+            capture = self._recent(*ids) or capture
         if capture is None:
             raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"camera": self.config.perception is not None})
         return capture
@@ -1110,9 +1157,20 @@ class LeRobotArmAdapter:
         arm = self.config.kinematics.points(positions)
         return any(arm_hides(geometry, arm, clearance, spot) for spot in spots)
 
+    def _over(self, seed: Mapping[str, float], x: float, y: float) -> dict[str, float] | None:
+        """Joints that hold the camera on the arm straight over ``(x, y)`` at ``perception.verify_height_m``."""
+        perception = self.config.perception
+        mount = getattr(perception.camera, "mount", None) if perception is not None else None
+        if mount is None or perception.verify_height_m is None:
+            return None
+        camera = self.config.kinematics.mounted(mount.link, mount.origin, mount.forward, mount.up)
+        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
+        solved = camera.solve((x, y, self._table_z() + perception.verify_height_m), seed, limits, yaw=None)
+        return None if solved is None else {**dict(seed), **solved}
+
     def _away_and_look(self, call: _Call, positions: dict[str, float], path: Sequence[Mapping[str, float]],
                        counter: list[int], leg: dict[str, Any], phases: _Phases, spots: Sequence[Spot],
-                       ) -> tuple[dict[str, float], bool]:
+                       over: tuple[float, float] | None = None) -> tuple[dict[str, float], bool]:
         """Drive ``path`` (a lift or a retreat), then on toward the observe pose until the camera sees ``spots``.
 
         ``(last reading, stopped before the observe pose)``. The arm hides the
@@ -1127,6 +1185,11 @@ class LeRobotArmAdapter:
         every spot free of the arm in its own frame (:meth:`_shows`) and give a
         settled answer, or the arm goes on to the observe pose and looks again.
         """
+        above = self._over(path[-1], *over) if over is not None else None
+        if above is not None:
+            # A camera on the arm looks straight down at what it verifies: no slant to hide how high things rest.
+            return self._follow(call, positions, [*path, above], counter, leg, phases=phases,
+                                via_phases={len(path) - 1: self._view_phase}), False
         pose = self._observe_pose()
         if pose is None:
             return self._follow(call, positions, path, counter, leg), False
@@ -1135,7 +1198,7 @@ class LeRobotArmAdapter:
         tolerance = self.config.motion.tolerance
         positions, reached, early = self._move(call, positions, [*path, dict(pose.joints)], counter, leg,
                                                tolerance=tolerance, phases=phases,
-                                               via_phases={len(path) - 1: "clear_view"},
+                                               via_phases={len(path) - 1: self._view_phase},
                                                watch=watch, watch_from=len(path) - 1)
         if early and not self._hidden(model, positions, spots):
             return positions, True
@@ -1250,10 +1313,15 @@ class LeRobotArmAdapter:
                 if self.config.gripper.state(positions[self.config.gripper.joint]) != "open":
                     positions = self._open(call, positions, counter, leg)
             with phases("approach"):
-                positions = self._follow(call, positions, [*approach, *descend], counter, leg, phases=phases,
-                                         via_phases={len(approach) - 1: "descend"})
+                positions = self._follow(call, positions, approach, counter, leg)
+            with phases("descend"):
+                # Converged above the target before going down to it: the servos lag their set points, and
+                # a descent begun while the arm still trails sideways lands a jaw on the object.
+                positions = self._follow(call, positions, descend, counter, leg)
             with phases("grasp"):
                 positions, grip, verdict, _closed = self._close(call, positions, counter, leg, phases)
+            # What the camera on the arm saw between the jaws at the grasp, carried to the end of the call.
+            in_jaws = {key: grip[key] for key in ("camera_sees_object",) if key in grip}
             if verdict is not None:
                 return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
             # The look must see the spot the object was taken from, and the rest of the table, past the arm.
@@ -1265,17 +1333,17 @@ class LeRobotArmAdapter:
                 after = self._look_for(extra["object_id"])
                 lifted, seen = self._lifted(after, target, extra["object_id"])
                 positions = self._after_send(self.session.read)
-                grip = self._grip(positions)
+                grip = {**self._grip(positions), **in_jaws}
             if early and (lifted is False or not self._shows(after, spots)):
                 # Not settled from where the arm stopped: look again from the observe pose.
                 early = False
-                with phases("clear_view_again"):
+                with phases(f"{self._view_phase}_again"):
                     positions = self._to_observe_pose(call, positions, counter, leg)
                 with phases("verify_again"):
                     after = self._look_for(extra["object_id"])
                     lifted, seen = self._lifted(after, target, extra["object_id"])
                     positions = self._after_send(self.session.read)
-                    grip = self._grip(positions)
+                    grip = {**self._grip(positions), **in_jaws}
         except (_Interrupted, _Lost, _ShortOfTarget) as error:
             return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
         extra["perception_after"] = {"object_lifted": lifted, "object": self._record(seen, after) if after else None,
@@ -1363,8 +1431,11 @@ class LeRobotArmAdapter:
         positions = dict(before)
         try:
             with phases("approach"):
-                positions = self._follow(call, positions, [*approach, *descend], counter, leg, phases=phases,
-                                         via_phases={len(approach) - 1: "descend"})
+                positions = self._follow(call, positions, approach, counter, leg)
+            with phases("descend"):
+                # Converged above the target before going down to it: the servos lag their set points, and
+                # a descent begun while the arm still trails sideways lands a jaw on the object.
+                positions = self._follow(call, positions, descend, counter, leg)
                 still_held = self._grip(positions)
             if not still_held["held"]:
                 # It slipped out on the way: nothing to release, and the camera need not be asked.
@@ -1380,14 +1451,15 @@ class LeRobotArmAdapter:
             # The look must see the container, and the rest of the table, past the arm.
             spots = self._spots(capture, target, held_id)
             with phases("retreat"):
-                positions, early = self._away_and_look(call, positions, retreat, counter, leg, phases, spots)
+                positions, early = self._away_and_look(call, positions, retreat, counter, leg, phases, spots,
+                                                       over=(target.x, target.y) if self._mounted else None)
             with phases("verify"):
                 after = self._look_for(held_id, container_id)
                 inside, seen, container = self._placed(after, target, container_id, held_id)
             if early and (inside is not True or not self._shows(after, spots)):
                 # Not settled from where the arm stopped: look again from the observe pose.
                 early = False
-                with phases("clear_view_again"):
+                with phases(f"{self._view_phase}_again"):
                     positions = self._to_observe_pose(call, positions, counter, leg)
                 with phases("verify_again"):
                     after = self._look_for(held_id, container_id)
@@ -1431,7 +1503,12 @@ class LeRobotArmAdapter:
             # Either one unseen: whether it is inside is not known.
             return None, item, container
         holder = container_holding(item, capture.detections)
-        return holder is not None and holder.id == container_id, item, container
+        if holder is None or holder.id != container_id:
+            return False, item, container
+        if not item.height_known:
+            # Over the container but partly hidden: whether it rests on the floor or on a wall is not known.
+            return None, item, container
+        return resting_inside(item, holder, settings), item, container
 
     # -- teaching ------------------------------------------------------------------
 

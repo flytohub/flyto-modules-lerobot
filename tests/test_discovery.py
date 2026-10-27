@@ -73,7 +73,7 @@ def test_the_move_bounds_are_the_arms_own_limits_and_taught_poses(configured, co
     manifest, = discovery.discover_resource_manifests(execution_host_id="h")
     move, = [row for row in manifest["capability_contracts"] if row["capability_id"] == "manipulation.move_joints"]
     schema = move["input_schema"]
-    assert schema["properties"]["pose"] == {"type": "string", "enum": ["fixture_pick", "ready", "tray_place"],
+    assert schema["properties"]["pose"] == {"type": "string", "enum": ["fixture_pick", "look", "ready", "tray_place"],
                                             "description": "A taught pose by name"}
     elbow = schema["properties"]["elbow_flex"]
     assert (elbow["type"], elbow["minimum"], elbow["maximum"], elbow["unit"]) == ("number", -90.0, 90.0, "deg")

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from itertools import pairwise
 
 import pytest
 from conftest import ROOT, SimRig
@@ -90,20 +91,25 @@ def test_a_move_streams_one_setpoint_per_period_and_waits_for_none_of_them(sim):
     assert max(gaps) <= period + 1e-9 and min(gaps) >= period - 1e-9
 
 
-def test_approach_and_descend_are_one_motion_that_does_not_stop_at_the_via_points(sim):
+def test_a_straight_descent_is_one_motion_through_its_via_points_begun_from_a_converged_arm(sim):
     wire = Wire(sim)
     picked = sim.call(PICK.capability_id, {"object_id": "block-red"})
     assert picked.outcome == OUTCOME_COMPLETED
     rows = {row["phase"]: row for row in picked.evidence["phases"]}
-    begin = rows["approach"]["started_ms"] / 1000.0
+    begin = rows["descend"]["started_ms"] / 1000.0
     end = rows["grasp"]["started_ms"] / 1000.0
-    body = [command for at, command in wire.commands("shoulder_pan") if begin <= at - 0.0 <= end + 1e-9]
-    steps = [max(abs(b[motor] - a[motor]) for motor in b) for a, b in itertools.pairwise(body)]
-    assert len(steps) > 10
-    # Speed rises, may vary, and falls once: no interior stop where the old legs came to rest.
+    body = [command for at, command in wire.commands("shoulder_pan") if begin - 1e-9 <= at <= end + 1e-9]
+    steps = [max(abs(b[motor] - a[motor]) for motor in b) for a, b in pairwise(body)]
+    assert len(steps) > 5 and picked.evidence["plan"]["waypoints"] > 3
+    # Speed rises, may vary, and falls once: the solved points of the straight path are passed, not stopped at.
     moving = [step > 1e-3 for step in steps]
     first, last = moving.index(True), len(moving) - 1 - moving[::-1].index(True)
     assert all(moving[first:last + 1])
+    # The descent began from a converged arm: readings between the approach's last command and the first
+    # descent command stopped changing (the arm caught up with its set point above the object).
+    reads = [body for kind, at, body in wire.log if kind == "read" and at <= begin + 1e-9]
+    drift = sim.config.motion.still_drift
+    assert max(abs(reads[-1][m] - reads[-2][m]) for m in sim.config.joint_names) <= drift
 
 
 def test_no_joint_is_ever_commanded_faster_than_its_servo(sim):
@@ -242,8 +248,8 @@ def test_a_look_whose_frame_shows_the_arm_over_the_table_is_taken_again_from_the
     captures = []
     real = camera.capture
 
-    def first_verify_covered():
-        capture = real()
+    def first_verify_covered(joints=None):
+        capture = real(joints)
         captures.append(capture)
         if len(captures) == 2:  # the first verifying look (after the perceive)
             return type(capture)(capture.detections, capture.observed_at, capture.source, capture.camera,
@@ -266,9 +272,9 @@ def test_a_verifying_look_never_reuses_a_frame_and_a_planning_look_may(sim_data)
     taken = []
     real = camera.capture
 
-    def counted():
+    def counted(joints=None):
         taken.append(rig.clock.now())
-        return real()
+        return real(joints)
 
     camera.capture = counted
     picked = rig.call(PICK.capability_id, {"object_id": "block-red"})
