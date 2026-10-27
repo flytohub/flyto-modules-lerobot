@@ -28,8 +28,13 @@
 
 - Failing-first: the new tests against origin/main `src` -- `tests/test_trajectory.py`, `tests/test_motion_latency.py`,
   `tests/test_robot_model.py` cannot import (`trajectory` missing); `tests/test_sim_pick_place.py`: 3 failed.
-- MuJoCo 3.17 venv (+ main venv's pytest on PYTHONPATH): all tests pass (count in the coordinator report).
-- `./scripts/verify.sh` and `flyto-index verify . --strict`: see the coordinator report (run on the tip).
+- MuJoCo 3.17 venv (+ the main venv's pytest on PYTHONPATH): 277 passed, 4 skipped (core/Cloud absent).
+- `./scripts/verify.sh` (main checkout venv, no mujoco): ruff clean; 268 passed, 9 skipped; 3 entry points;
+  build + twine PASSED; `flyto-index verify . --strict` 20 pass / 0 warn / 0 fail.
+- Cloud `e1f9bfa13` backend + core `253561a`, flyto-cloud venv: 283 passed, 5 skipped (mujoco), 1 xfail
+  (the requested vocabulary rows, as before).
+- `flyto-index task validate`: ruff pass, pytest pass (overall pass); continuity "needs_handoff" (gate steps
+  of the plan not run through the task tool).
 - Benchmarks, 50 seeded episodes per scenario, `scripts/benchmark_sim.py`; outputs in
   `<scratchpad>/round28/perf-bench/{before,final}-*.txt`. Zero false completions in every scenario on
   every backend. Nominal episode P50 / P95 / P99 (simulated ms):
