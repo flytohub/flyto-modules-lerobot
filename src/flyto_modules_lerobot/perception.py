@@ -844,7 +844,9 @@ def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) ->
             pixel_m2 = max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
             slant = math.degrees(math.atan2(math.hypot(x - nadir[0], y - nadir[1]), height_m))
             if slant <= STEEP_WITHIN_DEG or colour.kind != "block":
-                k = math.sqrt(max(blob.area_px / (footprint / pixel_m2), 1e-6))
+                # A container's walls, shadow and what lies in it break up its colour, never its outline.
+                shown = _polygon_area(blob.outline) if colour.kind == "container" else blob.area_px
+                k = math.sqrt(max(shown / (footprint / pixel_m2), 1e-6))
                 height_known = k >= OCCLUDED_BELOW
                 cut = not height_known
                 top = height_m * (1.0 - 1.0 / max(k, 1.0))

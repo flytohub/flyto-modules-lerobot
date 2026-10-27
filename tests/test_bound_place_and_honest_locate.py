@@ -351,11 +351,49 @@ def test_a_slip_during_the_pick_is_reported_where_the_block_fell(wrist_rig):
     assert picked.outcome == "failed" and picked.evidence["reason_code"] == "object_slipped"
     assert picked.evidence["object_held"] is False
     fell = picked.evidence["perception_after"]
-    assert fell["after_slip"] is True and fell["object"] is not None
+    assert fell["after_failure"] == "object_slipped" and fell["object"] is not None
     truth = rig.world.data.body("block-red").xpos
     where = fell["object"]["pose"]
     assert math.hypot(where["x"] - truth[0], where["y"] - truth[1]) <= fell["object"]["uncertainty"]["xy_m"]
-    assert [row["phase"] for row in picked.evidence["phases"]][-2:] == ["look_pose_after_slip", "look_after_slip"]
+    assert [row["phase"] for row in picked.evidence["phases"]][-2:] == ["look_pose_after_failure", "look_after_failure"]
     # The arm is left where a read-only look sees it too.
     again = rig.call("perception.locate_objects")
     assert any(item["label"] == "red block" for item in again.evidence["objects"])
+
+
+def test_a_missed_grasp_reports_where_the_block_is_and_leaves_it_in_view(sim):
+    """The jaws closed where the block no longer was: the arm parked there hides it from a look-again."""
+    seen = sim.call("perception.locate_objects").evidence["objects"]
+    red = next(item for item in seen if item["id"] == "block-red")["pose"]
+    sim.world.inject({"kind": "object_moved", "object_id": "block-red", "x": 0.12, "y": 0.17,
+                      "at_s": sim.world.elapsed()})
+    missed = sim.call("manipulation.pick", {"x": red["x"], "y": red["y"], "yaw": red["yaw"]})
+    assert missed.outcome == "failed" and missed.evidence["reason_code"] == "no_object_held"
+    where = missed.evidence["perception_after"]
+    assert where["after_failure"] == "no_object_held"
+    assert any((item["pose"]["x"], item["pose"]["y"]) == pytest.approx((0.12, 0.17), abs=0.01)
+               for item in where["objects"])
+    again = sim.call("perception.locate_objects").evidence["objects"]
+    assert any(item["id"] == "block-red" for item in again)
+
+
+@pytest.mark.parametrize("seed", [1000, 1032, 1043])
+def test_a_pick_is_not_completed_on_jaws_swinging_closed_after_a_slip(seed):
+    """Seeds whose slip fired at the pick's last gripper read: one reading showed the block's width and full effort."""
+    pytest.importorskip("mujoco")
+    from test_mujoco_backend import EXAMPLE, Rig
+
+    data = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+    rng = random.Random(seed)
+    data["simulation"]["seed"] = seed
+    for item in data["simulation"]["objects"]:
+        if item["id"] == "block-red":
+            item["x"] += rng.uniform(-0.01, 0.01)
+            item["y"] += rng.uniform(-0.01, 0.01)
+            item["yaw"] = rng.uniform(-0.5, 0.5)
+    rig = Rig(data)
+    rig.world.inject({"kind": "grasp_slip", "after_held_s": rng.uniform(0.05, 1.0)})
+    picked = rig.call("manipulation.pick", {"object_id": "red-1"})
+    block, tip = rig.world.data.body("block-red").xpos, rig.world.tip().position
+    held = bool(block[2] > 0.04 and math.dist(tuple(block), tuple(tip)) < 0.03)
+    assert picked.evidence["object_held"] is held
