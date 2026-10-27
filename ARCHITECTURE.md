@@ -93,7 +93,11 @@ the move's `pose` enum when the host next publishes the manifest.
 | Pick: the look it plans on shows its target only in part (cut by the arm or another object) | refused | `target_partly_seen` | false |
 | Pick / place: a pose of the plan has no joint solution in the limits | refused | `pose_unreachable` | false |
 | Place: the gripper holds nothing | refused | `nothing_held` | false |
-| Pick: not held after the lift / camera sees it on the table | failed | `object_slipped` / `perception_disagrees` | true |
+| Place bound to a container (`x`, `y` + `container_label`, `container_uncertainty_m`): seen now farther from (`x`, `y`) than both looks' uncertainty together / not seen | refused (fixed camera) or failed holding the object after the look's move (camera on the arm) | `container_moved` / `container_not_found` | false / true (`released: false`, `object_held: true`) |
+| Place: the container where it goes seen only in part, even from straight over it | refused / failed holding (as above) | `container_not_found` | false / true |
+| Locate: a camera on the arm whose view, where the arm is, cannot place a whole object at its centre within `perception.max_uncertainty_m` | refused (nothing moves) | `viewpoint_unsuitable` | false |
+| Pick: not held after the lift (the gripper read until `hold_samples` still readings agree) / camera sees it on the table | failed | `object_slipped` / `perception_disagrees` | true |
+| Pick: a grasp that holds nothing (missed or slipped) | failed, the arm at the observe (look) pose, `perception_after` from a look there (`object`, `objects`, `after_failure`) | `no_object_held` / `object_slipped` / `object_not_seen_in_jaws` | true |
 | Place: camera sees it outside the container / did not see it | failed | `object_not_in_container` / `placement_not_observed` | true |
 | No camera, or no kinematic chain configured | refused | `perception_unavailable` / `kinematics_not_configured` | false |
 | A simulation config names a non-`sim:` port | refused (latched) | `simulation_targets_hardware` | false |
@@ -118,6 +122,26 @@ time-optimal joint trajectory (`trajectory.py`, below), streamed one set
 point per control period (`motion.step_interval_s`), no two further apart
 than `motion.max_step`. Each period checks for a stop before it sends, so a
 stop takes effect within one period (`stop_to_hold_ms`).
+
+## Arguments of a place (`container_id`, or `x`, `y` and the bound container)
+
+A place takes exactly one target: `container_id`, or a table position `x`,
+`y`. Cloud binds a named container to its current record and sends the
+record's position, and beside it what it bound the place to (Cloud's
+`manipulation_vocabulary.CONTAINER_REFERENCE`): `container_label`,
+`container_uncertainty_m` (required together) and `container_observed_at`.
+They are flat because Cloud's argument engine admits no nested object; a
+flyto-core step gives them as one `container_ref` object
+(`{label, x, y, uncertainty_m, observed_at}`), renamed by the module
+(`CapabilitySpec.renamed`). At place time the container is located again (an
+id names something only in the frame it came from): of the containers with
+that label, the one nearest (`x`, `y`). Farther from it than
+`container_uncertainty_m` and the new look's own uncertainty together, it
+has moved (`container_moved`): nothing is released, the object stays held.
+Else the place goes into the container as seen now; `container_check` in the
+result gives the reference, what was seen (`whole`), `off_m`, `allowed_m`,
+`moved`. Without the bound container a position is a place on whatever
+container's footprint holds it, else the table, as before.
 
 ## Motion (`trajectory.py`, 2026-10-28)
 
@@ -296,21 +320,43 @@ the capture records `joints_at_capture`.
   a real arm uses `kind: usb` with a `mount` and `fovy_deg` (not tested on
   hardware). A fixed overhead camera (`position`, or a USB homography) stays
   a configuration of its own.
-- Locating (`perception.detect_mounted`): a blob in the jaws (centred where
-  the tool point projects, as large as something that close looks) is
-  placed at the tool point; any other is placed where its ray meets the
-  plane of its top, its heading measured in the table plane, its height
-  observed from apparent size only when seen within 15 deg of straight down
-  (else taken to rest on the table), its uncertainty widened by the chain's
-  error over the ray's range. A container cut in two by an object inside is
-  one container.
+- Locating (`perception.detect_mounted`): while the gripper does not read
+  open, a blob in the jaws (centred where the tool point projects, as large
+  as something that close looks) is placed at the tool point. The other
+  blobs of a colour are grouped into objects -- pieces whose outlines, cast
+  onto the object's plane, fit within one footprint are one object (walls,
+  shadow or a block inside cut a bin's colour) -- and each is placed where
+  its ray meets the plane of its top (a block) or the centre of its
+  outline's smallest rectangle on its half-height plane (a container), its
+  heading in the table plane, its height from apparent size only when seen
+  within 15 deg of straight down (else resting on the table).
+- Each object's uncertainty is what the viewing geometry lets each error
+  source move it (`perception.located_within`): the camera's own `xy_m`,
+  one sampled pixel's footprint along the ray (`range * stride / (focal *
+  cos)`), the chain (`fk_error_m + range * sqrt(joints) * joint_error /
+  cos`), half the side band a slant shows (`height * tan / 2`), and, when
+  only part of it is in view -- cut by the frame's edge or by what the jaws
+  hold, or enclosing less than its top face -- half its footprint's
+  diagonal. A partly seen container whose seen edges and known size tell its
+  centre, with the rest of it out of frame or behind what the jaws hold, is
+  placed from them. Over 400 seeded scenes and viewpoints (the look pose,
+  straight over a point, tilted, holding the block) the error was within
+  the declared uncertainty for 824 of 824 objects.
+- `perception.viewpoint` reports, on every capture, where the image's
+  centre ray meets the table and how well a whole object there is placed; a
+  locate whose viewpoint is worse than `perception.max_uncertainty_m` (or
+  misses the table) is refused `viewpoint_unsuitable`.
 - Pick and place perceive from where the arm is (a taught `look` pose; the
-  arm should be moved there with `move_joints`); a planning look takes the
-  newest frame within `perception.reuse_within_s` that saw its target whole,
-  because what the jaws hold covers the middle of the image. The pick
-  verifies from the look pose; the place looks straight down from
-  `perception.verify_height_m` over the container (the camera as the chain's
-  tool: `KinematicChain.mounted`, the same IK).
+  arm should be moved there with `move_joints`); a pick's planning look
+  takes the newest frame within `perception.reuse_within_s` that saw its
+  target whole, because what the jaws hold covers the middle of the image.
+  A place looks again at where it goes first: the camera straight down from
+  `perception.verify_height_m` over the container's reference (or the
+  position), moved sideways so the container lands beside what the jaws hold
+  (`_vantage`); a container still seen only in part is looked at once more
+  from straight over where it was seen. The pick verifies from the look
+  pose; the place verifies straight down over the container (the camera as
+  the chain's tool: `KinematicChain.mounted`, the same IK).
 - A grip the signature confirms must also show an object between the jaws
   in the wrist camera's image (`grip.camera_sees_object`), else
   `object_not_seen_in_jaws`.

@@ -17,3 +17,6 @@
 - [ ] Measure the joint and forward-kinematics error bounds (`perception.camera.mount.joint_error_deg`, `fk_error_m`).
 - [ ] One config with both the wrist camera and a fixed overhead camera (if the owner buys one), the fixed one as an independent observer in Cloud.
 
+- [ ] Cloud: decide the "moved" bound with the pack -- Cloud's vocabulary says the larger of the two uncertainties, the pack uses their sum (two honest looks at a still container differ by up to the sum); accept `container_moved` as `failed` (holding) from a camera on the arm, which moves to look.
+- [ ] A pick descends with the block centred between the open jaws (the fixed jaw is 9 mm clear of a 30 mm block at the tool point; servo lag swung 6-7 mm in 1 of 50 eye-in-hand episodes): take the open jaws' geometry from the robot description.
+- [ ] On the arm: confirm `perception.max_uncertainty_m` and the look pose's viewpoint (`capture.viewpoint`) from real frames.

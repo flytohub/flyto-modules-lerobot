@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .capabilities import (
-    CONTAINER_REF_FIELDS,
+    CONTAINER_REF_ARGUMENTS,
     CONTAINER_REF_REQUIRED,
     PACK_VERSION,
     SPECS,
@@ -91,7 +91,7 @@ def _joint_targets(name: str, value: Any) -> dict[str, float]:
 
 def _reference(name: str, value: Any) -> dict[str, Any]:
     """A bound record (``container_ref``): its label and when it was observed as text, its position as numbers."""
-    if not isinstance(value, Mapping) or not set(value) <= set(CONTAINER_REF_FIELDS) or not set(
+    if not isinstance(value, Mapping) or not set(value) <= set(CONTAINER_REF_ARGUMENTS) or not set(
             CONTAINER_REF_REQUIRED) <= set(value):
         raise CapabilityRequestError(f"{name} must give {', '.join(CONTAINER_REF_REQUIRED)} (and may give observed_at)")
     record: dict[str, Any] = {}
@@ -135,9 +135,9 @@ def capability_request(spec: CapabilitySpec, params: Mapping[str, Any], *, resou
         raise CapabilityRequestError(f"give exactly one of: {', '.join(spec.exactly_one_of)}")
     arguments: dict[str, Any] = {}
     for name in given:
-        if name in spec.prefixed:
+        if name in spec.renamed:
             record = _reference(name, params[name])
-            arguments.update({spec.prefixed[name] + key: value for key, value in record.items()})
+            arguments.update({spec.renamed[name][key]: value for key, value in record.items()})
             continue
         value = _ARGUMENT_CHECKS[schema[name]["type"]](name, params[name])
         arguments.update(value if name in spec.flattened else {name: value})

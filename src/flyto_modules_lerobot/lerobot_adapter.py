@@ -102,12 +102,12 @@ from .adapter_contract import (
 from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
 from .backends import backend_for
 from .capabilities import (
-    CONTAINER_REF_FIELDS,
-    CONTAINER_REF_PREFIX,
-    CONTAINER_REF_REQUIRED,
+    CONTAINER_REF_ARGUMENTS,
     DEPLOYMENT_MODE,
     MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
+    MAX_LABEL_LENGTH,
+    MAX_OBSERVED_AT_LENGTH,
     OBSERVED_HELD,
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
@@ -1540,28 +1540,26 @@ class LeRobotArmAdapter:
 
     def _place_arguments(self, arguments: Mapping[str, Any]
                          ) -> tuple[str | None, dict[str, float], _ContainerRef | None]:
-        """``(container id, {}, reference or None)`` or ``(None, {x, y}, None)``; refused otherwise.
+        """``(container id, {}, None)`` or ``(None, {x, y}, the bound container or None)``; refused otherwise.
 
-        A reference (``container_<field>``) comes only with a container id and
-        gives at least its label, ``x``, ``y`` and ``uncertainty_m``.
+        The bound container (``container_label``, ``container_uncertainty_m``
+        and optionally ``container_observed_at``) comes only with a position:
+        its record's (``x``, ``y``), as Cloud sends it.
         """
-        names = {CONTAINER_REF_PREFIX + name: name for name in CONTAINER_REF_FIELDS}
-        given = {names[key]: value for key, value in arguments.items() if key in names}
+        bound = {field: CONTAINER_REF_ARGUMENTS[field] for field in ("label", "uncertainty_m", "observed_at")}
+        given = {field: arguments[name] for field, name in bound.items() if name in arguments}
         container_id, pose = self._position_arguments(
-            {key: value for key, value in arguments.items() if key not in names}, "container_id",
+            {key: value for key, value in arguments.items() if key not in bound.values()}, "container_id",
             frozenset({"x", "y"}))
         if not given:
             return container_id, pose, None
-        label, observed_at = given.get("label"), given.get("observed_at")
-        numbers = [given.get(name) for name in ("x", "y", "uncertainty_m")]
-        if (container_id is None or not set(CONTAINER_REF_REQUIRED) <= set(given)
-                or not isinstance(label, str) or not label.strip()
-                or not all(_finite(value) for value in numbers) or float(given["uncertainty_m"]) < 0.0
-                or (observed_at is not None and not isinstance(observed_at, str))):
+        label, uncertainty, observed_at = given.get("label"), given.get("uncertainty_m"), given.get("observed_at")
+        if (container_id is not None or not isinstance(label, str) or not label.strip()
+                or len(label) > MAX_LABEL_LENGTH or not _finite(uncertainty) or not 0.0 <= float(uncertainty) <= 10.0
+                or (observed_at is not None and (not isinstance(observed_at, str)
+                                                 or len(observed_at) > MAX_OBSERVED_AT_LENGTH))):
             raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
-        return container_id, pose, _ContainerRef(label.strip()[:64], float(given["x"]), float(given["y"]),
-                                                 float(given["uncertainty_m"]),
-                                                 observed_at[:64] if observed_at is not None else None)
+        return None, pose, _ContainerRef(label.strip(), pose["x"], pose["y"], float(uncertainty), observed_at)
 
     def _vantage(self, seed: Mapping[str, float], x: float, y: float, radius: float,
                  top: float) -> dict[str, float] | None:
@@ -1663,7 +1661,14 @@ class LeRobotArmAdapter:
 
     @staticmethod
     def _check_reference(ref: _ContainerRef, item: Detection | None) -> dict[str, Any]:
-        """The reference against the container seen now: moved when off by more than both looks' uncertainty."""
+        """The reference against the container seen now: moved when off by more than both uncertainties together.
+
+        Each look is off by at most its own uncertainty, so two looks at a
+        container that did not move differ by at most the sum; only a larger
+        difference says it moved. The larger of the two alone would call two
+        honest looks at a still container a move (they differed by more than
+        either one's 4 mm in the in-process simulation).
+        """
         check: dict[str, Any] = {"reference": ref.as_dict(), "seen": None, "off_m": None, "allowed_m": None,
                                  "moved": None}
         if item is None:
@@ -1689,11 +1694,11 @@ class LeRobotArmAdapter:
     def _place(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
         """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify.
 
-        Bound to a located container (``container_id`` with ``container_ref``)
-        or given a table position, the place first looks again at where it
-        goes (:meth:`_relocate`). A referenced container seen further from its
-        reference than both looks' uncertainty has moved (``container_moved``),
-        not seen it is ``container_not_found``: nothing is released either way.
+        Given a table position, bound to the located container there or not,
+        the place first looks again at where it goes (:meth:`_relocate`). A
+        bound container seen farther from its position than the bound and the
+        new uncertainty together has moved (``container_moved``); not seen,
+        it is ``container_not_found``: nothing is released either way.
         Otherwise it goes into the container as seen now.
         """
         container_id, pose, ref = self._place_arguments(arguments)

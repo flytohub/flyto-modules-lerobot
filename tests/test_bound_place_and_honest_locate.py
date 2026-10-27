@@ -225,9 +225,10 @@ def _wrist_episode(rig, place_arguments):
 
 
 def _reference(record: dict) -> dict:
-    return {"container_id": record["id"], "container_label": record["label"], "container_x": record["pose"]["x"],
-            "container_y": record["pose"]["y"], "container_uncertainty_m": record["uncertainty"]["xy_m"],
-            "container_observed_at": record["observed_at"]}
+    """What Cloud sends a place bound to a located container: the record's position and what it was bound to."""
+    return {"x": record["pose"]["x"], "y": record["pose"]["y"], "container_label": record["label"],
+            "container_uncertainty_m": record["uncertainty"]["xy_m"],
+            "container_observed_at": record["observed_at"][:40]}
 
 
 @pytest.mark.parametrize("seed", [20000, 20001, 20002])
@@ -259,19 +260,17 @@ def test_an_eye_in_hand_place_at_the_bins_position_lands_inside_it(wrist_rig, se
 def test_a_container_reference_travels_as_flat_arguments_cloud_can_admit():
     from flyto_modules_lerobot.capabilities import CONTAINER_REF
 
-    request = capability_request(PLACE, {"container_id": "blue-1", CONTAINER_REF: {
+    request = capability_request(PLACE, {CONTAINER_REF: {
         "label": "blue bin", "x": 0.2, "y": -0.14, "uncertainty_m": 0.01, "observed_at": "2026-10-28T00:00:00Z"}},
         resource_id="arm")
-    assert request["arguments"] == {"container_id": "blue-1", "container_label": "blue bin", "container_x": 0.2,
-                                    "container_y": -0.14, "container_uncertainty_m": 0.01,
-                                    "container_observed_at": "2026-10-28T00:00:00Z"}
+    assert request["arguments"] == {"x": 0.2, "y": -0.14, "container_label": "blue bin",
+                                    "container_uncertainty_m": 0.01, "container_observed_at": "2026-10-28T00:00:00Z"}
     with pytest.raises(CapabilityRequestError):
-        capability_request(PLACE, {"container_id": "blue-1", CONTAINER_REF: {"label": "blue bin"}},
-                           resource_id="arm")
+        capability_request(PLACE, {CONTAINER_REF: {"label": "blue bin"}}, resource_id="arm")
     properties = PLACE.input_schema["properties"]
-    assert {name for name in properties if name.startswith("container_")} == {
-        "container_id", "container_label", "container_x", "container_y", "container_uncertainty_m",
-        "container_observed_at"}
+    # Cloud's manipulation_vocabulary.CONTAINER_REFERENCE, beside the position.
+    assert set(properties) == {"container_id", "x", "y", "container_label", "container_uncertainty_m",
+                               "container_observed_at"}
     assert all(spec["type"] in ("string", "number") for spec in properties.values()), "no nested object"
 
 
@@ -306,13 +305,14 @@ def test_a_place_bound_to_a_container_still_there_goes_into_it(sim):
     assert sim.world.objects["block-red"].inside == "bin-blue"
 
 
-def test_a_container_reference_needs_a_container_id_and_its_position(sim):
+def test_a_bound_container_comes_with_its_position_and_uncertainty(sim):
     _sim_holding(sim)
-    for arguments in ({"x": 0.2, "y": -0.14, "container_label": "blue bin", "container_x": 0.2, "container_y": -0.14,
-                       "container_uncertainty_m": 0.01},
-                      {"container_id": "blue-1", "container_label": "blue bin", "container_x": 0.2}):
+    for arguments in ({"container_id": "blue-1", "container_label": "blue bin", "container_uncertainty_m": 0.01},
+                      {"x": 0.2, "y": -0.14, "container_label": "blue bin"},
+                      {"x": 0.2, "y": -0.14, "container_uncertainty_m": 0.01},
+                      {"x": 0.2, "y": -0.14, "container_label": "blue bin", "container_uncertainty_m": -0.01}):
         refused = sim.call("manipulation.place", arguments)
-        assert refused.outcome == "refused" and refused.evidence["reason_code"] == "arguments_refused"
+        assert refused.outcome == "refused" and refused.evidence["reason_code"] == "arguments_refused", arguments
 
 
 def test_an_eye_in_hand_place_whose_bin_moved_holds_the_block(wrist_rig):

@@ -133,7 +133,7 @@ REASON_OBJECT_NOT_FOUND = "object_not_found"
 REASON_TARGET_PARTLY_SEEN = "target_partly_seen"
 #: The camera does not see the container asked for; nothing was sent.
 REASON_CONTAINER_NOT_FOUND = "container_not_found"
-#: The container a place is bound to is not where its reference says (beyond both looks' uncertainty).
+#: The container a place is bound to is not where it was bound (beyond both looks' uncertainty together).
 REASON_CONTAINER_MOVED = "container_moved"
 #: A camera on the arm, where the arm is, cannot see the table well enough to locate anything; nothing moved.
 REASON_VIEWPOINT_UNSUITABLE = "viewpoint_unsuitable"
@@ -191,7 +191,7 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
             "攝影機只看到目標的一部分（被手臂遮住），無法確定它的位置與方向，沒有送出任何動作指令。"),
         REASON_CONTAINER_NOT_FOUND: "攝影機沒有看到指定的容器，沒有送出任何動作指令。",
         REASON_CONTAINER_MOVED: (
-            "容器已經不在先前看到的位置（超出兩次觀測的不確定度），沒有放下物品，物品仍夾在夾爪中。"),
+            "容器已經不在先前看到的位置（超出兩次觀測不確定度的總和），沒有放下物品，物品仍夾在夾爪中。"),
         REASON_VIEWPOINT_UNSUITABLE: "手臂上的攝影機從目前位置看不清楚桌面（不在畫面中或解析度不足），沒有移動手臂。",
         REASON_POSE_UNREACHABLE: "手臂在關節範圍內到不了這個位置，沒有送出任何動作指令。",
         REASON_NOTHING_HELD: "夾爪目前沒有夾著物品，沒有可放置的東西，沒有送出任何動作指令。",
@@ -233,7 +233,8 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
             "heading is known; nothing was sent"),
         REASON_CONTAINER_NOT_FOUND: "The camera does not see the container; nothing was sent",
         REASON_CONTAINER_MOVED: (
-            "The container is not where its reference says, beyond both looks' uncertainty; nothing was released"),
+            "The container is not where the place was bound to it, beyond both looks' uncertainty together; "
+            "nothing was released"),
         REASON_VIEWPOINT_UNSUITABLE: (
             "The camera on the arm cannot see the table from where the arm is at the required resolution; "
             "nothing moved"),
@@ -400,9 +401,9 @@ class CapabilitySpec:
     input_schema: Mapping[str, Any] = NO_ARGUMENTS
     # Core parameters whose entries travel as one argument each (``joints``, ``pose``).
     flattened: tuple[str, ...] = ()
-    # Core parameters whose entries travel as one argument each under a prefix (``container_ref`` as
-    # ``container_label``, ``container_x``, ...): Cloud's argument engine takes no nested object.
-    prefixed: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # Core parameters whose entries travel as one argument each, renamed (``container_ref``'s ``label`` as
+    # ``container_label``, its ``x`` as ``x``, ...): Cloud's argument engine takes no nested object.
+    renamed: Mapping[str, Mapping[str, str]] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def safety_class(self) -> str:
@@ -730,21 +731,25 @@ PICK = CapabilitySpec(
     flattened=("pose",),
 )
 
-#: What a place may be bound to besides a container's id: the located container's record Cloud bound it to
-#: (``container_ref``), each entry sent as ``container_<field>``. At place time the container is located again
-#: by its label; seen further from ``(x, y)`` than both looks' uncertainty, it has moved (``container_moved``).
+#: What a place at a position may be bound to: the located container's record Cloud bound it to (Cloud's
+#: ``manipulation_vocabulary.CONTAINER_REFERENCE``). The position is the record's (``x``, ``y``); beside it go
+#: the record's label, uncertainty and observation time. A core step gives them as one ``container_ref``
+#: object (each of its fields renamed to its argument). At place time the container is located again by its
+#: label; seen farther from (``x``, ``y``) than the bound and the new uncertainty together, it has moved.
 CONTAINER_REF = "container_ref"
-CONTAINER_REF_PREFIX = "container_"
-CONTAINER_REF_FIELDS: tuple[str, ...] = ("label", "x", "y", "uncertainty_m", "observed_at")
+CONTAINER_REF_ARGUMENTS: Mapping[str, str] = MappingProxyType({
+    "label": "container_label", "x": "x", "y": "y", "uncertainty_m": "container_uncertainty_m",
+    "observed_at": "container_observed_at"})
 CONTAINER_REF_REQUIRED: tuple[str, ...] = ("label", "x", "y", "uncertainty_m")
+MAX_LABEL_LENGTH = 128
+MAX_OBSERVED_AT_LENGTH = 40
 _REF_ARGUMENTS = {
-    "container_label": {**_ID_TEXT, "description": "The bound container's label (container_ref.label)"},
-    "container_x": {"type": "number", "unit": "m", "description": "The bound container's x (container_ref.x)"},
-    "container_y": {"type": "number", "unit": "m", "description": "The bound container's y (container_ref.y)"},
-    "container_uncertainty_m": {"type": "number", "unit": "m", "minimum": 0.0,
-                                "description": "How far the bound record may be off (container_ref.uncertainty_m)"},
-    "container_observed_at": {"type": "string", "maxLength": 64,
-                              "description": "When the bound record was observed (container_ref.observed_at)"},
+    "container_label": {"type": "string", "maxLength": MAX_LABEL_LENGTH, "minLength": 1,
+                        "description": "The bound container's recorded label (with x, y)"},
+    "container_uncertainty_m": {"type": "number", "unit": "m", "minimum": 0.0, "maximum": 10.0,
+                                "description": "The bound record's xy uncertainty (with x, y)"},
+    "container_observed_at": {"type": "string", "maxLength": MAX_OBSERVED_AT_LENGTH,
+                              "description": "When the bound observation was made, ISO 8601 (with x, y)"},
 }
 
 PLACE = CapabilitySpec(
@@ -767,9 +772,9 @@ PLACE = CapabilitySpec(
     params_schema=MappingProxyType({
         "container_id": {"type": "string", "label": "Container", "description": "A located container's id",
                          "required": False},
-        CONTAINER_REF: {"type": "object", "label": "Container reference",
-                        "description": ("With container_id: the located container's record the place is bound "
-                                        "to -- label, x, y, uncertainty_m, observed_at"),
+        CONTAINER_REF: {"type": "object", "label": "Bound container",
+                        "description": ("The located container's record the place is bound to -- label, x, y, "
+                                        "uncertainty_m, observed_at"),
                         "required": False},
         "pose": {"type": "object", "label": "Table position",
                  "description": "x, y in the table frame, metres", "required": False},
@@ -785,16 +790,16 @@ PLACE = CapabilitySpec(
     ),
     timeout_ms=90_000,
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
-    exactly_one_of=("container_id", "pose"),
+    exactly_one_of=("container_id", "pose", CONTAINER_REF),
     input_schema=MappingProxyType({
         "type": "object",
-        "properties": {"container_id": _ID_TEXT, **_REF_ARGUMENTS, "x": {"type": "number", "unit": "m"},
-                       "y": {"type": "number", "unit": "m"}},
+        "properties": {"container_id": _ID_TEXT, "x": {"type": "number", "unit": "m"},
+                       "y": {"type": "number", "unit": "m"}, **_REF_ARGUMENTS},
         "required": [],
         "additionalProperties": False,
     }),
     flattened=("pose",),
-    prefixed=MappingProxyType({CONTAINER_REF: CONTAINER_REF_PREFIX}),
+    renamed=MappingProxyType({CONTAINER_REF: CONTAINER_REF_ARGUMENTS}),
 )
 
 SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS,
@@ -840,8 +845,7 @@ __all__ = [
     "ADAPTER_ID",
     "CAPABILITY_IDS",
     "CONTAINER_REF",
-    "CONTAINER_REF_FIELDS",
-    "CONTAINER_REF_PREFIX",
+    "CONTAINER_REF_ARGUMENTS",
     "CONTAINER_REF_REQUIRED",
     "CONTRACT_SCHEMA",
     "EVIDENCE_HELD",
