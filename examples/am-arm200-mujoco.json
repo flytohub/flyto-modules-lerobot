@@ -2,7 +2,7 @@
   "schema": "flyto.lerobot.arm.v1",
   "resource_id": "am-arm200-mujoco",
   "display_name": "AM-ARM200 (MuJoCo simulation)",
-  "notes": "SIMULATION ONLY, on MuJoCo (the `mujoco` extra). The same AM-ARM200-shaped chain and scene as am-arm200-sim.json, generated as MJCF by the pack: grasping is contact physics and the overhead camera is rendered offscreen and segmented by colour, never read from the scene. The link lengths are illustrative, not the real arm's measurements. The mujoco robot type refuses a port that is not a sim: name.",
+  "notes": "SIMULATION ONLY, on MuJoCo (the `mujoco` extra). The same arm and scene as am-arm200-sim.json: grasping is contact physics on collision pads declared over the jaws, and the overhead camera is rendered offscreen and segmented by colour, never read from the scene. The mujoco robot type refuses a port that is not a sim: name. The arm is the official AM-ARM200 robot description (URDF and meshes from liyiteng/AM-ARM 5b03af1, Apache-2.0, packaged under models/am-arm200): the chain the planner solves is read from it, so link lengths are the published ones. The joint limits and the sign/offset of each joint against the URDF are placeholders not confirmed on a physical arm (verified_on_hardware: false), as is the gripper's jaw-angle mapping. Servo classes follow the lerobot_alohamini am-follower-6dof profile; their ratings are reseller-listed values (see servos.classes.*.source). The scene is laid out inside the arm's reach, off the strip under the arm's ready pose so the overhead camera sees every object.",
   "lerobot": {
     "robot_module": "flyto_modules_lerobot.mujoco_sim",
     "robot_type": "mujoco",
@@ -12,24 +12,24 @@
   "unit": "deg",
   "joints": {
     "shoulder_pan": {
-      "min": -120.0,
-      "max": 120.0
+      "min": -150.0,
+      "max": 150.0
     },
     "shoulder_lift": {
-      "min": -100.0,
-      "max": 100.0
+      "min": -150.0,
+      "max": 150.0
     },
     "elbow_flex": {
-      "min": -130.0,
-      "max": 130.0
+      "min": -150.0,
+      "max": 150.0
     },
     "wrist_flex": {
-      "min": -120.0,
-      "max": 120.0
+      "min": -150.0,
+      "max": 150.0
     },
     "wrist_yaw": {
-      "min": -90.0,
-      "max": 90.0
+      "min": -150.0,
+      "max": 150.0
     },
     "wrist_roll": {
       "min": -150.0,
@@ -61,12 +61,43 @@
       "taught": true,
       "joints": {
         "shoulder_pan": 0.0,
-        "shoulder_lift": 10.0,
-        "elbow_flex": 70.0,
-        "wrist_flex": 80.0,
+        "shoulder_lift": 0.0,
+        "elbow_flex": 0.0,
+        "wrist_flex": -90.0,
         "wrist_yaw": 0.0,
         "wrist_roll": 0.0
       }
+    }
+  },
+  "servos": {
+    "classes": {
+      "sts3095": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/399",
+        "stall_torque_nm": 9.32,
+        "rated_torque_nm": 2.21,
+        "no_load_speed_rad_s": 3.25,
+        "estimated": [],
+        "source": "Feetech STS3095-C002 at 12 V as listed by the OpenELAB reseller (95 kg.cm stall, 22.5 kg.cm rated, 31 rpm no load); no Feetech datasheet was found. Gear ratio 1/399 from the AM-ARM README (liyiteng/AM-ARM 5b03af1); that repository's bom.md says 1/345."
+      },
+      "sts3215": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/345",
+        "stall_torque_nm": 2.94,
+        "rated_torque_nm": 0.98,
+        "no_load_speed_rad_s": 4.72,
+        "estimated": [],
+        "source": "Feetech STS3215 (C018, 12 V, 1/345) as listed by RobotShop and OpenELAB (30 kg.cm stall, 10 kg.cm rated, 0.222 s/60 deg no load); no Feetech datasheet was found. Gear ratio from the AM-ARM README and bom.md (liyiteng/AM-ARM 5b03af1)."
+      }
+    },
+    "joints": {
+      "shoulder_pan": "sts3095",
+      "shoulder_lift": "sts3095",
+      "elbow_flex": "sts3095",
+      "wrist_flex": "sts3215",
+      "wrist_yaw": "sts3215",
+      "wrist_roll": "sts3215",
+      "gripper": "sts3215"
     }
   },
   "kinematics": {
@@ -75,69 +106,86 @@
       "x": 0.0,
       "y": 0.0,
       "z": 0.0,
-      "yaw": 0.0
+      "yaw": 1.5708
+    },
+    "model": {
+      "source": {
+        "packaged": "am-arm200"
+      },
+      "joints": {
+        "shoulder_pan": "left_shoulder_pan",
+        "shoulder_lift": "left_shoulder_lift",
+        "elbow_flex": "left_elbow_flex",
+        "wrist_flex": "left_wrist_flex",
+        "wrist_yaw": "left_wrist_yaw_joint",
+        "wrist_roll": "left_wrist_roll"
+      },
+      "tool_link": "left_Fixed_Jaw",
+      "gripper": {
+        "joint": "left_gripper",
+        "closed_rad": 1.17,
+        "open_rad": 0.0,
+        "verified_on_hardware": false
+      },
+      "mass_overrides_kg": {
+        "left_camera": 0.03
+      }
     },
     "chain": [
       {
         "joint": "shoulder_pan",
-        "origin": [
-          0.0,
-          0.0,
-          0.06
-        ],
-        "axis": "z"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       },
       {
         "joint": "shoulder_lift",
-        "origin": [
-          0.0,
-          0.0,
-          0.04
-        ],
-        "axis": "y"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       },
       {
         "joint": "elbow_flex",
-        "origin": [
-          0.0,
-          0.0,
-          0.14
-        ],
-        "axis": "y"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       },
       {
         "joint": "wrist_flex",
-        "origin": [
-          0.0,
-          0.0,
-          0.14
-        ],
-        "axis": "y"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       },
       {
         "joint": "wrist_yaw",
-        "origin": [
-          0.0,
-          0.0,
-          0.03
-        ],
-        "axis": "x"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       },
       {
         "joint": "wrist_roll",
-        "origin": [
-          0.0,
-          0.0,
-          0.02
-        ],
-        "axis": "z"
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
       }
     ],
-    "tool": [
-      0.0,
-      0.0,
-      0.08
-    ],
+    "tool": {
+      "origin": [
+        0.012,
+        0.0,
+        0.09
+      ],
+      "pointing": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "jaw": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
     "grasp": {
       "approach_height_m": 0.08,
       "lift_height_m": 0.1,
@@ -165,7 +213,7 @@
       "height": 360,
       "stride": 1,
       "position": [
-        0.17,
+        0.22,
         -0.02,
         0.7
       ],
@@ -229,13 +277,14 @@
     },
     "on_table_tolerance_m": 0.03,
     "match_radius_m": 0.04,
-    "max_captures": 3
+    "max_captures": 3,
+    "observe_pose": "ready"
   },
   "simulation": {
     "seed": 7,
     "initial_pose": "ready",
     "gripper": {
-      "max_opening_m": 0.07,
+      "max_opening_m": 0.077,
       "free_effort": 4.0,
       "contact_effort": 60.0,
       "reach_m": 0.02
@@ -247,7 +296,7 @@
         "kind": "block",
         "label": "red block",
         "colour": "red",
-        "x": 0.2,
+        "x": 0.24,
         "y": 0.08,
         "yaw": 0.0,
         "size_m": [
@@ -261,8 +310,8 @@
         "kind": "block",
         "label": "green block",
         "colour": "green",
-        "x": 0.23,
-        "y": -0.02,
+        "x": 0.28,
+        "y": -0.03,
         "yaw": 0.3,
         "size_m": [
           0.03,
@@ -275,8 +324,8 @@
         "kind": "container",
         "label": "blue bin",
         "colour": "blue",
-        "x": 0.15,
-        "y": -0.12,
+        "x": 0.2,
+        "y": -0.14,
         "yaw": 0.0,
         "size_m": [
           0.09,
@@ -292,11 +341,55 @@
     "faults": [],
     "physics": {
       "timestep": 0.002,
-      "joint_kp": 40.0,
-      "joint_damping": 1.0,
-      "finger_kp": 300.0,
-      "grip_force": 6.0,
+      "joint_kp": 100.0,
+      "joint_damping": 2.0,
+      "finger_kp": 30.0,
+      "grip_force": 1.47,
       "friction": 1.5
-    }
+    },
+    "collision": [
+      {
+        "link": "left_Fixed_Jaw",
+        "pos": [
+          -0.016,
+          0.0,
+          0.079
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "half_size": [
+          0.004,
+          0.009,
+          0.021
+        ]
+      },
+      {
+        "link": "left_Moving_Jaw",
+        "pos": [
+          -0.0396,
+          -0.0415,
+          0.002
+        ],
+        "rpy": [
+          -1.5708,
+          0.0,
+          2.3916
+        ],
+        "half_size": [
+          0.004,
+          0.009,
+          0.021
+        ]
+      }
+    ],
+    "arm_rgba": [
+      0.13,
+      0.13,
+      0.14,
+      1.0
+    ]
   }
 }

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The arm is the official AM-ARM200 robot description: its URDF and meshes
+  (liyiteng/AM-ARM 5b03af1, Apache-2.0, `NOTICE`) ship under
+  `models/am-arm200`; `kinematics.model` reads the planner's chain from a
+  URDF with an explicit joint-name map, and MuJoCo builds the arm from the
+  same file (meshes drawn, jaw pads collide, matte colour).
+- `verified_on_hardware` per joint; a real arm with an unverified chain
+  refuses Cartesian moves (`kinematics_not_configured`, `unverified_joints`).
+- `servos` section: each motor's servo class (STS3095 on the three large
+  joints, STS3215 on the rest); MuJoCo servo torque and goal speed come from
+  it; pacing moves faster than a servo turns is refused.
+- `perception.observe_pose`: pick and place move to it (`clear_view` phase)
+  before their verifying look.
+- A square blob's heading comes from its tightest bounding rectangle.
+- Install line pins lerobot_alohamini at `ec65318` (STS3095 registered).
+
 - Sensing closed loop (simulation): `perception.locate_objects`,
   `manipulation.pick`, `manipulation.place`; `sim` and `mujoco` robot types
   (the `mujoco` extra); perception behind one camera interface (simulated,

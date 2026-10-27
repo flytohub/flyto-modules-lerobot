@@ -143,7 +143,9 @@ REASON_PLACEMENT_UNOBSERVED = "placement_not_observed"
 REASON_PERCEPTION_DISAGREES = "perception_disagrees"
 #: The arm config names no camera, or the camera gave no frame; nothing was sent.
 REASON_PERCEPTION_UNAVAILABLE = "perception_unavailable"
-#: The arm config declares no kinematic chain, so no Cartesian target can be planned; nothing was sent.
+#: The arm config declares no kinematic chain usable on this arm -- none, or, on hardware, one whose joint
+#: calibration against the robot description is not confirmed on the arm -- so no Cartesian target can be
+#: planned; nothing was sent.
 REASON_KINEMATICS_UNAVAILABLE = "kinematics_not_configured"
 #: A simulation config names a port that may be real hardware; nothing was built or sent.
 REASON_SIMULATION_ON_HARDWARE = "simulation_targets_hardware"
@@ -184,7 +186,9 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_PERCEPTION_DISAGREES: "夾爪判定夾住，但攝影機看到物品仍在桌面上。",
         REASON_PLACEMENT_UNOBSERVED: "放開後攝影機沒有看到物品，無法確認是否放進容器。",
         REASON_PERCEPTION_UNAVAILABLE: "沒有可用的攝影機畫面，沒有送出任何動作指令。",
-        REASON_KINEMATICS_UNAVAILABLE: "這支手臂的設定檔沒有運動學鏈，無法規劃座標目標，沒有送出任何動作指令。",
+        REASON_KINEMATICS_UNAVAILABLE: (
+            "這支手臂沒有可用的運動學鏈（未設定，或關節校準尚未在實機確認），"
+            "無法規劃座標目標，沒有送出任何動作指令。"),
         REASON_SIMULATION_ON_HARDWARE: "模擬設定指向的不是模擬埠（可能是實體手臂），拒絕執行，沒有送出任何動作指令。",
     }
 )
@@ -217,7 +221,9 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_PERCEPTION_DISAGREES: "The gripper reads held but the camera sees the object still on the table",
         REASON_PLACEMENT_UNOBSERVED: "After the release the camera did not see the object; the placement is unverified",
         REASON_PERCEPTION_UNAVAILABLE: "No camera frame is available; nothing was sent",
-        REASON_KINEMATICS_UNAVAILABLE: "The arm config declares no kinematic chain; nothing was sent",
+        REASON_KINEMATICS_UNAVAILABLE: (
+            "No kinematic chain usable on this arm (none, or its calibration is unconfirmed on hardware); "
+            "nothing was sent"),
         REASON_SIMULATION_ON_HARDWARE: "A simulation config names a port that may be hardware; nothing was sent",
     }
 )

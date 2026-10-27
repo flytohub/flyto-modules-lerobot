@@ -559,7 +559,7 @@ def timed_adapter(config_data):
     from flyto_modules_lerobot.arm_config import parse_arm_config
     from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
 
-    config_data["motion"].update({"max_step": 5.0, "step_interval_s": 0.02, "poll_interval_s": 0.01,
+    config_data["motion"].update({"max_step": 3.0, "step_interval_s": 0.02, "poll_interval_s": 0.01,
                                   "settle_timeout_s": 2.0, "tolerance": 1.0, "still_drift": 0.05})
     config = parse_arm_config(config_data)
     factory = fake_factory(velocity=100.0, lag_s=0.04)

@@ -93,6 +93,7 @@ from .adapter_contract import (
     CallResult,
 )
 from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
+from .backends import backend_for
 from .capabilities import (
     DEPLOYMENT_MODE,
     MARK_CANCELLED_DETAIL,
@@ -896,9 +897,18 @@ class LeRobotArmAdapter:
     # -- planning -------------------------------------------------------------------------
 
     def _chain(self) -> Any:
+        """The chain a Cartesian target is planned with; refused when there is none.
+
+        On hardware the chain must also be confirmed on the arm: a joint whose
+        sign and offset against the robot description were never checked on
+        the physical arm (``verified_on_hardware``) would put the gripper
+        somewhere else than planned. A simulator is its own description.
+        """
         chain = self.config.kinematics
         if chain is None:
             raise _Refused(REASON_KINEMATICS_UNAVAILABLE, {})
+        if not backend_for(self.config.lerobot.robot_type).simulated and chain.unverified_joints:
+            raise _Refused(REASON_KINEMATICS_UNAVAILABLE, {"unverified_joints": list(chain.unverified_joints)})
         return chain
 
     def _table_z(self) -> float:
@@ -945,6 +955,19 @@ class LeRobotArmAdapter:
         if not reached:
             raise _ShortOfTarget(positions)
         return positions
+
+    def _clear_view(self, call: _Call, positions: dict[str, float], counter: list[int],
+                    leg: dict[str, Any]) -> dict[str, float]:
+        """Move to the perception's observe pose before a verifying look, so the arm does not hide the table.
+
+        Only a taught pose is driven to; without one the look is taken from where the move ended.
+        """
+        perception = self.config.perception
+        name = perception.observe_pose if perception is not None else None
+        pose = self.config.poses.get(name) if name else None
+        if pose is None or not pose.taught:
+            return positions
+        return self._follow(call, positions, [dict(pose.joints)], counter, leg)
 
     def _position_arguments(self, arguments: Mapping[str, Any], id_key: str,
                             pose_keys: frozenset[str]) -> tuple[str | None, dict[str, float]]:
@@ -1027,6 +1050,8 @@ class LeRobotArmAdapter:
                 return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
             with phases("lift"):
                 positions = self._follow(call, positions, lift, counter, leg)
+            with phases("clear_view"):
+                positions = self._clear_view(call, positions, counter, leg)
             with phases("verify"):
                 positions = self._after_send(self.session.read)
                 grip = self._grip(positions)
@@ -1135,6 +1160,8 @@ class LeRobotArmAdapter:
                 grip = self._grip(positions)
             with phases("retreat"):
                 positions = self._follow(call, positions, retreat, counter, leg)
+            with phases("clear_view"):
+                positions = self._clear_view(call, positions, counter, leg)
             with phases("verify"):
                 after = self._look_for(held_id, container_id)
                 inside, seen, container = self._placed(after, target, container_id, held_id)

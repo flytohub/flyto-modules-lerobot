@@ -28,7 +28,9 @@ Three more capabilities -- `perception.locate_objects`, `manipulation.pick`,
 boundary: two simulation backends selected by `lerobot.robot_type` through
 `backends.py` (`sim`: in-process, `mujoco`: MuJoCo physics, the `mujoco`
 extra), perception behind one camera interface (`perception.py`), the arm's
-kinematic chain (`kinematics.py`), evidence specs, typed fault reporting
+kinematic chain (`kinematics.py`, read from the arm's published robot description by
+`urdf_model.py` when the config names one; the official AM-ARM200 URDF ships under
+`models/am-arm200`, Apache-2.0, `NOTICE`), evidence specs, typed fault reporting
 (`connection_status`), four telemetry channels with a sampler, a live view
 through the host's existing `live_channels` (`live_view.py`), and two
 developer scripts (`scripts/benchmark_sim.py`, `scripts/watch_mujoco.py`).

@@ -17,7 +17,7 @@
 ```bash
 # in the Python environment that runs Flyto2
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
-pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini"
+pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini@ec65318f4cc3d830242f6e987d43f46e6b61f0a5"
 pip install -e .
 cp examples/am-arm200.json my-arm.json        # set your port, teach your poses
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json

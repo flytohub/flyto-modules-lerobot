@@ -16,8 +16,11 @@ TOML file per arm, never in code:
 * ``motion`` -- step size, tolerances and timing for a move.
 * ``poses`` -- named joint targets; each says whether it was ``taught`` on
   this arm. An untaught pose is refused, never moved to.
+* ``servos`` (optional) -- each motor's servo class: torques and no-load
+  speed, with their source; a ``motion`` faster than a servo is refused.
 * ``kinematics`` (optional) -- the arm's kinematic chain, for Cartesian pick
-  and place (``kinematics.py``).
+  and place (``kinematics.py``), written out or read from a robot
+  description (``urdf_model.py``).
 * ``perception`` (optional) -- the table frame and the camera that locates
   objects on it (``perception.py``).
 * ``simulation`` -- the simulated world, required exactly when the robot type
@@ -60,7 +63,7 @@ ARM_CONFIG_SCHEMA = "flyto.lerobot.arm.v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _RESOURCE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TOP_KEYS = frozenset({"schema", "resource_id", "display_name", "notes", "lerobot", "unit", "joints", "gripper",
-                       "motion", "poses", "kinematics", "perception", "simulation"})
+                       "motion", "poses", "servos", "kinematics", "perception", "simulation"})
 _LEROBOT_KEYS = frozenset({"robot_module", "robot_type", "port", "id", "calibration_dir", "options"})
 # Fields set once, by the keys above or by this pack, never through ``options``.
 _RESERVED_OPTIONS = frozenset({"port", "id", "calibration_dir", "disable_torque_on_disconnect"})
@@ -69,6 +72,9 @@ _GRIPPER_KEYS = frozenset({"joint", "min", "max", "open", "closed", "tolerance",
 _MOTION_KEYS = frozenset({"max_step", "step_interval_s", "tolerance", "settle_timeout_s", "poll_interval_s",
                           "still_drift"})
 _POSE_KEYS = frozenset({"taught", "joints", "notes"})
+_SERVOS_KEYS = frozenset({"classes", "joints"})
+_SERVO_CLASS_KEYS = frozenset({"voltage_v", "gear_ratio", "stall_torque_nm", "rated_torque_nm", "no_load_speed_rad_s",
+                               "estimated", "source"})
 _LOADERS = {
     ".json": lambda text: json.loads(text),
     ".toml": lambda text: tomllib.loads(text),
@@ -137,6 +143,25 @@ class GripperConfig:
 
 
 @dataclass(frozen=True)
+class ServoClass:
+    """A servo model's published ratings, with where each came from.
+
+    ``estimated`` lists the fields that are estimates rather than read from a
+    published source. The numbers model the servo in simulation and bound the
+    commanded speed; LeRobot drives the real servo by its own motor table.
+    """
+
+    name: str
+    stall_torque_nm: float
+    rated_torque_nm: float
+    no_load_speed_rad_s: float
+    voltage_v: float | None
+    gear_ratio: str | None
+    source: str
+    estimated: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MotionConfig:
     """How a move is commanded and judged by the adapter."""
 
@@ -192,6 +217,8 @@ class ArmConfig:
     kinematics: Any = None
     perception: Any = None
     simulation: Any = None
+    # Each motor's servo class (joint or gripper name -> ServoClass); empty when the config names none.
+    servos: Mapping[str, ServoClass] = dataclasses.field(default_factory=lambda: MappingProxyType({}))
     # The file it was read from, or None when parsed from data. Where the arm
     # config lives is not part of what the arm is, so it is not compared.
     source: Path | None = dataclasses.field(default=None, compare=False)
@@ -332,6 +359,47 @@ def _poses(raw: Any, joints: tuple[JointLimit, ...]) -> Mapping[str, Pose]:
     return MappingProxyType(poses)
 
 
+def _servos(raw: Any, motors: tuple[str, ...], motion: MotionConfig, unit: str) -> Mapping[str, ServoClass]:
+    """``servos``: named servo classes and which motor is which; every motor or none."""
+    if raw is None:
+        return MappingProxyType({})
+    body = _mapping(raw, "servos", _SERVOS_KEYS)
+    classes: dict[str, ServoClass] = {}
+    for name, item in _mapping(body.get("classes"), "servos.classes").items():
+        where = f"servos.classes.{name}"
+        entry = _mapping(item, where, _SERVO_CLASS_KEYS)
+        estimated = entry.get("estimated", [])
+        if not isinstance(estimated, list) or not set(estimated) <= _SERVO_CLASS_KEYS - {"estimated", "source"}:
+            raise ArmConfigError(f"{where}.estimated must list fields of the class")
+        voltage = entry.get("voltage_v")
+        ratio = entry.get("gear_ratio")
+        classes[str(name)] = ServoClass(
+            name=str(name),
+            stall_torque_nm=_positive(entry.get("stall_torque_nm"), f"{where}.stall_torque_nm"),
+            rated_torque_nm=_positive(entry.get("rated_torque_nm"), f"{where}.rated_torque_nm"),
+            no_load_speed_rad_s=_positive(entry.get("no_load_speed_rad_s"), f"{where}.no_load_speed_rad_s"),
+            voltage_v=None if voltage is None else _positive(voltage, f"{where}.voltage_v"),
+            gear_ratio=None if ratio is None else _text(ratio, f"{where}.gear_ratio")[:32],
+            source=_text(entry.get("source"), f"{where}.source")[:500],
+            estimated=tuple(str(field) for field in estimated),
+        )
+    assigned = _mapping(body.get("joints"), "servos.joints")
+    if set(assigned) != set(motors):
+        raise ArmConfigError("servos.joints must give every joint and the gripper a servo class")
+    unknown = sorted(str(value) for value in assigned.values() if value not in classes)
+    if unknown:
+        raise ArmConfigError(f"servos.joints names an undeclared servo class: {', '.join(unknown)}")
+    servos = {str(motor): classes[str(name)] for motor, name in assigned.items()}
+    to_radians = {"deg": math.pi / 180.0, "rad": 1.0}.get(unit)
+    if to_radians is not None and motion.step_interval_s > 0:
+        commanded = motion.max_step / motion.step_interval_s * to_radians
+        slowest = min(servos.values(), key=lambda servo: servo.no_load_speed_rad_s)
+        if commanded > slowest.no_load_speed_rad_s:
+            raise ArmConfigError(f"motion commands {commanded:.2f} rad/s, faster than servo class {slowest.name} "
+                                 f"turns unloaded ({slowest.no_load_speed_rad_s:.2f} rad/s)")
+    return MappingProxyType(servos)
+
+
 def _lerobot(raw: Any) -> LeRobotSettings:
     body = _mapping(raw, "lerobot", _LEROBOT_KEYS)
     options = dict(_mapping(body.get("options") or {}, "lerobot.options"))
@@ -351,8 +419,12 @@ def _lerobot(raw: Any) -> LeRobotSettings:
     )
 
 
-def parse_arm_config(data: Any) -> ArmConfig:
-    """An :class:`ArmConfig` from a decoded file, or :class:`ArmConfigError`."""
+def parse_arm_config(data: Any, *, config_dir: Path | None = None) -> ArmConfig:
+    """An :class:`ArmConfig` from a decoded file, or :class:`ArmConfigError`.
+
+    ``config_dir`` is the folder the file was read from, for sections that
+    name another file by a relative path (``kinematics.model.source.path``).
+    """
     body = _mapping(data, "the arm config", _TOP_KEYS)
     if body.get("schema") != ARM_CONFIG_SCHEMA:
         raise ArmConfigError(f"schema must be {ARM_CONFIG_SCHEMA!r}")
@@ -360,21 +432,24 @@ def parse_arm_config(data: Any) -> ArmConfig:
     unit = _text(body.get("unit"), "unit")[:16]
     poses = _poses(body.get("poses"), joints)
     lerobot = _lerobot(body.get("lerobot"))
+    gripper = _gripper(body.get("gripper"), tuple(joint.name for joint in joints))
+    motion = _motion(body.get("motion"))
     return ArmConfig(
         resource_id=_text(body.get("resource_id"), "resource_id", _RESOURCE_ID),
         display_name=_text(body.get("display_name") or "arm", "display_name")[:120],
         unit=unit,
         joints=joints,
-        gripper=_gripper(body.get("gripper"), tuple(joint.name for joint in joints)),
-        motion=_motion(body.get("motion")),
+        gripper=gripper,
+        motion=motion,
         poses=poses,
         lerobot=lerobot,
-        **_sections(body, joints=joints, unit=unit, poses=poses, lerobot=lerobot),
+        servos=_servos(body.get("servos"), (*(joint.name for joint in joints), gripper.joint), motion, unit),
+        **_sections(body, joints=joints, unit=unit, poses=poses, lerobot=lerobot, config_dir=config_dir),
     )
 
 
 def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: str, poses: Mapping[str, Pose],
-              lerobot: LeRobotSettings) -> dict[str, Any]:
+              lerobot: LeRobotSettings, config_dir: Path | None) -> dict[str, Any]:
     """The optional ``kinematics``, ``perception`` and ``simulation`` sections, each checked by its own module."""
     from .backends import backend_for
     from .kinematics import KinematicsError, parse_kinematics
@@ -386,10 +461,14 @@ def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: 
         raise ArmConfigError("a simulation section is required exactly when the robot type is the simulator's")
     if simulated and "kinematics" not in body:
         raise ArmConfigError("a simulated arm needs its kinematics section")
+    perception = body.get("perception")
+    observe = perception.get("observe_pose") if isinstance(perception, Mapping) else None
+    if observe is not None and observe not in poses:
+        raise ArmConfigError("perception.observe_pose must name one of the config's poses")
     try:
         return {
             "kinematics": (parse_kinematics(body["kinematics"], body_joints=[joint.name for joint in joints],
-                                            unit=unit) if "kinematics" in body else None),
+                                            unit=unit, config_dir=config_dir) if "kinematics" in body else None),
             "perception": (parse_perception(body["perception"], robot_type=lerobot.robot_type)
                            if "perception" in body else None),
             "simulation": parse_simulation(body["simulation"], poses=tuple(poses)) if simulated else None,
@@ -408,7 +487,7 @@ def load_arm_config(path: str | Path) -> ArmConfig:
         data = loader(file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ArmConfigError(f"the arm config cannot be read: {type(error).__name__}") from error
-    return dataclasses.replace(parse_arm_config(data), source=file)
+    return dataclasses.replace(parse_arm_config(data, config_dir=file.resolve().parent), source=file)
 
 
 # -- teaching a pose ----------------------------------------------------------------
@@ -460,14 +539,14 @@ def record_taught_pose(config: ArmConfig, name: str, joints: Mapping[str, float]
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ArmConfigError(f"the arm config cannot be read: {type(error).__name__}") from error
-    if parse_arm_config(raw) != config:
+    if parse_arm_config(raw, config_dir=path.resolve().parent) != config:
         raise ArmConfigError("the arm config file changed since it was loaded; restart the execution host")
     poses = raw.setdefault("poses", {})
     entry = dict(poses.get(name) or {})
     entry["taught"] = True
     entry["joints"] = {joint: round(float(value), 3) for joint, value in joints.items()}
     poses[name] = entry
-    updated = parse_arm_config(raw)
+    updated = parse_arm_config(raw, config_dir=path.resolve().parent)
     try:
         backup = _replace_file(path, raw, now or datetime.now(UTC))
     except OSError as error:

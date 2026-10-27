@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "Manipulation capabilities for Flyto2 AI Space: any arm LeRobot drives, wrapped, never re-implemented"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "LicenseRef-Flyto2-Source-Available-1.1"
-license-files = ["LICENSE"]
+# The packaged AM-ARM200 robot description is Apache-2.0 (NOTICE).
+license = "LicenseRef-Flyto2-Source-Available-1.1 AND Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "src/flyto_modules_lerobot/models/*/LICENSE"]
 authors = [{ name = "Flyto2" }]
 keywords = ["flyto", "lerobot", "robot-arm", "manipulation", "workflow", "automation"]
 classifiers = [
@@ -55,6 +56,10 @@ lerobot = "flyto_modules_lerobot:register_all"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Packaged robot descriptions (URDF, meshes, their licence), read by urdf_model.py.
+[tool.setuptools.package-data]
+flyto_modules_lerobot = ["models/*/LICENSE", "models/*/README.md", "models/*/urdf/*.urdf", "models/*/meshes/*.STL"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -102,3 +102,24 @@ def test_the_live_view_serves_labelled_jpeg_frames_on_the_existing_channel(data,
         frame = view.frame(channel["id"])
         assert frame["source"] == "simulation" and frame["label"] == "SIMULATION"
         assert base64.b64decode(frame["data"])[:3] == b"\xff\xd8\xff"
+
+
+def test_the_world_is_built_from_the_official_robot_description(data):
+    """Meshes drawn and never colliding, servo torques from each joint's class, the chain where MuJoCo puts it."""
+    rig = Rig(data)
+    model, world = rig.world.model, rig.world
+    meshes = [index for index in range(model.ngeom) if model.geom_type[index] == mujoco.mjtGeom.mjGEOM_MESH]
+    assert len(meshes) == 9
+    assert all(model.geom_contype[index] == 0 and model.geom_conaffinity[index] == 0 for index in meshes)
+    for name, servo in rig.config.servos.items():
+        actuator = model.actuator(f"servo_{name}") if name != "gripper" else None
+        if actuator is not None:
+            assert tuple(actuator.forcerange) == pytest.approx((-servo.stall_torque_nm, servo.stall_torque_nm))
+    # The planner's chain and MuJoCo's bodies agree: the tool point the chain computes is the configured
+    # point on the fixed jaw where MuJoCo has put that link, for the joints as they read.
+    import numpy
+
+    chain = rig.config.kinematics
+    body = world.data.body(chain.binding.tool_link)
+    expected = body.xpos + body.xmat.reshape(3, 3) @ numpy.array(data["kinematics"]["tool"]["origin"])
+    assert tuple(world.tip().position) == pytest.approx(tuple(expected), abs=1e-3)

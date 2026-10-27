@@ -1,0 +1,16 @@
+flyto-modules-lerobot
+Copyright 2026 Flyto2. Licensed under the Flyto2 Source Available License 1.1 (LICENSE).
+
+This distribution includes third-party material under its own licence:
+
+AM-ARM200 robot description (URDF and STL meshes)
+  Source:   https://github.com/liyiteng/AM-ARM
+  Commit:   5b03af1ef6c80595bd988e0137cf8e7c35811eb6
+  Paths:    am-arm200/urdf/urdf/am-arm200.urdf, am-arm200/urdf/am-arm200-meshes/*.STL
+  Licence:  Apache License 2.0 (src/flyto_modules_lerobot/models/am-arm200/LICENSE)
+  Location: src/flyto_modules_lerobot/models/am-arm200/
+  Changes:  The URDF is unmodified. Five meshes were reduced to about 12,000
+            triangles each with quadric edge collapse to keep the package
+            small: left_Base, left_Lower_Arm, left_Rotation_Pitch,
+            left_Upper_Arm, left_wrist_yaw. The other four meshes are
+            unmodified. models/am-arm200/README.md records how.

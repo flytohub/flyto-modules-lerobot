@@ -2,7 +2,7 @@
   "schema": "flyto.lerobot.arm.v1",
   "resource_id": "am-arm200-01",
   "display_name": "AM-ARM200",
-  "notes": "Example for the AM-ARM200 follower (6 joints + gripper) on lerobot_alohamini. Joint names and the am-follower-6dof profile follow that fork's so_follower.py. Every limit below is a conservative PLACEHOLDER, not a measurement, and every pose is untaught (taught: false), so move_joints refuses them until they are taught on the real arm. A physical 12 V cut-off switch on the follower's supply is required for any real run.",
+  "notes": "Example for the AM-ARM200 follower (6 joints + gripper) on lerobot_alohamini. Joint names and the am-follower-6dof profile follow that fork's so_follower.py. Every limit below is a conservative PLACEHOLDER, not a measurement, and every pose is untaught (taught: false), so move_joints refuses them until they are taught on the real arm. A physical 12 V cut-off switch on the follower's supply is required for any real run. The kinematic chain is read from the official AM-ARM200 URDF packaged with this pack (models/am-arm200, liyiteng/AM-ARM 5b03af1); each joint's sign and offset against that URDF is NOT yet confirmed on the physical arm (verified_on_hardware: false), so pick and place are refused on this arm until they are. Servo classes follow the lerobot_alohamini am-follower-6dof profile (STS3095 on shoulder_pan, shoulder_lift, elbow_flex; STS3215 on the rest).",
   "lerobot": {
     "robot_module": "lerobot.robots.so_follower",
     "robot_type": "so101_follower",
@@ -15,12 +15,30 @@
   },
   "unit": "deg",
   "joints": {
-    "shoulder_pan": {"min": -90.0, "max": 90.0},
-    "shoulder_lift": {"min": -90.0, "max": 90.0},
-    "elbow_flex": {"min": -90.0, "max": 90.0},
-    "wrist_flex": {"min": -90.0, "max": 90.0},
-    "wrist_yaw": {"min": -90.0, "max": 90.0},
-    "wrist_roll": {"min": -150.0, "max": 150.0}
+    "shoulder_pan": {
+      "min": -90.0,
+      "max": 90.0
+    },
+    "shoulder_lift": {
+      "min": -90.0,
+      "max": 90.0
+    },
+    "elbow_flex": {
+      "min": -90.0,
+      "max": 90.0
+    },
+    "wrist_flex": {
+      "min": -90.0,
+      "max": 90.0
+    },
+    "wrist_yaw": {
+      "min": -90.0,
+      "max": 90.0
+    },
+    "wrist_roll": {
+      "min": -150.0,
+      "max": 150.0
+    }
   },
   "gripper": {
     "joint": "gripper",
@@ -42,23 +60,163 @@
     "ready": {
       "taught": false,
       "joints": {
-        "shoulder_pan": 0.0, "shoulder_lift": -30.0, "elbow_flex": 45.0,
-        "wrist_flex": 30.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+        "shoulder_pan": 0.0,
+        "shoulder_lift": -30.0,
+        "elbow_flex": 45.0,
+        "wrist_flex": 30.0,
+        "wrist_yaw": 0.0,
+        "wrist_roll": 0.0
       }
     },
     "fixture_pick": {
       "taught": false,
       "joints": {
-        "shoulder_pan": 30.0, "shoulder_lift": 10.0, "elbow_flex": 20.0,
-        "wrist_flex": 45.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+        "shoulder_pan": 30.0,
+        "shoulder_lift": 10.0,
+        "elbow_flex": 20.0,
+        "wrist_flex": 45.0,
+        "wrist_yaw": 0.0,
+        "wrist_roll": 0.0
       }
     },
     "tray_place": {
       "taught": false,
       "joints": {
-        "shoulder_pan": -30.0, "shoulder_lift": 10.0, "elbow_flex": 20.0,
-        "wrist_flex": 45.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+        "shoulder_pan": -30.0,
+        "shoulder_lift": 10.0,
+        "elbow_flex": 20.0,
+        "wrist_flex": 45.0,
+        "wrist_yaw": 0.0,
+        "wrist_roll": 0.0
       }
+    }
+  },
+  "servos": {
+    "classes": {
+      "sts3095": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/399",
+        "stall_torque_nm": 9.32,
+        "rated_torque_nm": 2.21,
+        "no_load_speed_rad_s": 3.25,
+        "estimated": [],
+        "source": "Feetech STS3095-C002 at 12 V as listed by the OpenELAB reseller (95 kg.cm stall, 22.5 kg.cm rated, 31 rpm no load); no Feetech datasheet was found. Gear ratio 1/399 from the AM-ARM README (liyiteng/AM-ARM 5b03af1); that repository's bom.md says 1/345."
+      },
+      "sts3215": {
+        "voltage_v": 12.0,
+        "gear_ratio": "1/345",
+        "stall_torque_nm": 2.94,
+        "rated_torque_nm": 0.98,
+        "no_load_speed_rad_s": 4.72,
+        "estimated": [],
+        "source": "Feetech STS3215 (C018, 12 V, 1/345) as listed by RobotShop and OpenELAB (30 kg.cm stall, 10 kg.cm rated, 0.222 s/60 deg no load); no Feetech datasheet was found. Gear ratio from the AM-ARM README and bom.md (liyiteng/AM-ARM 5b03af1)."
+      }
+    },
+    "joints": {
+      "shoulder_pan": "sts3095",
+      "shoulder_lift": "sts3095",
+      "elbow_flex": "sts3095",
+      "wrist_flex": "sts3215",
+      "wrist_yaw": "sts3215",
+      "wrist_roll": "sts3215",
+      "gripper": "sts3215"
+    }
+  },
+  "kinematics": {
+    "frame": "table",
+    "base": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": 0.0,
+      "yaw": 1.5708
+    },
+    "model": {
+      "source": {
+        "packaged": "am-arm200"
+      },
+      "joints": {
+        "shoulder_pan": "left_shoulder_pan",
+        "shoulder_lift": "left_shoulder_lift",
+        "elbow_flex": "left_elbow_flex",
+        "wrist_flex": "left_wrist_flex",
+        "wrist_yaw": "left_wrist_yaw_joint",
+        "wrist_roll": "left_wrist_roll"
+      },
+      "tool_link": "left_Fixed_Jaw",
+      "gripper": {
+        "joint": "left_gripper",
+        "closed_rad": 1.17,
+        "open_rad": 0.0,
+        "verified_on_hardware": false
+      }
+    },
+    "chain": [
+      {
+        "joint": "shoulder_pan",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "shoulder_lift",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "elbow_flex",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_flex",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_yaw",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      },
+      {
+        "joint": "wrist_roll",
+        "sign": 1,
+        "offset": 0.0,
+        "verified_on_hardware": false
+      }
+    ],
+    "tool": {
+      "origin": [
+        0.012,
+        0.0,
+        0.09
+      ],
+      "pointing": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "jaw": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    "grasp": {
+      "approach_height_m": 0.08,
+      "lift_height_m": 0.1,
+      "place_clearance_m": 0.015,
+      "path_step_m": 0.02,
+      "default_object_height_m": 0.03
+    },
+    "ik": {
+      "max_iterations": 200,
+      "position_tolerance_m": 0.002,
+      "axis_tolerance": 0.03,
+      "damping": 0.05
     }
   }
 }

@@ -17,7 +17,7 @@
 ```bash
 # in the Python environment that runs Flyto2
 git clone https://github.com/flytohub/flyto-modules-lerobot && cd flyto-modules-lerobot
-pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini"
+pip install "lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini@ec65318f4cc3d830242f6e987d43f46e6b61f0a5"
 pip install -e .
 cp examples/am-arm200.json my-arm.json        # set your port; teach poses through Flyto2
 export FLYTO_LEROBOT_ARM_CONFIG=$PWD/my-arm.json
@@ -74,7 +74,7 @@ The arm holds its pose where it is, and the gripper keeps what it holds. The sto
 ```bash
 pip install -e .
 # LeRobot (Python 3.12+, pulls in torch). For AM-ARM200 use the fork:
-pip install 'lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini'
+pip install 'lerobot[feetech] @ git+https://github.com/liyiteng/lerobot_alohamini@ec65318f4cc3d830242f6e987d43f46e6b61f0a5'
 ```
 
 Calibrate the follower with LeRobot first (`lerobot-calibrate --robot.type=so101_follower
@@ -94,9 +94,15 @@ execution host by `FLYTO_LEROBOT_ARM_CONFIG` (`.env.example`). Start from
 | `gripper` | its motor, range, `open` and `closed` values, `tolerance` |
 | `motion` | `max_step`, `tolerance`, `settle_timeout_s`, timing |
 | `poses` | named joint targets; `taught: true` only once taught on this arm |
+| `servos` | optional: each motor's servo class (stall / rated torque, no-load speed, and where each number came from) |
+| `kinematics` | optional: the chain for Cartesian pick and place, read from a robot description (`model`, e.g. the packaged official AM-ARM200 URDF) with each joint's calibration and whether it was `verified_on_hardware` |
 
 The example's limits are conservative placeholders and its poses are
-untaught, so a move to them is refused until you teach and mark them.
+untaught, so a move to them is refused until you teach and mark them. Its
+kinematic chain is the official AM-ARM200 URDF (`src/flyto_modules_lerobot/models/am-arm200`,
+Apache-2.0, see `NOTICE`), but how each joint's LeRobot reading maps onto the
+URDF's angle is not yet confirmed on a physical arm, so pick and place are
+refused on hardware until every joint is marked `verified_on_hardware: true`.
 
 ### Usage
 
@@ -155,7 +161,8 @@ SIMULATION ONLY until the arm arrives. Point `FLYTO_LEROBOT_ARM_CONFIG` at
 `examples/am-arm200-sim.json` (in-process, no extra) or
 `examples/am-arm200-mujoco.json` (`pip install 'flyto-modules-lerobot[mujoco]'`):
 the robot type picks the backend, every result says `source: "simulation"`,
-and a simulation config refuses any port that is not a `sim:` name.
+and a simulation config refuses any port that is not a `sim:` name. Both
+simulate the official AM-ARM200 geometry; MuJoCo draws its published meshes.
 
 ```bash
 python scripts/benchmark_sim.py --backend sim       # 50 seeded episodes per scenario, P50/P95/P99 per phase

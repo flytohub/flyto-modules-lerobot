@@ -5,8 +5,16 @@
 An arm config may carry a ``kinematics`` section: the chain of revolute
 joints from the arm's base to its tool point, as data. Each link names one of
 the config's body joints, the translation from the previous joint to it
-(metres) and the axis it turns about. Nothing here names an arm; a second arm
-is a second chain in its own config file.
+(metres), a fixed rotation (``rpy``) and the axis it turns about. Nothing here
+names an arm; a second arm is a second chain in its own config file.
+
+The chain is either written out link by link, or read from the arm's
+published robot description (``kinematics.model``, a URDF, ``urdf_model.py``):
+the config then maps its joint names to the URDF's and gives each joint only
+its calibration (``sign``, ``offset``) and whether that calibration was
+confirmed on the physical arm (``verified_on_hardware``). Every origin, rotation
+and axis then comes from the URDF, so the planner's link lengths are the
+published ones and the MuJoCo world is built from the same file.
 
 * :meth:`KinematicChain.forward` -- the tool point and the tool's pointing
   axis in the table frame, for joint positions in the config's unit.
@@ -17,8 +25,8 @@ is a second chain in its own config file.
   the arm's present joints, so successive targets give a continuous path.
 
 LeRobot ships its own kinematics (``lerobot.model.kinematics.RobotKinematics``),
-which needs ``placo`` and a URDF; neither is part of this pack's install, so
-the chain here is the default. Both the simulator and a real arm use the same
+which needs ``placo``; it is not part of this pack's install, so the chain
+here is the default, read from the same URDF when the config names one. Both the simulator and a real arm use the same
 chain, so what a simulated pick plans is what a real one would command.
 
 Standard library only.
@@ -34,8 +42,12 @@ from typing import Any
 Vector = tuple[float, float, float]
 Matrix = tuple[Vector, Vector, Vector]
 
-KINEMATICS_KEYS = frozenset({"frame", "base", "chain", "tool", "grasp", "ik"})
-_LINK_KEYS = frozenset({"joint", "origin", "axis", "sign", "offset"})
+KINEMATICS_KEYS = frozenset({"frame", "base", "model", "chain", "tool", "grasp", "ik"})
+_LINK_KEYS = frozenset({"joint", "origin", "rpy", "axis", "sign", "offset", "verified_on_hardware"})
+_MODEL_LINK_KEYS = frozenset({"joint", "sign", "offset", "verified_on_hardware"})
+_MODEL_KEYS = frozenset({"source", "joints", "tool_link", "gripper", "mass_overrides_kg"})
+_MODEL_GRIPPER_KEYS = frozenset({"joint", "closed_rad", "open_rad", "verified_on_hardware"})
+_TOOL_KEYS = frozenset({"origin", "pointing", "jaw"})
 _BASE_KEYS = frozenset({"x", "y", "z", "yaw"})
 _GRASP_KEYS = frozenset({"approach_height_m", "lift_height_m", "place_clearance_m", "path_step_m",
                          "default_object_height_m"})
@@ -122,13 +134,53 @@ def _solve(matrix: list[list[float]], rhs: list[float]) -> list[float] | None:
 
 @dataclass(frozen=True)
 class Link:
-    """One revolute joint: translation from the previous joint, the axis it turns about, sign and offset."""
+    """One revolute joint: translation and fixed rotation from the previous joint, its axis, sign and offset.
+
+    ``model_joint`` is the joint's name in the robot description it was read
+    from (None when the chain is written out in the config).
+    ``verified_on_hardware`` says whether its ``sign`` and ``offset`` -- the
+    mapping from the config's joint reading to the description's angle -- were
+    confirmed on the physical arm (None: not stated).
+    """
 
     joint: str
     origin: Vector
     axis: Vector
     sign: float = 1.0
     offset: float = 0.0
+    rotation: Matrix = _IDENTITY
+    model_joint: str | None = None
+    verified_on_hardware: bool | None = None
+
+
+@dataclass(frozen=True)
+class ModelGripper:
+    """The robot description's jaw joint, and its angle at the config's closed and open readings (radians)."""
+
+    joint: str
+    closed_rad: float
+    open_rad: float
+    verified_on_hardware: bool | None = None
+
+    def angle(self, value: float, closed: float, opened: float) -> float:
+        """The jaw angle for a gripper reading, linear between closed and open."""
+        fraction = (value - closed) / (opened - closed)
+        return self.closed_rad + (self.open_rad - self.closed_rad) * fraction
+
+    def reading(self, angle: float, closed: float, opened: float) -> float:
+        """The gripper reading for a jaw angle (the inverse of :meth:`angle`)."""
+        fraction = (angle - self.closed_rad) / (self.open_rad - self.closed_rad)
+        return closed + (opened - closed) * fraction
+
+
+@dataclass(frozen=True)
+class ModelBinding:
+    """How the config's chain was read from a robot description."""
+
+    model: Any
+    tool_link: str
+    gripper: ModelGripper | None
+    mass_overrides_kg: Mapping[str, float]
 
 
 @dataclass(frozen=True)
@@ -178,6 +230,14 @@ class KinematicChain:
     to_radians: float
     grasp: GraspGeometry
     ik: IkSettings
+    tool_pointing: Vector = (0.0, 0.0, 1.0)
+    tool_jaw: Vector = (1.0, 0.0, 0.0)
+    binding: ModelBinding | None = None
+
+    @property
+    def unverified_joints(self) -> tuple[str, ...]:
+        """Joints whose calibration against the description was not confirmed on the physical arm."""
+        return tuple(link.joint for link in self.links if link.verified_on_hardware is not True)
 
     @property
     def joints(self) -> tuple[str, ...]:
@@ -191,12 +251,20 @@ class KinematicChain:
         frames: list[tuple[Vector, Vector]] = []
         for link in self.links:
             position = _add(position, _apply(rotation, link.origin))
+            rotation = _matmul(rotation, link.rotation)
             axis = _apply(rotation, link.axis)
             frames.append((position, axis))
-            angle = (link.sign * float(joints.get(link.joint, 0.0)) + link.offset) * self.to_radians
-            rotation = _matmul(rotation, _rotation(link.axis, angle))
+            rotation = _matmul(rotation, _rotation(link.axis, self.angle(link, joints.get(link.joint, 0.0))))
         tip = _add(position, _apply(rotation, self.tool))
-        return frames, ToolPose(tip, _apply(rotation, _AXES["z"]), _apply(rotation, _AXES["x"]))
+        return frames, ToolPose(tip, _apply(rotation, self.tool_pointing), _apply(rotation, self.tool_jaw))
+
+    def angle(self, link: Link, value: float) -> float:
+        """A joint reading (the config's unit) as the chain's angle (radians)."""
+        return (link.sign * float(value) + link.offset) * self.to_radians
+
+    def reading(self, link: Link, angle: float) -> float:
+        """The chain's angle (radians) as a joint reading (the config's unit)."""
+        return (angle / self.to_radians - link.offset) * link.sign
 
     def forward(self, joints: Mapping[str, float]) -> ToolPose:
         """The tool pose for these joint positions (the config's unit)."""
@@ -314,8 +382,138 @@ _GRASP_DEFAULTS = {"approach_height_m": 0.08, "lift_height_m": 0.10, "place_clea
 _IK_DEFAULTS = {"max_iterations": 200, "position_tolerance_m": 0.002, "axis_tolerance": 0.02, "damping": 0.05}
 
 
-def parse_kinematics(raw: Any, *, body_joints: Sequence[str], unit: str) -> KinematicChain:
-    """A :class:`KinematicChain` from an arm config's ``kinematics`` section, or :class:`KinematicsError`."""
+def _unit_vector(value: Any, where: str) -> Vector:
+    if isinstance(value, str):
+        axis = _AXES.get(value)
+        if axis is None:
+            raise KinematicsError(f"{where} must be one of {', '.join(sorted(_AXES))} or three numbers")
+        return axis
+    vector = _vector(value, where)
+    length = _norm(vector)
+    if length < 1e-9:
+        raise KinematicsError(f"{where} must not be zero")
+    return _scale(vector, 1.0 / length)
+
+
+def _calibration(link: Mapping[str, Any], where: str) -> tuple[float, float, bool | None]:
+    sign = _number(link.get("sign", 1.0), f"{where}.sign")
+    if sign not in (-1.0, 1.0):
+        raise KinematicsError(f"{where}.sign must be 1 or -1")
+    verified = link.get("verified_on_hardware")
+    if verified is not None and not isinstance(verified, bool):
+        raise KinematicsError(f"{where}.verified_on_hardware must be true or false")
+    return sign, _number(link.get("offset", 0.0), f"{where}.offset"), verified
+
+
+def _written_links(chain: Sequence[Any], body_joints: Sequence[str]) -> list[Link]:
+    links = []
+    for index, item in enumerate(chain):
+        where = f"kinematics.chain[{index}]"
+        link = _keys(item, where, _LINK_KEYS)
+        joint = link.get("joint")
+        if joint not in body_joints:
+            raise KinematicsError(f"{where}.joint must be one of the arm's body joints")
+        sign, offset, verified = _calibration(link, where)
+        rotation = _rpy(_vector(link.get("rpy", (0.0, 0.0, 0.0)), f"{where}.rpy"))
+        links.append(Link(str(joint), _vector(link.get("origin"), f"{where}.origin"),
+                          _unit_vector(link.get("axis"), f"{where}.axis"), sign, offset, rotation, None, verified))
+    return links
+
+
+def _rpy(rpy: Vector) -> Matrix:
+    from .urdf_model import rpy_matrix
+
+    return rpy_matrix(rpy)
+
+
+def _model_links(raw: Any, chain: Sequence[Any], body_joints: Sequence[str],
+                 config_dir: Any) -> tuple[list[Link], ModelBinding, Vector, Matrix]:
+    """The chain read from a robot description: links, the binding, and the fixed frame after the last joint."""
+    from .urdf_model import RobotModelError, resolve_model
+
+    body = _keys(raw, "kinematics.model", _MODEL_KEYS)
+    try:
+        model = resolve_model(body.get("source"), config_dir=config_dir)
+    except RobotModelError as error:
+        raise KinematicsError(str(error)) from error
+    names = _keys(body.get("joints"), "kinematics.model.joints", frozenset(body_joints))
+    tool_link = body.get("tool_link")
+    if not isinstance(tool_link, str) or tool_link not in model.links:
+        raise KinematicsError("kinematics.model.tool_link must name a link of the robot description")
+    by_model = {}
+    for joint, model_joint in names.items():
+        found = model.joints.get(model_joint) if isinstance(model_joint, str) else None
+        if found is None or found.type not in ("revolute", "continuous"):
+            raise KinematicsError(f"kinematics.model.joints.{joint} must name a revolute joint of the description")
+        by_model[found.name] = str(joint)
+    calibration = {}
+    for index, item in enumerate(chain):
+        where = f"kinematics.chain[{index}]"
+        link = _keys(item, where, _MODEL_LINK_KEYS)
+        if link.get("joint") not in names:
+            raise KinematicsError(f"{where}.joint must be a joint kinematics.model.joints maps")
+        calibration[str(link["joint"])] = _calibration(link, where)
+    links: list[Link] = []
+    offset: Vector = (0.0, 0.0, 0.0)
+    turn: Matrix = _IDENTITY
+    for joint in model.path_to(tool_link):
+        origin = _add(offset, _apply(turn, joint.origin))
+        rotation = _matmul(turn, _rpy(joint.rpy))
+        if joint.type == "fixed":
+            offset, turn = origin, rotation
+            continue
+        name = by_model.get(joint.name)
+        if name is None:
+            raise KinematicsError(f"joint {joint.name!r} of the description moves the tool but is not mapped")
+        sign, shift, verified = calibration.get(name, (1.0, 0.0, None))
+        links.append(Link(name, origin, _unit_vector(joint.axis, f"joint {joint.name!r} axis"), sign, shift,
+                          rotation, joint.name, verified))
+        offset, turn = (0.0, 0.0, 0.0), _IDENTITY
+    if len(links) != len(names):
+        raise KinematicsError("kinematics.model.joints maps a joint that does not move the tool link")
+    if set(calibration) - {link.joint for link in links}:
+        raise KinematicsError("kinematics.chain names a joint the description's path does not turn")
+    gripper = None
+    if body.get("gripper") is not None:
+        grip = _keys(body["gripper"], "kinematics.model.gripper", _MODEL_GRIPPER_KEYS)
+        found = model.joints.get(grip.get("joint")) if isinstance(grip.get("joint"), str) else None
+        if found is None or found.type not in ("revolute", "continuous"):
+            raise KinematicsError("kinematics.model.gripper.joint must name a revolute joint of the description")
+        closed = _number(grip.get("closed_rad"), "kinematics.model.gripper.closed_rad")
+        opened = _number(grip.get("open_rad"), "kinematics.model.gripper.open_rad")
+        if closed == opened:
+            raise KinematicsError("kinematics.model.gripper closed_rad and open_rad must differ")
+        verified = grip.get("verified_on_hardware")
+        if verified is not None and not isinstance(verified, bool):
+            raise KinematicsError("kinematics.model.gripper.verified_on_hardware must be true or false")
+        gripper = ModelGripper(found.name, closed, opened, verified)
+    overrides = _keys(body.get("mass_overrides_kg") or {}, "kinematics.model.mass_overrides_kg",
+                      frozenset(model.links))
+    masses = {str(link): _positive(mass, f"kinematics.model.mass_overrides_kg.{link}")
+              for link, mass in overrides.items()}
+    return links, ModelBinding(model, tool_link, gripper, masses), offset, turn
+
+
+def _tool(raw: Any, offset: Vector, turn: Matrix) -> tuple[Vector, Vector, Vector]:
+    """The tool point and its pointing and jaw axes, in the last joint's frame."""
+    if isinstance(raw, Mapping):
+        body = _keys(raw, "kinematics.tool", _TOOL_KEYS)
+        origin = _vector(body.get("origin", (0.0, 0.0, 0.0)), "kinematics.tool.origin")
+        pointing = _unit_vector(body.get("pointing", "z"), "kinematics.tool.pointing")
+        jaw = _unit_vector(body.get("jaw", "x"), "kinematics.tool.jaw")
+        if abs(_dot(pointing, jaw)) > 1e-6:
+            raise KinematicsError("kinematics.tool.pointing and jaw must be perpendicular")
+    else:
+        origin, pointing, jaw = _vector(raw, "kinematics.tool"), _AXES["z"], _AXES["x"]
+    return _add(offset, _apply(turn, origin)), _apply(turn, pointing), _apply(turn, jaw)
+
+
+def parse_kinematics(raw: Any, *, body_joints: Sequence[str], unit: str, config_dir: Any = None) -> KinematicChain:
+    """A :class:`KinematicChain` from an arm config's ``kinematics`` section, or :class:`KinematicsError`.
+
+    ``config_dir`` is the folder of the arm config file, for a robot
+    description named by a relative path.
+    """
     body = _keys(raw, "kinematics", KINEMATICS_KEYS)
     to_radians = _TO_RADIANS.get(unit)
     if to_radians is None:
@@ -324,26 +522,19 @@ def parse_kinematics(raw: Any, *, body_joints: Sequence[str], unit: str) -> Kine
     if not isinstance(frame, str) or not frame.strip():
         raise KinematicsError("kinematics.frame must name the frame targets are given in")
     base = _keys(body.get("base") or {}, "kinematics.base", _BASE_KEYS)
-    links = []
     chain = body.get("chain")
     if not isinstance(chain, Sequence) or isinstance(chain, str) or not chain:
         raise KinematicsError("kinematics.chain must list at least one joint")
-    for index, item in enumerate(chain):
-        where = f"kinematics.chain[{index}]"
-        link = _keys(item, where, _LINK_KEYS)
-        joint = link.get("joint")
-        if joint not in body_joints:
-            raise KinematicsError(f"{where}.joint must be one of the arm's body joints")
-        axis = _AXES.get(str(link.get("axis")))
-        if axis is None:
-            raise KinematicsError(f"{where}.axis must be one of {', '.join(sorted(_AXES))}")
-        sign = _number(link.get("sign", 1.0), f"{where}.sign")
-        if sign not in (-1.0, 1.0):
-            raise KinematicsError(f"{where}.sign must be 1 or -1")
-        links.append(Link(str(joint), _vector(link.get("origin"), f"{where}.origin"), axis, sign,
-                          _number(link.get("offset", 0.0), f"{where}.offset")))
+    binding = None
+    offset: Vector = (0.0, 0.0, 0.0)
+    turn: Matrix = _IDENTITY
+    if body.get("model") is not None:
+        links, binding, offset, turn = _model_links(body["model"], chain, body_joints, config_dir)
+    else:
+        links = _written_links(chain, body_joints)
     if len({link.joint for link in links}) != len(links):
         raise KinematicsError("kinematics.chain names a joint twice")
+    tool, pointing, jaw = _tool(body.get("tool", (0.0, 0.0, 0.0)), offset, turn)
     grasp = {**_GRASP_DEFAULTS, **_keys(body.get("grasp") or {}, "kinematics.grasp", _GRASP_KEYS)}
     ik = {**_IK_DEFAULTS, **_keys(body.get("ik") or {}, "kinematics.ik", _IK_KEYS)}
     iterations = ik["max_iterations"]
@@ -356,14 +547,17 @@ def parse_kinematics(raw: Any, *, body_joints: Sequence[str], unit: str) -> Kine
                        _number(base.get("z", 0.0), "kinematics.base.z")),
         base_yaw=_number(base.get("yaw", 0.0), "kinematics.base.yaw"),
         links=tuple(links),
-        tool=_vector(body.get("tool", (0.0, 0.0, 0.0)), "kinematics.tool"),
+        tool=tool,
         to_radians=to_radians,
         grasp=GraspGeometry(**{key: _positive(value, f"kinematics.grasp.{key}") for key, value in grasp.items()}),
         ik=IkSettings(max_iterations=iterations,
                       **{key: _positive(ik[key], f"kinematics.ik.{key}")
                          for key in ("position_tolerance_m", "axis_tolerance", "damping")}),
+        tool_pointing=pointing,
+        tool_jaw=jaw,
+        binding=binding,
     )
 
 
-__all__ = ["GraspGeometry", "IkSettings", "KinematicChain", "KinematicsError", "Link", "ToolPose",
-           "parse_kinematics"]
+__all__ = ["GraspGeometry", "IkSettings", "KinematicChain", "KinematicsError", "Link", "ModelBinding",
+           "ModelGripper", "ToolPose", "parse_kinematics"]

@@ -48,7 +48,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-PERCEPTION_KEYS = frozenset({"frame", "camera", "on_table_tolerance_m", "match_radius_m", "max_captures"})
+PERCEPTION_KEYS = frozenset({"frame", "camera", "on_table_tolerance_m", "match_radius_m", "max_captures",
+                             "observe_pose"})
 _FRAME_KEYS = frozenset({"id", "description", "table_z_m"})
 _SIMULATED_KEYS = frozenset({"kind", "id", "xy_sigma_m", "yaw_sigma_rad", "miss_rate", "occlusion_radius_m",
                              "latency_ms", "jitter_ms"})
@@ -142,6 +143,9 @@ class PerceptionConfig:
     match_radius_m: float
     # How many looks a pick or a place takes, at most, to see what it needs (a missed detection is retried).
     max_captures: int = 1
+    # The taught pose a pick or a place moves to before its verifying look, so the arm does not hide the
+    # table from the camera; None looks from wherever the move ended.
+    observe_pose: str | None = None
 
 
 def _now() -> str:
@@ -462,8 +466,43 @@ def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2)
         mu20 = sum((u - mean_u) ** 2 for u in us) / len(us)
         mu02 = sum((v - mean_v) ** 2 for v in vs) / len(vs)
         mu11 = sum((u - mean_u) * (v - mean_v) for u, v in zip(us, vs, strict=True)) / len(us)
-        blobs.append(Blob(colour.name, mean_u, mean_v, float(area), 0.5 * math.atan2(2 * mu11, mu20 - mu02)))
+        members = set(cells)
+        # The outline is enough to bound the blob; searching it alone keeps the heading cheap.
+        edge = [cell for cell in cells
+                if any(neighbour not in members for neighbour in ((cell[0] + 1, cell[1]), (cell[0] - 1, cell[1]),
+                                                                  (cell[0], cell[1] + 1), (cell[0], cell[1] - 1)))]
+        angle = _blob_angle([cell[0] * stride for cell in edge], [cell[1] * stride for cell in edge],
+                            mu20, mu02, mu11)
+        blobs.append(Blob(colour.name, mean_u, mean_v, float(area), angle))
     return sorted(blobs, key=lambda blob: (blob.colour, blob.v, blob.u))
+
+
+#: Below this anisotropy of its second moments a blob is square-ish: its moments carry no heading.
+_ISOTROPIC = 0.15
+
+
+def _blob_angle(us: Sequence[int], vs: Sequence[int], mu20: float, mu02: float, mu11: float) -> float:
+    """A blob's heading in the image (radians), from its moments or its outline points ``us`` / ``vs``.
+
+    An elongated blob: its long axis, from the second moments. A square-ish
+    one (a cube seen from above) has isotropic moments whose axis is noise,
+    so its heading is the side direction of its tightest bounding rectangle,
+    searched in 1-degree steps over a quarter turn (a square repeats every
+    quarter turn).
+    """
+    spread = mu20 + mu02
+    if spread <= 0 or math.hypot(mu20 - mu02, 2 * mu11) / spread >= _ISOTROPIC:
+        return 0.5 * math.atan2(2 * mu11, mu20 - mu02)
+    best, best_area = 0.0, math.inf
+    for step in range(90):
+        angle = math.radians(step)
+        c, s = math.cos(angle), math.sin(angle)
+        along = [u * c + v * s for u, v in zip(us, vs, strict=True)]
+        across = [v * c - u * s for u, v in zip(us, vs, strict=True)]
+        area = (max(along) - min(along)) * (max(across) - min(across))
+        if area < best_area - 1e-9:
+            best, best_area = angle, area
+    return best
 
 
 @dataclass(frozen=True)
@@ -871,6 +910,8 @@ def parse_perception(raw: Any, *, robot_type: str) -> PerceptionConfig:
         on_table_tolerance_m=_non_negative(body.get("on_table_tolerance_m", 0.01), "perception.on_table_tolerance_m"),
         match_radius_m=_non_negative(body.get("match_radius_m", 0.04), "perception.match_radius_m"),
         max_captures=_captures(body.get("max_captures", 1)),
+        observe_pose=(_text(body["observe_pose"], "perception.observe_pose")
+                      if body.get("observe_pose") is not None else None),
     )
 
 

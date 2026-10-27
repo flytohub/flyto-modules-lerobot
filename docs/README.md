@@ -7,5 +7,7 @@
 - `docs/project/STATE.md` -- what is verified now, and what is not.
 - `docs/project/ROADMAP.md`, `docs/project/tasks.md` -- what comes next.
 - `../examples/am-arm200.json` -- the AM-ARM200 arm config (placeholder limits, untaught poses).
+- `../src/flyto_modules_lerobot/models/am-arm200/README.md` -- the vendored official AM-ARM200 URDF and meshes: source, licence, decimation, what is assumed.
+- `../NOTICE` -- third-party attribution (Apache-2.0).
 - `../examples/am-arm200-sim.json`, `../examples/am-arm200-mujoco.json` -- SIMULATION configs (in-process, MuJoCo).
 - `../README.md#simulation` -- running the sensing loop in simulation, the benchmark and the viewers.
