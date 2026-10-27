@@ -998,6 +998,68 @@ class LeRobotArmAdapter:
             if unheld >= gripper.hold_samples:
                 return current, grip, REASON_NO_OBJECT, False
 
+    def _still_holding(self, call: _Call, gap: float) -> tuple[dict[str, float], dict[str, Any]]:
+        """Whether what was gripped at ``gap`` is still held, read until the signature settles: ``(reading, grip)``.
+
+        One reading cannot tell: jaws swinging closed after a slip still read
+        the object's width and full effort on their way. Held is
+        ``gripper.hold_samples`` still readings in a row that show it held;
+        jaws that crept on toward closed by more than ``motion.still_drift``
+        past ``gap`` have lost it, as has a signature that shows nothing held
+        on as many still readings. Still moving at ``motion.settle_timeout_s``
+        is short of target.
+        """
+        gripper, motion = self.config.gripper, self.config.motion
+        started = self._clock()
+        previous = self._after_send(self.session.read)
+        held = unheld = 0
+        while True:
+            self._check(call)
+            if self._clock() - started > motion.settle_timeout_s:
+                raise _ShortOfTarget(previous)
+            self._sleep(motion.poll_interval_s)
+            current = self._after_send(self.session.read)
+            position = current[gripper.joint]
+            still = abs(position - previous[gripper.joint]) <= motion.still_drift
+            previous = current
+            grip = self._grip(current)
+            if gap - gripper.gap(position) > motion.still_drift:
+                return current, {**grip, "held": False}
+            if not still:
+                held = unheld = 0
+                continue
+            held, unheld = (held + 1, 0) if grip["held"] else (0, unheld + 1)
+            if held >= gripper.hold_samples:
+                return current, grip
+            if unheld >= gripper.hold_samples:
+                return current, grip
+
+    def _after_slip(self, call: _Call, positions: dict[str, float], counter: list[int], leg: dict[str, Any],
+                    phases: _Phases, label: str | None) -> tuple[dict[str, float], dict[str, Any]]:
+        """Where a slipped object went, seen from where the arm hides none of the table: ``(reading, look)``.
+
+        The object fell from the jaws, under or near the arm. The arm goes to
+        the observe pose (a camera on the arm: its look pose) and a new look
+        reports the object of its label nearest where the jaws were -- so the
+        failure says where it lies, and the arm is left where a look sees it.
+        """
+        jaws = self.config.kinematics.forward(positions).position if self.config.kinematics is not None else None
+        pose = self._observe_pose()
+        if pose is not None:
+            with phases(f"{self._view_phase}_after_slip"):
+                positions = self._follow(call, positions, [dict(pose.joints)], counter, leg)
+        with phases("look_after_slip"):
+            after = self._look()
+        if after is None:
+            return positions, {"object": None, "object_on_table": None, "counts": None}
+        blocks = [item for item in after.detections if item.kind == "block" and (label is None or item.label == label)
+                  and item.id not in after.camera.get("in_hand", ())]
+        found = (min(blocks, key=lambda item: math.hypot(item.x - jaws[0], item.y - jaws[1]))
+                 if blocks and jaws is not None else (blocks[0] if blocks else None))
+        return positions, {"object": self._record(found, after),
+                           "object_on_table": None if found is None else on_table(found, self.config.perception),
+                           "counts": scene_counts(after, self.config.perception), "after_slip": True}
+
     def _open(self, call: _Call, start: Mapping[str, float], counter: list[int],
               leg: dict[str, Any]) -> dict[str, float]:
         """Open the gripper to its open value at the servo's speed and wait until it has converged there."""
@@ -1371,6 +1433,7 @@ class LeRobotArmAdapter:
                 positions, grip, verdict, _closed = self._close(call, positions, counter, leg, phases)
             # What the camera on the arm saw between the jaws at the grasp, carried to the end of the call.
             in_jaws = {key: grip[key] for key in ("camera_sees_object",) if key in grip}
+            grasped_gap = float(grip["gap"])
             if verdict is not None:
                 return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
             # The look must see the spot the object was taken from, and the rest of the table, past the arm.
@@ -1381,8 +1444,8 @@ class LeRobotArmAdapter:
                 # The gripper is read after the look, so a grip lost while the camera looked is not missed.
                 after = self._look_for(extra["object_id"])
                 lifted, seen = self._lifted(after, target, extra["object_id"])
-                positions = self._after_send(self.session.read)
-                grip = {**self._grip(positions), **in_jaws}
+                positions, grip = self._still_holding(call, grasped_gap)
+                grip = {**grip, **in_jaws}
             if early and (lifted is False or not self._shows(after, spots)):
                 # Not settled from where the arm stopped: look again from the observe pose.
                 early = False
@@ -1391,15 +1454,18 @@ class LeRobotArmAdapter:
                 with phases("verify_again"):
                     after = self._look_for(extra["object_id"])
                     lifted, seen = self._lifted(after, target, extra["object_id"])
-                    positions = self._after_send(self.session.read)
-                    grip = {**self._grip(positions), **in_jaws}
+                    positions, grip = self._still_holding(call, grasped_gap)
+                    grip = {**grip, **in_jaws}
+            extra["perception_after"] = {
+                "object_lifted": lifted, "object": self._record(seen, after) if after else None,
+                "table_seen": self._shows(after, spots), "early_look": early,
+                "counts": scene_counts(after, self.config.perception) if after else None}
+            if not grip["held"]:
+                positions, extra["perception_after"] = self._after_slip(
+                    call, positions, counter, leg, phases, target.detection.label if target.detection else None)
+                return self._pick_failed(call_id, REASON_SLIPPED, before, positions, grip, phases, extra)
         except (_Interrupted, _Lost, _ShortOfTarget) as error:
             return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
-        extra["perception_after"] = {"object_lifted": lifted, "object": self._record(seen, after) if after else None,
-                                     "table_seen": self._shows(after, spots), "early_look": early,
-                                     "counts": scene_counts(after, self.config.perception) if after else None}
-        if not grip["held"]:
-            return self._pick_failed(call_id, REASON_SLIPPED, before, positions, grip, phases, extra)
         if lifted is False:
             return self._pick_failed(call_id, REASON_PERCEPTION_DISAGREES, before, positions, grip, phases, extra)
         self.session.held_object = extra["object_id"]
@@ -1681,13 +1747,15 @@ class LeRobotArmAdapter:
                 # Converged above the target before going down to it: the servos lag their set points, and
                 # a descent begun while the arm still trails sideways lands a jaw on the object.
                 positions = self._follow(call, positions, descend, counter, leg)
-                still_held = self._grip(positions)
+                positions, still_held = self._still_holding(call, float(held_grip["gap"]))
             if not still_held["held"]:
-                # It slipped out on the way: nothing to release, and the camera need not be asked.
+                # It slipped out on the way: nothing to release. Where it went is looked at past the arm.
                 self.session.held_object = None
+                label = held.label if held is not None else None
+                positions, slipped = self._after_slip(call, positions, counter, leg, phases, label)
                 return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_SLIPPED), evidence={
                     "reason_code": REASON_SLIPPED, "arm": self._state(positions), "arm_before": self._state(before),
-                    "grip": still_held, "released": False, "object_held": False, "perception_after": None,
+                    "grip": still_held, "released": False, "object_held": False, "perception_after": slipped,
                     **extra, **phases.evidence(), "effect_applied": True})
             with phases("release"):
                 positions = self._open(call, positions, counter, leg)

@@ -805,7 +805,11 @@ def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) ->
     ``z_top = H (1 - 1/k)``, and its centre is moved toward the point under
     the camera by the same perspective factor. An object that looks smaller
     than its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly
-    covered: its height is reported unknown.
+    covered: its height is reported unknown, and its centre is known only
+    within its footprint (half its diagonal more uncertainty). A height read
+    from apparent size moves the centre toward the nadir; a tilted object
+    shows more of itself and reads as raised, so that move is added to its
+    uncertainty too.
     """
     classes = {colour.name: colour for colour in settings.classes}
     detections = []
@@ -814,19 +818,23 @@ def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) ->
         colour = classes[blob.colour]
         x, y = homography.apply(blob.u, blob.v)
         ax, ay = homography.apply(blob.u + 10.0 * math.cos(blob.angle), blob.v + 10.0 * math.sin(blob.angle))
-        z, height_known = 0.0, True
+        z, height_known, within = 0.0, True, settings.xy_m
         if settings.camera_height_m and settings.nadir is not None and colour.size[0] * colour.size[1] > 0:
             footprint_px = colour.size[0] * colour.size[1] / max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
             k = math.sqrt(max(blob.area_px / footprint_px, 1e-6))
             height_known = k >= OCCLUDED_BELOW
             top = settings.camera_height_m * (1.0 - 1.0 / max(k, 1.0))
             scale = (settings.camera_height_m - max(top, 0.0)) / settings.camera_height_m
+            planar = (x, y)
             x = settings.nadir[0] + (x - settings.nadir[0]) * scale
             y = settings.nadir[1] + (y - settings.nadir[1]) * scale
             z = max(0.0, top - colour.size[2])
+            within += math.hypot(x - planar[0], y - planar[1])
+            if not height_known:
+                within += math.hypot(colour.size[0], colour.size[1]) / 2.0
         counts[colour.name] = counts.get(colour.name, 0) + 1
         detections.append(Detection(f"{colour.name}-{counts[colour.name]}", colour.kind, colour.label, x, y, z,
-                                    math.atan2(ay - y, ax - x), colour.size, settings.xy_m, settings.yaw_rad,
+                                    math.atan2(ay - y, ax - x), colour.size, within, settings.yaw_rad,
                                     height_known=height_known))
     return detections
 

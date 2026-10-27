@@ -329,3 +329,33 @@ def test_an_eye_in_hand_place_whose_bin_moved_holds_the_block(wrist_rig):
     block = rig.world.data.body("block-red").xpos
     assert block[2] > 0.1, "the block is still in the jaws"
 
+
+
+# -- a slip, read honestly ---------------------------------------------------------------------------------
+
+
+def test_the_reading_a_slip_happens_in_shows_nothing_held(sim):
+    """The jaws squeeze nothing once the block is out: no reading after it fired shows the held signature."""
+    picked = sim.call("manipulation.pick", {"object_id": "block-red"})
+    assert picked.outcome == "completed"
+    sim.world.inject({"kind": "grasp_slip", "after_held_s": 0.0})
+    reading = sim.adapter.session.read()
+    assert sim.world.held is None, "the slip fired during that reading"
+    assert sim.adapter._grip(reading)["held"] is False
+
+
+def test_a_slip_during_the_pick_is_reported_where_the_block_fell(wrist_rig):
+    rig = wrist_rig()
+    rig.world.inject({"kind": "grasp_slip", "after_held_s": 0.3})
+    picked = rig.call("manipulation.pick", {"object_id": "red-1"})
+    assert picked.outcome == "failed" and picked.evidence["reason_code"] == "object_slipped"
+    assert picked.evidence["object_held"] is False
+    fell = picked.evidence["perception_after"]
+    assert fell["after_slip"] is True and fell["object"] is not None
+    truth = rig.world.data.body("block-red").xpos
+    where = fell["object"]["pose"]
+    assert math.hypot(where["x"] - truth[0], where["y"] - truth[1]) <= fell["object"]["uncertainty"]["xy_m"]
+    assert [row["phase"] for row in picked.evidence["phases"]][-2:] == ["look_pose_after_slip", "look_after_slip"]
+    # The arm is left where a read-only look sees it too.
+    again = rig.call("perception.locate_objects")
+    assert any(item["label"] == "red block" for item in again.evidence["objects"])

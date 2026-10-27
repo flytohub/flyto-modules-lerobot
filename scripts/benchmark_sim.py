@@ -78,10 +78,11 @@ def _sim_truth(world: Any) -> tuple[bool, bool]:
 
 
 def _mujoco_truth(world: Any) -> tuple[bool, bool]:
-    """The same from MuJoCo's bodies: lifted near the tool point; resting inside the bin's walls."""
+    """The same from MuJoCo's bodies: lifted, between the jaws; resting inside the bin's walls."""
     block, bin_ = world.data.body(BLOCK).xpos, world.data.body(BIN).xpos
     tip = world.tip().position
-    held = block[2] > 0.04 and ((block[0] - tip[0]) ** 2 + (block[1] - tip[1]) ** 2) ** 0.5 < 0.03
+    # Near the tool point in all three axes: a block that fell onto the arm's base below it is not held.
+    held = block[2] > 0.04 and sum((block[i] - tip[i]) ** 2 for i in range(3)) ** 0.5 < 0.03
     inside = abs(block[0] - bin_[0]) < 0.045 and abs(block[1] - bin_[1]) < 0.045 and block[2] < 0.045
     return bool(held), bool(inside)
 

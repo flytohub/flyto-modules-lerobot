@@ -552,13 +552,18 @@ class SimWorld(OneArm):
             item.inside, item.z = self._landing(item.x, item.y)
 
     def _slip_out(self) -> None:
-        """The held block squeezes out sideways from between the jaws and drops."""
+        """The held block squeezes out sideways from between the jaws and drops.
+
+        From that instant the jaws press on nothing: the effort a reading
+        shows is the free closing effort, never the squeeze it had.
+        """
         item = self.objects[self.held] if self.held else None
         if item is not None and self.chain is not None:
             jaw = self.tip().jaw
             push = 2.0 * self.sim.gripper.reach_m
             item.x, item.y = item.x + jaw[0] * push, item.y + jaw[1] * push
         self._drop()
+        self.effort = self.sim.gripper.free_effort
 
     def _closing(self) -> float:
         gripper = self.config.gripper
