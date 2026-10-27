@@ -92,7 +92,7 @@ def test_a_block_moved_by_a_hand_during_the_approach_is_not_picked(sim):
 @pytest.mark.parametrize(("after_held_s", "reason"), [
     (0.1, REASON_NO_OBJECT),               # gone before the jaws settled: they closed fully
     (0.3, "object_slipped"),               # gone during the hold window: the jaws crept on
-    (2.1, "perception_disagrees"),         # gone just before the look: the camera sees it back on the table
+    (2.13, "perception_disagrees"),        # gone just before the look: the camera sees it back on the table
 ])
 def test_a_grasp_that_slips_is_never_completed(sim, after_held_s, reason):
     sim.world.inject({"kind": "grasp_slip", "after_held_s": after_held_s})

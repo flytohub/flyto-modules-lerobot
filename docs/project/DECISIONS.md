@@ -326,3 +326,93 @@ through to the browser needs a Cloud change (listed in the 2026-10-27
 handoff). Off unless the port is set and the camera renders (MuJoCo only).
 The developer's native window is `mujoco.viewer`, opened only by
 `scripts/watch_mujoco.py --viewer`.
+
+## 2026-10-27 -- The arm is the official AM-ARM200 robot description
+
+Supersedes "Kinematics: the pack's own chain" (its illustrative link
+lengths) and "MuJoCo model: generated from the arm config" (for configs that
+name a description). The owner: the generated arm "does not look at all like
+the arm I bought". The official model is published: liyiteng/AM-ARM,
+`am-arm200/urdf/urdf/am-arm200.urdf` and `am-arm200/urdf/am-arm200-meshes/`,
+Apache-2.0, at commit `5b03af1ef6c80595bd988e0137cf8e7c35811eb6`.
+
+- Vendored under `src/flyto_modules_lerobot/models/am-arm200/` with the
+  upstream `LICENSE` and a `NOTICE` entry. The URDF is unmodified (its
+  sha256 is held by a test). Five meshes (35 MB, 120k-252k triangles) were
+  decimated to about 12k triangles each (3.4 MB for the folder); bounding
+  boxes moved by at most 5 mm. Package data, so it ships in the wheel.
+- One source of geometry: `kinematics.model` names the URDF and maps the
+  config's joint names to it explicitly (`shoulder_pan` ->
+  `left_shoulder_pan`, ..., `wrist_yaw` -> `left_wrist_yaw_joint`). The
+  planner's chain (origins, `rpy`, axes) and the MuJoCo bodies are both read
+  from it, so the simulated arm, the planned arm and the real arm share link
+  lengths. `urdf_model.py` reads URDF with the standard library; no
+  `placo`/LeRobot kinematics is added.
+- What the URDF does not say stays flagged, as data: each chain joint's
+  `sign`/`offset` against LeRobot's calibrated reading
+  (`verified_on_hardware: false`), the gripper's jaw-angle mapping (closed
+  1.17 rad, open 0 rad, measured on the meshes), the joint limits (URDF has
+  +/-3.14 exporter defaults), and `left_camera`'s inertial (1.27 kg, centre
+  of mass 0.2 m off a 36 mm camera mount -- overridden with an estimated
+  0.03 kg). On hardware, a chain with any unverified joint refuses Cartesian
+  moves (`kinematics_not_configured`, observed `unverified_joints`), because
+  a wrong offset puts the gripper somewhere else than planned.
+- MuJoCo: meshes are drawn and never collide (a jaw mesh's convex hull is
+  the whole gripper). What touches objects is declared in the config
+  (`simulation.collision`: one pad per jaw, stiff contact). The real arm is
+  printed matte black (`simulation.arm_rgba`).
+- The gripper has one moving jaw; the fixed jaw must pass beside the block.
+  The tool point is set 12 mm off the fixed jaw's pad toward the moving jaw
+  (`kinematics.tool.origin`), so a block 3 cm wide clears the fixed jaw by
+  about 9 mm and is pushed against it on closing.
+- The Pro variant has the same joint origins and axes; it is not vendored
+  (47 MB of meshes, upstream "coming soon"). `models/am-arm200/README.md`
+  says how to add it.
+
+## 2026-10-27 -- Servo classes from the follower profile, sourced numbers only
+
+The owner's arm is the standard AM-ARM200: 3 STS3095 and 4 STS3215 at 12 V.
+Which joints take the STS3095 comes from lerobot_alohamini's
+`src/lerobot/robots/so_follower/so_follower.py` profile `am-follower-6dof`
+at `ec65318f4cc3d830242f6e987d43f46e6b61f0a5` (and the AM-ARM README):
+`shoulder_pan`, `shoulder_lift`, `elbow_flex`; STS3215 on `wrist_flex`,
+`wrist_yaw`, `wrist_roll`, `gripper`. That fork commit registers `sts3095`
+in all six tables of `motors/feetech/tables.py` (model number 2569), so this
+pack, which never touches the motor bus, needs no motor table of its own;
+the install line is pinned to that commit.
+
+The `servos` section holds each class's numbers with their source:
+
+| Class | Stall | Rated | No-load speed | Gear | Source |
+|---|---|---|---|---|---|
+| sts3095 | 95 kg.cm = 9.32 N.m | 22.5 kg.cm = 2.21 N.m | 31 rpm = 3.25 rad/s | 1/399 | OpenELAB listing of STS3095-C002 at 12 V; gear ratio from the AM-ARM README (its bom.md says 1/345) |
+| sts3215 | 30 kg.cm = 2.94 N.m | 10 kg.cm = 0.98 N.m | 0.222 s/60 deg = 4.72 rad/s | 1/345 | RobotShop / OpenELAB listings of STS3215-C018 at 12 V; gear ratio from the AM-ARM README and bom.md |
+
+No Feetech datasheet was found for either; these are reseller figures. The
+MuJoCo servo of each joint is limited to its class's stall torque and its
+set point moves no faster than the class's no-load speed. The jaw's torque
+is 1.47 N.m (`simulation.physics.grip_force`): half the STS3215 stall
+torque, because the fork's `SOFollower.configure` writes `Max_Torque_Limit`
+500 (50 %) to the gripper. Estimates (not sourced): `joint_kp` 100 N.m/rad,
+`joint_damping` 2, the jaw's `finger_kp` 30, armature 0.01 (MuJoCo tuning,
+not servo data). A config whose `motion` paces moves faster than its
+slowest servo turns unloaded is refused.
+
+## 2026-10-27 -- A verifying look is taken from an observe pose
+
+The real arm is bulky: after a place it retreats over the bin and hides the
+block from an overhead camera (21 of 50 MuJoCo places were
+`placement_not_observed`). `perception.observe_pose` names a taught pose
+that a pick and a place drive to (phase `clear_view`) before their
+verifying look; without it the look is taken where the move ended, as
+before. The scene's objects were moved inside the arm's reach and off the
+strip the arm covers in its `ready` pose, rather than changing the arm.
+
+## 2026-10-27 -- A square blob's heading comes from its sides
+
+A cube seen from above has isotropic second moments, whose axis is noise
+(a block at yaw 0 read as 0.87 rad). With a one-moving-jaw gripper that
+lands the fixed jaw on the block. A blob whose moments are nearly isotropic
+now takes the heading of its tightest bounding rectangle (outline points,
+1-degree steps over a quarter turn); an elongated blob keeps its moments'
+long axis.

@@ -16,8 +16,11 @@ TOML file per arm, never in code:
 * ``motion`` -- step size, tolerances and timing for a move.
 * ``poses`` -- named joint targets; each says whether it was ``taught`` on
   this arm. An untaught pose is refused, never moved to.
+* ``servos`` (optional) -- each motor's servo class: torques and no-load
+  speed, with their source; a ``motion`` faster than a servo is refused.
 * ``kinematics`` (optional) -- the arm's kinematic chain, for Cartesian pick
-  and place (``kinematics.py``).
+  and place (``kinematics.py``), written out or read from a robot
+  description (``urdf_model.py``).
 * ``perception`` (optional) -- the table frame and the camera that locates
   objects on it (``perception.py``).
 * ``simulation`` -- the simulated world, required exactly when the robot type

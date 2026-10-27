@@ -12,6 +12,7 @@ LeRobotArmAdapter --driver.ArmSession--> backends.py (by lerobot.robot_type)
                                           `-- mujoco: mujoco_sim.MujocoWorld (contact physics, rendered camera)
 LeRobotArmAdapter --perception.build_camera--> simulated | rendered | usb camera  (perception.locate_objects)
                   --kinematics.KinematicChain--> pick / place plans (the config's chain, DLS IK)
+kinematics / mujoco_sim --urdf_model.resolve_model--> models/<name>/urdf (the packaged official description)
 discovery --telemetry_sampler--> joint_positions, gripper, object_held, arm_fault
 discovery --live_channels--> live_view.LiveView (MuJoCo frames, ws-jpeg via http-poll, loopback)
 ```
@@ -173,9 +174,11 @@ when the config loads and its serial port exists; it never names the port.
 ## The sensing closed loop (2026-10-27)
 
 A pick runs timed phases -- `perceive`, `plan`, `open`, `approach`,
-`descend`, `grasp`, `verify_grip`, `lift`, `verify` -- and a place
-`perceive`, `plan`, `approach`, `descend`, `release`, `verify_release`,
-`retreat`, `verify`. Each result carries `phases` (`phase`, `started_ms`,
+`descend`, `grasp`, `verify_grip`, `lift`, `clear_view`, `verify` -- and a
+place `perceive`, `plan`, `approach`, `descend`, `release`,
+`verify_release`, `retreat`, `clear_view`, `verify`. `clear_view` drives to
+`perception.observe_pose` when the config names a taught one (so the arm
+does not hide the table from the camera), and is empty otherwise. Each result carries `phases` (`phase`, `started_ms`,
 `ms`) and `latency_ms` (per phase and `total`, the adapter's clock), `plan`
 (`solver`, `wall_ms`, `waypoints`), `target` (table-frame pose),
 `perception_before` / `perception_after` and `grip` (`position`, `goal`,
@@ -197,3 +200,24 @@ section (seed, initial pose, scene objects, latency, faults, and for MuJoCo
 `physics`). Faults: `object_moved`, `container_moved`, `grasp_slip`,
 `motor_fault`, `latency`. Examples: `examples/am-arm200-sim.json`,
 `examples/am-arm200-mujoco.json`.
+
+## The robot description (`urdf_model.py`, `models/`)
+
+`kinematics.model.source` names a URDF (`{"packaged": "am-arm200"}` or
+`{"path": ...}`); `kinematics.model.joints` maps each config joint to a URDF
+joint; `tool_link` is the link the `tool` point is given in; `gripper` names
+the jaw joint and its angle at the config's closed and open readings. The
+chain walks the URDF from the root to `tool_link` (fixed joints folded in;
+an unmapped moving joint on the way is refused). Each `chain` entry then
+carries only `sign`, `offset` and `verified_on_hardware`. On hardware a
+chain with an unverified joint refuses Cartesian moves; simulators are their
+own description.
+
+MuJoCo (`mujoco_sim._model_arm`): one body per URDF link with the URDF's
+inertial (`mass_overrides_kg` replaces a wrong one), the visual meshes drawn
+with no collision, mapped joints as hinges with the config's limits, the jaw
+as a hinge, and `simulation.collision` boxes (stiff contact) as the only
+arm geometry that touches anything. Each joint's position servo is limited
+to its servo class's stall torque, and its set point moves no faster than
+the class's no-load speed. Without `model`, a written-out chain is drawn as
+capsules with slide fingers as before.

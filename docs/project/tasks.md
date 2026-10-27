@@ -7,7 +7,8 @@
 - [ ] Stop a few real moves and read `stop_to_still_ms` / `overshoot` (measured on every stop).
 - [ ] Cloud: add `perception.locate_objects`, `manipulation.pick`, `manipulation.place` rows (another lane).
 - [ ] Cloud: pass a video frame's `source` through `live_frames._shape_video` so the browser can label it.
-- [ ] Measure the real AM-ARM200 kinematic chain; write it into its arm config.
+- [ ] Confirm each joint's sign and offset between LeRobot's calibrated reading and the URDF angle on the real arm (and the gripper's jaw-angle mapping); then mark `verified_on_hardware: true`.
+- [ ] Measure the real joint limits and the gripper's closed/open readings.
 - [ ] Mount and calibrate the overhead USB camera (four marked table points, colour classes, camera height).
 - [ ] Make the camera its own resource so the perception specs become `other_resource`.
 - [ ] Gripper effort: find whether the fork exposes a load/current reading; set `gripper.effort_key`.

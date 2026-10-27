@@ -53,6 +53,18 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
 - The USB camera path (colour blobs, homography, height from apparent size)
   is tested on synthetic images only; not on hardware.
 
+2026-10-27 -- official AM-ARM200 model (branch `claude/official-am-arm200-model`):
+
+- The simulated and planned arm is the official AM-ARM200 URDF
+  (liyiteng/AM-ARM 5b03af1); MuJoCo draws its meshes. Link lengths are the
+  published ones (upper arm 0.135 m, forearm 0.198 m).
+- Seeded benchmark, 50 episodes per scenario, zero false completions in
+  every scenario on both backends: in-process nominal 50/50, MuJoCo nominal
+  50/50.
+- Not on hardware: each joint's sign/offset against the URDF, the gripper
+  jaw-angle mapping and the joint limits are unverified; a real arm refuses
+  pick and place until the chain is marked verified.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.
@@ -65,8 +77,9 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   would be `other_resource` once the camera is its own resource.
 - **No Cloud rows for `perception.locate_objects`, `manipulation.pick`,
   `manipulation.place`** (another lane adds them).
-- **Simulation only.** No real camera, no measured kinematic chain, no real
-  pick. The sim examples' link lengths are illustrative.
+- **Simulation only.** No real camera, no real pick. The chain is the
+  official URDF, but its calibration against LeRobot's joint readings is
+  unconfirmed on the arm (`verified_on_hardware: false`).
 - **The 12 V cut-off switch** must be fitted and tested before any real run.
   The stop measurement has run only against the fake follower (including
   one that moves with time and runs on after a new goal); no real stop has

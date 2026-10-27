@@ -466,7 +466,14 @@ def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2)
         mu20 = sum((u - mean_u) ** 2 for u in us) / len(us)
         mu02 = sum((v - mean_v) ** 2 for v in vs) / len(vs)
         mu11 = sum((u - mean_u) * (v - mean_v) for u, v in zip(us, vs, strict=True)) / len(us)
-        blobs.append(Blob(colour.name, mean_u, mean_v, float(area), _blob_angle(us, vs, mu20, mu02, mu11)))
+        members = set(cells)
+        # The outline is enough to bound the blob; searching it alone keeps the heading cheap.
+        edge = [cell for cell in cells
+                if any(neighbour not in members for neighbour in ((cell[0] + 1, cell[1]), (cell[0] - 1, cell[1]),
+                                                                  (cell[0], cell[1] + 1), (cell[0], cell[1] - 1)))]
+        angle = _blob_angle([cell[0] * stride for cell in edge], [cell[1] * stride for cell in edge],
+                            mu20, mu02, mu11)
+        blobs.append(Blob(colour.name, mean_u, mean_v, float(area), angle))
     return sorted(blobs, key=lambda blob: (blob.colour, blob.v, blob.u))
 
 
@@ -475,7 +482,7 @@ _ISOTROPIC = 0.15
 
 
 def _blob_angle(us: Sequence[int], vs: Sequence[int], mu20: float, mu02: float, mu11: float) -> float:
-    """A blob's heading in the image (radians).
+    """A blob's heading in the image (radians), from its moments or its outline points ``us`` / ``vs``.
 
     An elongated blob: its long axis, from the second moments. A square-ish
     one (a cube seen from above) has isotropic moments whose axis is noise,
