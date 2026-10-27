@@ -196,3 +196,35 @@ def test_every_gl_call_runs_on_one_thread_whichever_thread_asks(data, monkeypatc
     assert {kind for kind, _thread in used} == {"make", "scene", "render", "close"}
     assert len({thread for _kind, thread in used}) == 1
     assert threading.get_ident() not in {thread for _kind, thread in used}
+
+
+def test_a_closed_world_draws_nothing_and_makes_no_gl_context(data, monkeypatch):
+    """A frame asked of a world after it was closed (a call still finishing while the world is replaced)
+    made a renderer on a GL thread started again for it. Nothing closed that renderer, and when the world
+    was collected its finalizer freed the GL context on whatever thread collected it: SIGSEGV in
+    mjr_freeContext, seen end to end. A closed world refuses the frame and makes no context."""
+    import numpy
+
+    made: list[int] = []
+
+    class Recording:
+        def __init__(self, _model, height, width):
+            made.append(1)
+            self.height, self.width = height, width
+
+        def update_scene(self, _data, camera=None):
+            pass
+
+        def render(self):
+            return numpy.zeros((self.height, self.width, 3), dtype=numpy.uint8)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(mujoco, "Renderer", Recording)
+    world = mujoco_sim.MujocoWorld(parse_arm_config(data))
+    world.render(48, 36)
+    world.close()
+    with pytest.raises(simulation.SimulationError, match="closed"):
+        world.render(48, 36)
+    assert made == [1]

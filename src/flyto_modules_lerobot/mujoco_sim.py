@@ -407,6 +407,7 @@ class MujocoWorld:
         # Renderers by frame size, made, used and closed on the GL thread only.
         self._gl = GLThread(f"flyto-mujoco-gl-{config.resource_id}")
         self._renderers: dict[tuple[int, int], Any] = {}
+        self._closed = False
         self.robot = SimulatedArm(self)
 
     # -- units ---------------------------------------------------------------------------
@@ -548,6 +549,10 @@ class MujocoWorld:
 
     def _draw(self, width: int, height: int, camera: Any) -> Any:
         """On the GL thread: this size's renderer, the scene as it is now, one frame."""
+        if self._closed:
+            # A renderer made now would never be closed, and its finalizer would free
+            # the GL context on whichever thread collected it.
+            raise SimulationError("this simulated world was closed; it draws no more frames")
         renderer = self._renderers.get((width, height))
         if renderer is None:
             renderer = self._renderers[(width, height)] = self.mj.Renderer(self.model, height, width)
@@ -578,12 +583,12 @@ class MujocoWorld:
     def close(self) -> None:
         """Release every renderer's GL context, on the thread that made them, and end that thread."""
         def release() -> None:
+            self._closed = True
             renderers, self._renderers = list(self._renderers.values()), {}
             for renderer in renderers:
                 renderer.close()
 
-        if self._renderers:
-            self._gl.call(release)
+        self._gl.call(release)
         self._gl.stop()
 
 
