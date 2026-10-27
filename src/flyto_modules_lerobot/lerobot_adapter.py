@@ -157,6 +157,7 @@ from .perception import (
     build_camera,
     camera_geometry,
     container_holding,
+    container_under,
     find,
     locate_result,
     nearest,
@@ -1413,6 +1414,11 @@ class LeRobotArmAdapter:
         held_id = getattr(self.session, "held_object", None)
         with phases("perceive"):
             capture = self._capture(container_id, plan=True) if container_id is not None else self._look()
+            if container_id is None and capture is not None:
+                # A position is a place on whatever the look shows there: inside a container's footprint
+                # it is that container (released over its rim and judged inside it), else the table.
+                under = container_under(capture.detections, pose["x"], pose["y"])
+                container_id = under.id if under is not None else None
             held = find(capture, held_id) if capture is not None and held_id else None
             target = self._place_target(capture, container_id, pose, held)
         with phases("plan"):

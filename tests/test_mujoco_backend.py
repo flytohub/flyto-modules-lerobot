@@ -74,6 +74,37 @@ def test_a_seeded_headless_pick_and_place_on_contact_physics(data):
     assert placed.evidence["source"] == "simulation"
 
 
+def test_a_place_at_a_containers_position_goes_into_that_container(data):
+    """Cloud sends a place the bound table position of the container it named (``x``, ``y``), never a
+    per-frame id. What lies at that position is the place's own look: there the bin's rim, not the
+    table, is where the block is released, and the verify judges that bin. Released at table height
+    the jaws opened against the bin's walls and the place failed short of its target, every time."""
+    rig = Rig(data)
+    located = rig.call("perception.locate_objects")
+    red, = [item for item in located.evidence["objects"] if item["id"] == "red-1"]
+    blue, = [item for item in located.evidence["objects"] if item["id"] == "blue-1"]
+    picked = rig.call("manipulation.pick", {key: red["pose"][key] for key in ("x", "y", "yaw")})
+    assert picked.outcome == OUTCOME_COMPLETED, picked.evidence.get("reason_code")
+
+    placed = rig.call("manipulation.place", {"x": blue["pose"]["x"], "y": blue["pose"]["y"]})
+    assert placed.outcome == OUTCOME_COMPLETED, placed.evidence.get("reason_code")
+    assert placed.evidence["container_id"] == "blue-1"
+    assert placed.evidence["target"]["z"] > 0.03, "released over the rim, not at the table"
+    assert placed.evidence["perception_after"]["object_in_container"] is True
+    block, bin_ = rig.world.data.body("block-red").xpos, rig.world.data.body("bin-blue").xpos
+    assert abs(block[0] - bin_[0]) < 0.045 and abs(block[1] - bin_[1]) < 0.045 and block[2] < 0.045
+
+
+def test_a_place_at_an_open_table_position_still_puts_it_on_the_table(data):
+    rig = Rig(data)
+    located = rig.call("perception.locate_objects")
+    red, = [item for item in located.evidence["objects"] if item["id"] == "red-1"]
+    picked = rig.call("manipulation.pick", {key: red["pose"][key] for key in ("x", "y", "yaw")})
+    assert picked.outcome == OUTCOME_COMPLETED
+    placed = rig.call("manipulation.place", {"x": 0.22, "y": 0.12})
+    assert placed.evidence["container_id"] is None and placed.evidence["target"]["z"] == 0.0
+
+
 def test_closing_on_nothing_in_physics_is_not_a_grasp(data):
     rig = Rig(data)
     result = rig.call("manipulation.pick", {"x": 0.12, "y": 0.12})

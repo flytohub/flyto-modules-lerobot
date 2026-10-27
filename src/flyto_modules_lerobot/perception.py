@@ -196,11 +196,16 @@ def on_table(item: Detection, settings: PerceptionConfig) -> bool:
     return item.height_known and abs(item.z - settings.frame.table_z_m) <= settings.on_table_tolerance_m
 
 
+def container_under(detections: Sequence[Detection], x: float, y: float, *, other_than: str | None = None
+                    ) -> Detection | None:
+    """The container whose footprint the table point ``(x, y)`` lies in, if any."""
+    return next((other for other in detections
+                 if other.kind == "container" and other.id != other_than and other.footprint_contains(x, y)), None)
+
+
 def container_holding(item: Detection, detections: Sequence[Detection]) -> Detection | None:
     """The container whose footprint a block's centre lies over, if any."""
-    return next((other for other in detections
-                 if other.kind == "container" and other.id != item.id and other.footprint_contains(item.x, item.y)),
-                None)
+    return container_under(detections, item.x, item.y, other_than=item.id)
 
 
 def resting_inside(item: Detection, holder: Detection, settings: PerceptionConfig) -> bool:
@@ -1588,6 +1593,7 @@ __all__ = [
     "build_camera",
     "camera_geometry",
     "container_holding",
+    "container_under",
     "dark_fraction",
     "detect_mounted",
     "find",
