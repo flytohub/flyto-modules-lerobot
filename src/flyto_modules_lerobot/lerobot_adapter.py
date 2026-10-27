@@ -102,6 +102,9 @@ from .adapter_contract import (
 from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
 from .backends import backend_for
 from .capabilities import (
+    CONTAINER_REF_FIELDS,
+    CONTAINER_REF_PREFIX,
+    CONTAINER_REF_REQUIRED,
     DEPLOYMENT_MODE,
     MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
@@ -109,6 +112,7 @@ from .capabilities import (
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
     REASON_CONFIG_NOT_WRITABLE,
+    REASON_CONTAINER_MOVED,
     REASON_CONTAINER_NOT_FOUND,
     REASON_DEADLINE,
     REASON_EFFECT_UNKNOWN,
@@ -135,6 +139,7 @@ from .capabilities import (
     REASON_SLIPPED,
     REASON_STOP_REQUESTED,
     REASON_UNREACHABLE,
+    REASON_VIEWPOINT_UNSUITABLE,
     SPECS_BY_CAPABILITY,
     refusal_detail,
 )
@@ -160,6 +165,7 @@ from .perception import (
     container_under,
     find,
     locate_result,
+    mounted_view,
     nearest,
     object_record,
     on_table,
@@ -322,6 +328,27 @@ class _Target:
     def pose(self, frame: str) -> dict[str, Any]:
         return {"frame": frame, "x": round(self.x, 4), "y": round(self.y, 4), "z": round(self.z, 4),
                 "yaw": round(self.yaw or 0.0, 4)}
+
+
+@dataclass(frozen=True)
+class _ContainerRef:
+    """The located container's record a place is bound to (``container_ref``)."""
+
+    label: str
+    x: float
+    y: float
+    uncertainty_m: float
+    observed_at: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"label": self.label, "x": round(self.x, 4), "y": round(self.y, 4),
+                "uncertainty_m": round(self.uncertainty_m, 4), "observed_at": self.observed_at}
+
+
+def _level(vector: Sequence[float]) -> tuple[float, float] | None:
+    """A direction's horizontal part, as a unit vector; None when it points (almost) straight up or down."""
+    length = math.hypot(vector[0], vector[1])
+    return None if length < 1e-6 else (vector[0] / length, vector[1] / length)
 
 
 class LeRobotArmAdapter:
@@ -1068,9 +1095,30 @@ class LeRobotArmAdapter:
         if not set(arguments) <= {"kind", "label"} or not all(isinstance(value, str) for value in arguments.values()):
             raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
         capture = self._capture()
+        unsuitable = self._unsuitable(capture)
+        if unsuitable is not None:
+            raise _Refused(REASON_VIEWPOINT_UNSUITABLE, {"viewpoint": unsuitable,
+                                                         "max_uncertainty_m": self.config.perception.max_uncertainty_m})
         body = locate_result(capture, self.config.perception.frame, kind=arguments.get("kind"),
                              label=arguments.get("label"))
         return CallResult(call_id, OUTCOME_COMPLETED, evidence={**body, "source": capture.source})
+
+    def _unsuitable(self, capture: Capture) -> Mapping[str, Any] | None:
+        """The viewpoint of a look by a camera on the arm that cannot place things well enough; None when it can.
+
+        Such a camera measures from wherever the arm is. A look whose centre
+        ray misses the table, or that could place a whole object at its
+        image's centre only within more than ``perception.max_uncertainty_m``
+        (:func:`perception.viewpoint`), cannot see the table at the resolution
+        the config requires. A fixed camera's viewpoint is its calibration.
+        """
+        point = capture.camera.get("viewpoint")
+        limit = self.config.perception.max_uncertainty_m
+        if point is None or limit is None:
+            return None
+        if not point.get("table_in_view") or point["within_m"] > limit:
+            return point
+        return None
 
     def _record(self, item: Detection | None, capture: Capture) -> dict[str, Any] | None:
         if item is None:
@@ -1401,9 +1449,165 @@ class LeRobotArmAdapter:
             return _Target(item.x, item.y, rim, item.yaw, height, item)
         return _Target(pose["x"], pose["y"], self._table_z(), None, height, None)
 
+    def _place_arguments(self, arguments: Mapping[str, Any]
+                         ) -> tuple[str | None, dict[str, float], _ContainerRef | None]:
+        """``(container id, {}, reference or None)`` or ``(None, {x, y}, None)``; refused otherwise.
+
+        A reference (``container_<field>``) comes only with a container id and
+        gives at least its label, ``x``, ``y`` and ``uncertainty_m``.
+        """
+        names = {CONTAINER_REF_PREFIX + name: name for name in CONTAINER_REF_FIELDS}
+        given = {names[key]: value for key, value in arguments.items() if key in names}
+        container_id, pose = self._position_arguments(
+            {key: value for key, value in arguments.items() if key not in names}, "container_id",
+            frozenset({"x", "y"}))
+        if not given:
+            return container_id, pose, None
+        label, observed_at = given.get("label"), given.get("observed_at")
+        numbers = [given.get(name) for name in ("x", "y", "uncertainty_m")]
+        if (container_id is None or not set(CONTAINER_REF_REQUIRED) <= set(given)
+                or not isinstance(label, str) or not label.strip()
+                or not all(_finite(value) for value in numbers) or float(given["uncertainty_m"]) < 0.0
+                or (observed_at is not None and not isinstance(observed_at, str))):
+            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
+        return container_id, pose, _ContainerRef(label.strip()[:64], float(given["x"]), float(given["y"]),
+                                                 float(given["uncertainty_m"]),
+                                                 observed_at[:64] if observed_at is not None else None)
+
+    def _vantage(self, seed: Mapping[str, float], x: float, y: float, radius: float,
+                 top: float) -> dict[str, float] | None:
+        """Joints that put the camera on the arm straight over ``(x, y)``, a disc of ``radius`` ``top`` high in view.
+
+        The camera looks straight down from ``perception.verify_height_m``.
+        What the jaws hold sits in front of the lens and covers part of the
+        image: while the jaws do not read open, the camera is moved sideways
+        so the disc lands beside that part, on the far side of the image's
+        centre, when the image has room for it -- a look at a container it
+        hides part of could place the container only within its footprint.
+        """
+        first = self._over(seed, x, y)
+        if first is None:
+            return None
+        gripper = self.config.gripper
+        if gripper.state(first.get(gripper.joint, gripper.open)) == "open":
+            return first
+        perception, chain = self.config.perception, self.config.kinematics
+        settings = perception.camera
+        width, height = (settings.width, settings.height)
+        view = mounted_view(chain, settings.mount, first, fovy_deg=settings.fovy_deg, width=width, height=height)
+        hand = view.project(chain.forward(first).position)
+        if hand is None:
+            return first
+        side = chain.grasp.default_object_height_m
+        # What the jaws hold, at most a sphere around the tool point; the disc, at its nearest (its top).
+        sphere = math.sqrt(3.0) * side / 2.0
+        held_px = view.focal * sphere / math.sqrt(max(hand[2] ** 2 - sphere ** 2, 1e-6))
+        depth = perception.verify_height_m
+        disc_px = view.focal * radius / max(depth - top, 1e-3)
+        centre = (width / 2.0, height / 2.0)
+        away = (centre[0] - hand[0], centre[1] - hand[1])
+        length = math.hypot(*away)
+        if length < 1e-6:
+            away, length = (0.0, 1.0), 1.0
+        wanted = (hand[0] + away[0] / length * (held_px + disc_px), hand[1] + away[1] / length * (held_px + disc_px))
+        if not (disc_px <= wanted[0] <= width - disc_px and disc_px <= wanted[1] <= height - disc_px):
+            return first
+        du, dv = wanted[0] - centre[0], wanted[1] - centre[1]
+        right = _level(view.right)
+        up = _level(view.up)
+        if right is None or up is None:
+            return first
+        camera_x = x - du * depth / view.focal * right[0] + dv * depth / view.focal * up[0]
+        camera_y = y - du * depth / view.focal * right[1] + dv * depth / view.focal * up[1]
+        return self._over(first, camera_x, camera_y) or first
+
+    def _look_for_label(self, label: str) -> Capture | None:
+        """Up to ``perception.max_captures`` new looks, until a container with this label is seen; the last one."""
+        capture = None
+        for _ in range(self.config.perception.max_captures):
+            capture = self._look()
+            if capture is None or any(item.kind == "container" and item.label == label
+                                      for item in capture.detections):
+                return capture
+        return capture
+
+    def _relocate(self, call: _Call, positions: dict[str, float], counter: list[int], leg: dict[str, Any],
+                  phases: _Phases, x: float, y: float, label: str | None
+                  ) -> tuple[dict[str, float], Capture | None, bool]:
+        """A new look at where a place goes, from where the camera sees it whole: ``(reading, capture, moved)``.
+
+        A fixed camera looks from where it is. A camera on the arm first goes
+        straight over ``(x, y)`` (:meth:`_vantage`): from wherever the arm
+        is -- holding the object in front of the lens -- it may see the
+        container only in part.
+        """
+        moved = False
+        if self._mounted:
+            radius, top = self._container_extent(label)
+            vantage = self._vantage(positions, x, y, radius, top)
+            if vantage is not None:
+                # The body only: the gripper keeps squeezing what it holds.
+                vantage = {joint: vantage[joint] for joint in self.config.joint_names}
+                with phases("look_pose"):
+                    positions = self._follow(call, positions, [vantage], counter, leg)
+                moved = True
+        with phases("perceive"):
+            capture = self._look_for_label(label) if label is not None else self._look()
+        return positions, capture, moved
+
+    def _container_extent(self, label: str | None) -> tuple[float, float]:
+        """``(half the footprint's diagonal, height)`` of the container class with this label (any, at most)."""
+        classes = getattr(self.config.perception.camera, "classes", ())
+        sizes = [colour.size for colour in classes if colour.kind == "container"
+                 and (label is None or colour.label == label)]
+        return (max((math.hypot(size[0], size[1]) / 2.0 for size in sizes), default=0.0),
+                max((size[2] for size in sizes), default=0.0))
+
+    def _container_seen(self, capture: Capture | None, label: str | None, x: float, y: float) -> Detection | None:
+        """The container a place at ``(x, y)`` means: of this label the nearest; without one, the one under it."""
+        if capture is None:
+            return None
+        if label is None:
+            return container_under(capture.detections, x, y)
+        seen = [item for item in capture.detections if item.kind == "container" and item.label == label]
+        return min(seen, key=lambda item: math.hypot(item.x - x, item.y - y)) if seen else None
+
+    @staticmethod
+    def _check_reference(ref: _ContainerRef, item: Detection | None) -> dict[str, Any]:
+        """The reference against the container seen now: moved when off by more than both looks' uncertainty."""
+        check: dict[str, Any] = {"reference": ref.as_dict(), "seen": None, "off_m": None, "allowed_m": None,
+                                 "moved": None}
+        if item is None:
+            return check
+        off = math.hypot(item.x - ref.x, item.y - ref.y)
+        allowed = ref.uncertainty_m + item.xy_m
+        check.update(seen={"id": item.id, "x": round(item.x, 4), "y": round(item.y, 4), "xy_m": round(item.xy_m, 4),
+                           "whole": item.height_known},
+                     off_m=round(off, 4), allowed_m=round(allowed, 4), moved=off > allowed)
+        return check
+
+    def _not_placed(self, call_id: str, reason: str, moved: bool, before: Mapping[str, float],
+                    positions: Mapping[str, float], phases: _Phases, extra: Mapping[str, Any],
+                    observed: Mapping[str, Any]) -> CallResult:
+        """A place that released nothing: refused when the arm was not moved, else failed holding the object."""
+        if not moved:
+            raise _Refused(reason, observed)
+        return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason), evidence={
+            "reason_code": reason, "arm": self._state(positions), "arm_before": self._state(before),
+            "grip": self._grip(positions), "released": False, "object_held": True, "perception_after": None,
+            **dict(extra), **dict(observed), **phases.evidence(), "effect_applied": True})
+
     def _place(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify."""
-        container_id, pose = self._position_arguments(arguments, "container_id", frozenset({"x", "y"}))
+        """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify.
+
+        Bound to a located container (``container_id`` with ``container_ref``)
+        or given a table position, the place first looks again at where it
+        goes (:meth:`_relocate`). A referenced container seen further from its
+        reference than both looks' uncertainty has moved (``container_moved``),
+        not seen it is ``container_not_found``: nothing is released either way.
+        Otherwise it goes into the container as seen now.
+        """
+        container_id, pose, ref = self._place_arguments(arguments)
         chain = self._chain()
         _unsent(self.session.ensure_connected)
         before = _unsent(self.session.read)
@@ -1412,29 +1616,64 @@ class LeRobotArmAdapter:
             raise _Refused(REASON_NOTHING_HELD, {"grip": held_grip})
         phases = _Phases(self._clock)
         held_id = getattr(self.session, "held_object", None)
-        with phases("perceive"):
-            capture = self._capture(container_id, plan=True) if container_id is not None else self._look()
-            if container_id is None and capture is not None:
-                # A position is a place on whatever the look shows there: inside a container's footprint
-                # it is that container (released over its rim and judged inside it), else the table.
-                under = container_under(capture.detections, pose["x"], pose["y"])
-                container_id = under.id if under is not None else None
-            held = find(capture, held_id) if capture is not None and held_id else None
-            target = self._place_target(capture, container_id, pose, held)
-        with phases("plan"):
-            started = time.perf_counter()
-            release_z = target.z + chain.grasp.place_clearance_m + target.height / 2.0
-            approach, descend, retreat = self._plan(chain, before, [
-                (target.x, target.y, release_z + chain.grasp.approach_height_m), (target.x, target.y, release_z),
-                (target.x, target.y, release_z + chain.grasp.approach_height_m)], None)
-            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
-                    "waypoints": len(approach) + len(descend) + len(retreat)}
-        extra: dict[str, Any] = {"container_id": container_id, "object_id": held_id,
-                                 "target": target.pose(chain.frame), "plan": plan,
-                                 "perception_before": self._record(target.detection, capture) if capture else None}
         counter: list[int] = [0]
         leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
         positions = dict(before)
+        extra: dict[str, Any] = {"container_id": container_id, "object_id": held_id, "container_check": None}
+        moved = False
+        try:
+            if ref is not None or container_id is None:
+                x, y = (ref.x, ref.y) if ref is not None else (pose["x"], pose["y"])
+                label = ref.label if ref is not None else None
+                positions, capture, moved = self._relocate(call, positions, counter, leg, phases, x, y, label)
+                found = self._container_seen(capture, label, x, y)
+                if found is not None and not found.height_known and self._mounted:
+                    # Seen only in part (behind what the jaws hold, or at the frame's edge): look again from
+                    # straight over where it was seen, so it is seen whole.
+                    positions, capture, _again = self._relocate(call, positions, counter, leg, phases, found.x,
+                                                                found.y, found.label)
+                    found = self._container_seen(capture, found.label, found.x, found.y)
+                if capture is None:
+                    return self._not_placed(call_id, REASON_PERCEPTION_UNAVAILABLE, moved, before, positions,
+                                            phases, extra, {"camera": self.config.perception is not None})
+                seen = {"seen": [item.id for item in capture.detections]}
+                if ref is not None:
+                    check = self._check_reference(ref, found)
+                    extra["container_check"] = check
+                    if found is None:
+                        return self._not_placed(call_id, REASON_CONTAINER_NOT_FOUND, moved, before, positions,
+                                                phases, extra, {"container_check": check, **seen})
+                    if check["moved"]:
+                        return self._not_placed(call_id, REASON_CONTAINER_MOVED, moved, before, positions, phases,
+                                                extra, {"container_check": check})
+                if found is not None and not found.height_known:
+                    # Still only in part: where its floor is, is not known well enough to release over it.
+                    return self._not_placed(call_id, REASON_CONTAINER_NOT_FOUND, moved, before, positions, phases,
+                                            extra, {"partly_seen": found.id, **seen})
+                # A position is a place on whatever the look shows there: inside a container's footprint it is
+                # that container (released over its rim and judged inside it), else the table.
+                container_id = found.id if found is not None else None
+            else:
+                with phases("perceive"):
+                    capture = self._capture(container_id, plan=True)
+            held = find(capture, held_id) if capture is not None and held_id else None
+            target = self._place_target(capture, container_id, pose, held)
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
+        with phases("plan"):
+            started = time.perf_counter()
+            release_z = target.z + chain.grasp.place_clearance_m + target.height / 2.0
+            try:
+                approach, descend, retreat = self._plan(chain, positions, [
+                    (target.x, target.y, release_z + chain.grasp.approach_height_m), (target.x, target.y, release_z),
+                    (target.x, target.y, release_z + chain.grasp.approach_height_m)], None)
+            except _Refused as refused:
+                return self._not_placed(call_id, refused.code, moved, before, positions, phases, extra,
+                                        refused.observed)
+            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                    "waypoints": len(approach) + len(descend) + len(retreat)}
+        extra.update({"container_id": container_id, "target": target.pose(chain.frame), "plan": plan,
+                      "perception_before": self._record(target.detection, capture) if capture else None})
         try:
             with phases("approach"):
                 positions = self._follow(call, positions, approach, counter, leg)
