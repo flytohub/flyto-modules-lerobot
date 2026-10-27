@@ -15,13 +15,14 @@ from pathlib import Path
 import pytest
 
 from fake_lerobot import FakeFollowerArm, fake_factory
-from flyto_modules_lerobot import plugin
+from flyto_modules_lerobot import mujoco_sim, plugin, simulation
 from flyto_modules_lerobot.arm_config import ArmConfig, parse_arm_config
 from flyto_modules_lerobot.driver import ArmSession
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "am-arm200.json"
+SIM_EXAMPLE = ROOT / "examples" / "am-arm200-sim.json"
 RESOURCE = "am-arm200-01"
 
 
@@ -79,7 +80,47 @@ def make_adapter(session) -> Callable[..., LeRobotArmAdapter]:
 
 @pytest.fixture(autouse=True)
 def _fresh_sessions():
-    """Every test starts with no arm session open in this process."""
+    """Every test starts with no arm session or simulated world open in this process."""
     plugin.reset_sessions()
+    simulation.reset_worlds()
+    mujoco_sim.reset_worlds()
     yield
     plugin.reset_sessions()
+    simulation.reset_worlds()
+    mujoco_sim.reset_worlds()
+
+
+def sim_example_data() -> dict:
+    return json.loads(SIM_EXAMPLE.read_text(encoding="utf-8"))
+
+
+class SimRig:
+    """A simulated arm on a virtual clock: its world, session and adapter."""
+
+    def __init__(self, data: dict) -> None:
+        self.data = data
+        self.config = parse_arm_config(data)
+        self.clock = simulation.VirtualClock()
+        self.world = simulation.install_world(
+            self.config, simulation.SimWorld(self.config, clock=self.clock.now, sleep=self.clock.sleep))
+        self.session = ArmSession(self.config)
+        self.adapter = LeRobotArmAdapter(session=self.session, resource_id=self.config.resource_id,
+                                         served_resource_id=self.config.resource_id, sleep=self.clock.sleep,
+                                         clock=self.clock.now)
+        self._calls = 0
+
+    def call(self, capability_id: str, arguments: dict | None = None, deadline: float = 60.0):
+        from flyto_modules_lerobot.adapter_contract import CallRequest
+
+        self._calls += 1
+        return self.adapter.invoke(CallRequest(f"sim-{self._calls}", capability_id, dict(arguments or {}), deadline))
+
+
+@pytest.fixture
+def sim_data() -> dict:
+    return copy.deepcopy(sim_example_data())
+
+
+@pytest.fixture
+def sim(sim_data) -> SimRig:
+    return SimRig(sim_data)

@@ -1,0 +1,109 @@
+{
+  "schema": "flyto.lerobot.arm.v1",
+  "resource_id": "am-arm200-sim",
+  "display_name": "AM-ARM200 (simulation)",
+  "notes": "SIMULATION ONLY. A simulated AM-ARM200-shaped arm (6 joints + gripper) on a table with two blocks and one bin, seen by a simulated overhead camera. Nothing here drives hardware: the simulation robot type refuses a port that is not a sim: name. The link lengths below are illustrative, not the real arm's measurements; the real arm's chain must be measured before a real pick is planned with it.",
+  "lerobot": {
+    "robot_module": "flyto_modules_lerobot.simulation",
+    "robot_type": "sim",
+    "port": "sim:am-arm200-sim",
+    "id": "sim"
+  },
+  "unit": "deg",
+  "joints": {
+    "shoulder_pan": {"min": -120.0, "max": 120.0},
+    "shoulder_lift": {"min": -100.0, "max": 100.0},
+    "elbow_flex": {"min": -130.0, "max": 130.0},
+    "wrist_flex": {"min": -120.0, "max": 120.0},
+    "wrist_yaw": {"min": -90.0, "max": 90.0},
+    "wrist_roll": {"min": -150.0, "max": 150.0}
+  },
+  "gripper": {
+    "joint": "gripper",
+    "min": 0.0,
+    "max": 100.0,
+    "open": 60.0,
+    "closed": 2.0,
+    "tolerance": 3.0,
+    "held_min_gap": 6.0,
+    "effort_key": "gripper.effort",
+    "held_min_effort": 20.0,
+    "hold_samples": 3
+  },
+  "motion": {
+    "max_step": 3.0,
+    "step_interval_s": 0.02,
+    "tolerance": 1.5,
+    "settle_timeout_s": 3.0,
+    "poll_interval_s": 0.02,
+    "still_drift": 0.3
+  },
+  "poses": {
+    "ready": {
+      "taught": true,
+      "joints": {
+        "shoulder_pan": 0.0, "shoulder_lift": 10.0, "elbow_flex": 70.0,
+        "wrist_flex": 80.0, "wrist_yaw": 0.0, "wrist_roll": 0.0
+      }
+    }
+  },
+  "kinematics": {
+    "frame": "table",
+    "base": {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0},
+    "chain": [
+      {"joint": "shoulder_pan", "origin": [0.0, 0.0, 0.06], "axis": "z"},
+      {"joint": "shoulder_lift", "origin": [0.0, 0.0, 0.04], "axis": "y"},
+      {"joint": "elbow_flex", "origin": [0.0, 0.0, 0.14], "axis": "y"},
+      {"joint": "wrist_flex", "origin": [0.0, 0.0, 0.14], "axis": "y"},
+      {"joint": "wrist_yaw", "origin": [0.0, 0.0, 0.03], "axis": "x"},
+      {"joint": "wrist_roll", "origin": [0.0, 0.0, 0.02], "axis": "z"}
+    ],
+    "tool": [0.0, 0.0, 0.08],
+    "grasp": {
+      "approach_height_m": 0.08,
+      "lift_height_m": 0.10,
+      "place_clearance_m": 0.015,
+      "path_step_m": 0.02,
+      "default_object_height_m": 0.03
+    },
+    "ik": {"max_iterations": 200, "position_tolerance_m": 0.002, "axis_tolerance": 0.03, "damping": 0.05}
+  },
+  "perception": {
+    "frame": {
+      "id": "table",
+      "description": "Table plane: origin under the arm base, x forward, y to the arm's left, z up, metres. An object's pose is its bottom centre.",
+      "table_z_m": 0.0
+    },
+    "camera": {
+      "kind": "simulated",
+      "id": "overhead-sim",
+      "xy_sigma_m": 0.002,
+      "yaw_sigma_rad": 0.02,
+      "miss_rate": 0.0,
+      "occlusion_radius_m": 0.0,
+      "latency_ms": 30.0,
+      "jitter_ms": 5.0
+    },
+    "on_table_tolerance_m": 0.01,
+    "match_radius_m": 0.04,
+    "max_captures": 3
+  },
+  "simulation": {
+    "seed": 7,
+    "initial_pose": "ready",
+    "joint_speed": 120.0,
+    "gripper_speed": 150.0,
+    "gripper": {"max_opening_m": 0.07, "free_effort": 4.0, "contact_effort": 60.0, "reach_m": 0.02},
+    "table_z_m": 0.0,
+    "objects": [
+      {"id": "block-red", "kind": "block", "label": "red block", "colour": "red",
+       "x": 0.20, "y": 0.08, "yaw": 0.0, "size_m": [0.03, 0.03, 0.03]},
+      {"id": "block-green", "kind": "block", "label": "green block", "colour": "green",
+       "x": 0.23, "y": -0.02, "yaw": 0.3, "size_m": [0.03, 0.03, 0.03]},
+      {"id": "bin-blue", "kind": "container", "label": "blue bin", "colour": "blue",
+       "x": 0.15, "y": -0.12, "yaw": 0.0, "size_m": [0.09, 0.09, 0.04]}
+    ],
+    "latency": {"read_ms": 2.0, "jitter_ms": 1.0},
+    "faults": []
+  }
+}

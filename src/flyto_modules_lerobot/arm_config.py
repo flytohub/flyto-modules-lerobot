@@ -16,6 +16,17 @@ TOML file per arm, never in code:
 * ``motion`` -- step size, tolerances and timing for a move.
 * ``poses`` -- named joint targets; each says whether it was ``taught`` on
   this arm. An untaught pose is refused, never moved to.
+* ``kinematics`` (optional) -- the arm's kinematic chain, for Cartesian pick
+  and place (``kinematics.py``).
+* ``perception`` (optional) -- the table frame and the camera that locates
+  objects on it (``perception.py``).
+* ``simulation`` -- the simulated world, required exactly when the robot type
+  is served by the simulator (``backends.py``, ``simulation.py``).
+
+The gripper may also say how a held object reads (``held_min_gap``: how far
+from closed the jaws stop on one; ``effort_key`` / ``held_min_effort``: the
+observation key of its effort and the least effort a squeeze shows;
+``hold_samples``: readings a grasp must stay put for).
 
 A pose is taught through ``manipulation.mark_pose``: :func:`record_taught_pose`
 writes where the arm is now into the same JSON file, checked as if it were
@@ -49,11 +60,12 @@ ARM_CONFIG_SCHEMA = "flyto.lerobot.arm.v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _RESOURCE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TOP_KEYS = frozenset({"schema", "resource_id", "display_name", "notes", "lerobot", "unit", "joints", "gripper",
-                       "motion", "poses"})
+                       "motion", "poses", "kinematics", "perception", "simulation"})
 _LEROBOT_KEYS = frozenset({"robot_module", "robot_type", "port", "id", "calibration_dir", "options"})
 # Fields set once, by the keys above or by this pack, never through ``options``.
 _RESERVED_OPTIONS = frozenset({"port", "id", "calibration_dir", "disable_torque_on_disconnect"})
-_GRIPPER_KEYS = frozenset({"joint", "min", "max", "open", "closed", "tolerance"})
+_GRIPPER_KEYS = frozenset({"joint", "min", "max", "open", "closed", "tolerance", "held_min_gap", "effort_key",
+                           "held_min_effort", "hold_samples"})
 _MOTION_KEYS = frozenset({"max_step", "step_interval_s", "tolerance", "settle_timeout_s", "poll_interval_s",
                           "still_drift"})
 _POSE_KEYS = frozenset({"taught", "joints", "notes"})
@@ -90,12 +102,38 @@ class GripperConfig:
     open: float
     closed: float
     tolerance: float
+    # How a held object reads: the jaws stopped at least this far from closed ...
+    held_min_gap: float = 0.0
+    # ... squeezing with at least this effort, when the robot reports one under this key.
+    effort_key: str | None = None
+    held_min_effort: float = 0.0
+    # Readings in a row the jaws must stay put for a grasp to count as holding.
+    hold_samples: int = 3
 
     def state(self, position: float) -> str:
         """``open``, ``closed`` or ``between``, from a position reading."""
         nearest = {"open": abs(position - self.open), "closed": abs(position - self.closed)}
         name = min(nearest, key=nearest.__getitem__)
         return name if nearest[name] <= self.tolerance else "between"
+
+    def gap(self, position: float) -> float:
+        """How far the jaws are from closed, toward open (negative past closed)."""
+        return (position - self.closed) * math.copysign(1.0, self.open - self.closed)
+
+    def holds(self, position: float, goal: float | None, effort: float | None) -> bool:
+        """The gripper signature of a held object.
+
+        Commanded closed, the jaws stopped short of closed by at least
+        ``held_min_gap`` (and short of open), and -- when the robot reports an
+        effort -- squeezing with at least ``held_min_effort``. Jaws commanded
+        open, closed fully, or squeezing nothing hold nothing.
+        """
+        if goal is None or abs(goal - self.closed) > self.tolerance:
+            return False
+        gap = self.gap(position)
+        if gap < self.held_min_gap or gap > self.gap(self.open) - self.tolerance:
+            return False
+        return self.effort_key is None or (effort is not None and effort >= self.held_min_effort)
 
 
 @dataclass(frozen=True)
@@ -151,6 +189,9 @@ class ArmConfig:
     motion: MotionConfig
     poses: Mapping[str, Pose]
     lerobot: LeRobotSettings
+    kinematics: Any = None
+    perception: Any = None
+    simulation: Any = None
     # The file it was read from, or None when parsed from data. Where the arm
     # config lives is not part of what the arm is, so it is not compared.
     source: Path | None = dataclasses.field(default=None, compare=False)
@@ -233,13 +274,25 @@ def _gripper(raw: Any, joint_names: tuple[str, ...]) -> GripperConfig:
     joint = _text(body.get("joint"), "gripper.joint", _IDENTIFIER)
     if joint in joint_names:
         raise ArmConfigError("gripper.joint must not also be a body joint")
+    tolerance = _positive(body.get("tolerance"), "gripper.tolerance")
+    effort_key = body.get("effort_key")
+    if effort_key is not None:
+        effort_key = _text(effort_key, "gripper.effort_key")
+    samples = body.get("hold_samples", 3)
+    if isinstance(samples, bool) or not isinstance(samples, int) or not 1 <= samples <= 50:
+        raise ArmConfigError("gripper.hold_samples must be an integer in 1..50")
     gripper = GripperConfig(
         joint=joint,
         minimum=_number(body.get("min"), "gripper.min"),
         maximum=_number(body.get("max"), "gripper.max"),
         open=_number(body.get("open"), "gripper.open"),
         closed=_number(body.get("closed"), "gripper.closed"),
-        tolerance=_positive(body.get("tolerance"), "gripper.tolerance"),
+        tolerance=tolerance,
+        # Without a stated gap, stopping further from closed than its tolerance is "short of closed".
+        held_min_gap=_positive(body.get("held_min_gap", tolerance), "gripper.held_min_gap"),
+        effort_key=effort_key,
+        held_min_effort=_positive(body.get("held_min_effort", 0.0), "gripper.held_min_effort", zero=True),
+        hold_samples=samples,
     )
     if gripper.minimum >= gripper.maximum:
         raise ArmConfigError("gripper: min must be below max")
@@ -304,16 +357,45 @@ def parse_arm_config(data: Any) -> ArmConfig:
     if body.get("schema") != ARM_CONFIG_SCHEMA:
         raise ArmConfigError(f"schema must be {ARM_CONFIG_SCHEMA!r}")
     joints = _joints(body.get("joints"))
+    unit = _text(body.get("unit"), "unit")[:16]
+    poses = _poses(body.get("poses"), joints)
+    lerobot = _lerobot(body.get("lerobot"))
     return ArmConfig(
         resource_id=_text(body.get("resource_id"), "resource_id", _RESOURCE_ID),
         display_name=_text(body.get("display_name") or "arm", "display_name")[:120],
-        unit=_text(body.get("unit"), "unit")[:16],
+        unit=unit,
         joints=joints,
         gripper=_gripper(body.get("gripper"), tuple(joint.name for joint in joints)),
         motion=_motion(body.get("motion")),
-        poses=_poses(body.get("poses"), joints),
-        lerobot=_lerobot(body.get("lerobot")),
+        poses=poses,
+        lerobot=lerobot,
+        **_sections(body, joints=joints, unit=unit, poses=poses, lerobot=lerobot),
     )
+
+
+def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: str, poses: Mapping[str, Pose],
+              lerobot: LeRobotSettings) -> dict[str, Any]:
+    """The optional ``kinematics``, ``perception`` and ``simulation`` sections, each checked by its own module."""
+    from .backends import backend_for
+    from .kinematics import KinematicsError, parse_kinematics
+    from .perception import PerceptionError, parse_perception
+    from .simulation import SimulationError, parse_simulation
+
+    simulated = backend_for(lerobot.robot_type).simulated
+    if simulated != ("simulation" in body):
+        raise ArmConfigError("a simulation section is required exactly when the robot type is the simulator's")
+    if simulated and "kinematics" not in body:
+        raise ArmConfigError("a simulated arm needs its kinematics section")
+    try:
+        return {
+            "kinematics": (parse_kinematics(body["kinematics"], body_joints=[joint.name for joint in joints],
+                                            unit=unit) if "kinematics" in body else None),
+            "perception": (parse_perception(body["perception"], robot_type=lerobot.robot_type)
+                           if "perception" in body else None),
+            "simulation": parse_simulation(body["simulation"], poses=tuple(poses)) if simulated else None,
+        }
+    except (KinematicsError, PerceptionError, SimulationError) as error:
+        raise ArmConfigError(str(error)) from error
 
 
 def load_arm_config(path: str | Path) -> ArmConfig:

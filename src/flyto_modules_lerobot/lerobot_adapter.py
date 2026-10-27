@@ -45,6 +45,32 @@ A move is sent as waypoints no further apart than ``motion.max_step``, so a
 stop or cancel takes effect within one step. Which capability does what is
 read from ``capabilities.SPECS`` (the row's ``action``); which joints exist,
 their limits, the gripper's values and the poses are the arm's config.
+
+The sensing closed loop:
+
+* ``manipulation.grasp`` is judged by the gripper signature of a held object
+  (``GripperConfig.holds``): jaws that close fully are ``failed`` /
+  ``no_object_held`` with ``object_held: false``, jaws that stop short and
+  then creep on are ``object_slipped``; only a signature that stays put over
+  ``gripper.hold_samples`` readings is ``completed``.
+* ``perception.locate_objects`` reads the arm's camera (``perception.py``).
+* ``manipulation.pick`` / ``manipulation.place`` locate their target, plan
+  every pose with the declared kinematic chain before anything moves (a pose
+  out of reach is refused), then run timed phases (perceive, plan, open,
+  approach, descend, grasp, verify_grip, lift, verify -- or perceive, plan,
+  approach, descend, release, verify_release, retreat, verify) and return
+  the gripper signature and the camera's view after the effect. A pick whose
+  object is not held after the lift, or that the camera still sees on the
+  table, is ``failed``; a place whose object the camera does not see inside
+  the container is ``failed``.
+* ``observe`` adds the numbers the contracts' evidence is judged from:
+  ``object_held`` (0/1, the gripper signature, read fresh) and, from the
+  camera alone, ``objects_on_table`` and ``objects_in_containers``.
+* Every result and observation carries ``source`` -- ``hardware`` or
+  ``simulation``, from the backend table, never from a name.
+* ``connection_status()`` reports a latched fault as ``{"reason": <code>,
+  "since": <ISO 8601>}`` (``None`` when none), the shape the execution
+  host's fault latch reads.
 """
 
 from __future__ import annotations
@@ -53,8 +79,9 @@ import json
 import math
 import threading
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .adapter_contract import (
@@ -70,26 +97,61 @@ from .capabilities import (
     DEPLOYMENT_MODE,
     MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
+    OBSERVED_HELD,
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
     REASON_CONFIG_NOT_WRITABLE,
+    REASON_CONTAINER_NOT_FOUND,
     REASON_DEADLINE,
     REASON_EFFECT_UNKNOWN,
     REASON_FAULT,
+    REASON_KINEMATICS_UNAVAILABLE,
     REASON_MOTORS_MISMATCH,
+    REASON_NO_OBJECT,
     REASON_NOT_CALIBRATED,
+    REASON_NOT_IN_CONTAINER,
     REASON_NOT_REACHED,
+    REASON_NOT_RELEASED,
+    REASON_NOTHING_HELD,
+    REASON_OBJECT_NOT_FOUND,
     REASON_OUTSIDE_LIMITS,
+    REASON_PERCEPTION_DISAGREES,
+    REASON_PERCEPTION_UNAVAILABLE,
+    REASON_PLACEMENT_UNOBSERVED,
     REASON_POSE_NOT_TAUGHT,
     REASON_POSE_TAUGHT,
     REASON_POSE_UNKNOWN,
+    REASON_POSE_UNREACHABLE,
+    REASON_SIMULATION_ON_HARDWARE,
+    REASON_SLIPPED,
     REASON_STOP_REQUESTED,
     REASON_UNREACHABLE,
     SPECS_BY_CAPABILITY,
     refusal_detail,
 )
-from .driver import ArmFault, ArmSession, ArmUnreachable, CommandLost, MotorsMismatch, NotCalibrated
+from .driver import (
+    FAULT_SIMULATION_ON_HARDWARE,
+    ArmFault,
+    ArmSession,
+    ArmUnreachable,
+    CommandLost,
+    MotorsMismatch,
+    NotCalibrated,
+)
 from .evidence import policy_refusal
+from .perception import (
+    CameraUnavailable,
+    Capture,
+    Detection,
+    build_camera,
+    container_holding,
+    find,
+    locate_result,
+    nearest,
+    object_record,
+    on_table,
+    scene_counts,
+)
 
 OBSERVATION_SCHEMA = "flyto.lerobot.observation.v1"
 OBSERVATION_PHASES = frozenset({"before", "after", "post_stop", "settled"})
@@ -101,6 +163,10 @@ _UNSENT_REASONS: Mapping[type, str] = {
     ArmFault: REASON_FAULT,
     MotorsMismatch: REASON_MOTORS_MISMATCH,
 }
+# A latched fault whose code says more than "the arm's protection tripped".
+_FAULT_REASONS: Mapping[str, str] = {FAULT_SIMULATION_ON_HARDWARE: REASON_SIMULATION_ON_HARDWARE}
+# The capabilities that move the gripper (a stop holds it too while one runs).
+_GRIPPER_ACTIONS = frozenset({"grasp", "release", "pick", "place"})
 # How an interrupted move ends, by why it was interrupted.
 _STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, REASON_DEADLINE: OUTCOME_TIMEOUT}
 _DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)
@@ -158,6 +224,22 @@ class _Call:
         self.cancel.set()
 
 
+class _ShortOfTarget(Exception):
+    """A leg of a pick or a place stopped moving short of its target."""
+
+    def __init__(self, positions: Mapping[str, float]) -> None:
+        """Where the arm stopped."""
+        super().__init__("short of target")
+        self.positions = dict(positions)
+
+
+def _unsent_reason(error: Exception) -> str:
+    code = getattr(error, "fault_code", None)
+    if code in _FAULT_REASONS:
+        return _FAULT_REASONS[code]
+    return next(reason for kind, reason in _UNSENT_REASONS.items() if isinstance(error, kind))
+
+
 def _unsent(step: Callable[[], Any]) -> Any:
     """Run a step nothing has been commanded before; a driver error is the call's typed refusal."""
     try:
@@ -166,7 +248,52 @@ def _unsent(step: Callable[[], Any]) -> Any:
         raise _Refused(REASON_MOTORS_MISMATCH, {"reported": list(error.reported),
                                                 "configured": list(error.configured)}) from error
     except (ArmUnreachable, NotCalibrated, ArmFault) as error:
-        raise _Refused(_UNSENT_REASONS[type(error)], {"error": type(error).__name__}) from error
+        observed: dict[str, Any] = {"error": type(error).__name__}
+        if getattr(error, "fault_code", None):
+            observed["fault_code"] = error.fault_code  # type: ignore[attr-defined]
+        raise _Refused(_unsent_reason(error), observed) from error
+
+
+class _Phases:
+    """When each phase of a pick or a place started and how long it took (the adapter's clock)."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        """Start the call's clock now."""
+        self._clock = clock
+        self.started = clock()
+        self.rows: list[dict[str, Any]] = []
+
+    @contextmanager
+    def __call__(self, name: str) -> Iterator[None]:
+        """Time one phase; it is recorded even when it ends the call."""
+        begun = self._clock()
+        try:
+            yield
+        finally:
+            self.rows.append({"phase": name, "started_ms": round((begun - self.started) * 1000.0, 3),
+                              "ms": round((self._clock() - begun) * 1000.0, 3)})
+
+    def evidence(self) -> dict[str, Any]:
+        """``phases`` and ``latency_ms`` (each phase and the total)."""
+        latency = {row["phase"]: row["ms"] for row in self.rows}
+        latency["total"] = round((self._clock() - self.started) * 1000.0, 3)
+        return {"phases": list(self.rows), "latency_ms": latency}
+
+
+@dataclass(frozen=True)
+class _Target:
+    """Where a pick or a place goes in the table frame, and the object or container it is about."""
+
+    x: float
+    y: float
+    z: float
+    yaw: float | None
+    height: float
+    detection: Detection | None
+
+    def pose(self, frame: str) -> dict[str, Any]:
+        return {"frame": frame, "x": round(self.x, 4), "y": round(self.y, 4), "z": round(self.z, 4),
+                "yaw": round(self.yaw or 0.0, 4)}
 
 
 class LeRobotArmAdapter:
@@ -179,6 +306,9 @@ class LeRobotArmAdapter:
         "grasp": "_grasp",
         "release": "_release",
         "mark_pose": "_mark_pose",
+        "locate_objects": "_locate_objects",
+        "pick": "_pick",
+        "place": "_place",
     }
 
     def __init__(
@@ -230,11 +360,18 @@ class LeRobotArmAdapter:
 
     # -- results ---------------------------------------------------------------------
 
-    @staticmethod
-    def _refused(call_id: str, code: str, observed: Mapping[str, Any] | None = None) -> CallResult:
+    @property
+    def source(self) -> str:
+        """``hardware`` or ``simulation``: what produced every reading of this arm."""
+        return self.session.backend.source
+
+    def _refused(self, call_id: str, code: str, observed: Mapping[str, Any] | None = None) -> CallResult:
         """A ``refused`` result: nothing was commanded, with its ``policy.decision``."""
-        evidence = {"reason_code": code, "effect_applied": False,
-                    "evidence_items": [policy_refusal(code=code, observed=observed or {})]}
+        seen = {**dict(observed or {}), "source": self.source}
+        evidence: dict[str, Any] = {"reason_code": code, "effect_applied": False,
+                                    "evidence_items": [policy_refusal(code=code, observed=seen)]}
+        if seen.get("fault_code"):
+            evidence["fault_code"] = seen["fault_code"]
         return CallResult(call_id, OUTCOME_REFUSED, detail=refusal_detail(code), evidence=evidence)
 
     def _hold(self, call: _Call) -> dict[str, float] | None:
@@ -299,6 +436,8 @@ class LeRobotArmAdapter:
         """A command went out and nothing confirms what it did: effect unknown, never resent."""
         holding, _state = self._held(call)
         evidence = {"reason_code": code, "effect_applied": None, "holding": holding, "commands_sent": sent}
+        if self.session.fault_code:
+            evidence["fault_code"] = self.session.fault_code
         detail = refusal_detail(code) if holding else f"{refusal_detail(code)} {POWER_CUTOFF_DETAIL}"
         return CallResult(call_id, OUTCOME_FAILED, detail=detail, evidence=evidence)
 
@@ -327,7 +466,7 @@ class LeRobotArmAdapter:
                 # The same call is still running: never send its motion twice.
                 return CallResult(call_id, OUTCOME_REFUSED, detail="call is already in progress")
             self._arguments[call_id] = canonical
-            call = _Call(deadline_at=self._clock() + float(deadline), moves_gripper=spec.action in ("grasp", "release"))
+            call = _Call(deadline_at=self._clock() + float(deadline), moves_gripper=spec.action in _GRIPPER_ACTIONS)
             self._inflight[call_id] = call
         self.session.calls_in_flight.add(call)
         try:
@@ -335,6 +474,7 @@ class LeRobotArmAdapter:
                 result = getattr(self, self.HANDLERS[spec.action])(call_id, call, arguments)
             except _Refused as refused:
                 result = self._refused(call_id, refused.code, refused.observed)
+            result = self._sourced(result)
         finally:
             self.session.calls_in_flight.discard(call)
             with self._lock:
@@ -345,6 +485,10 @@ class LeRobotArmAdapter:
             self._results[call_id] = result
         return result
 
+    def _sourced(self, result: CallResult) -> CallResult:
+        """The result, saying what produced it (``source``)."""
+        return replace(result, evidence={**dict(result.evidence), "source": self.source})
+
     def cancel(self, call_id: str) -> CallResult:
         """Interrupt a call in flight: the arm holds where it is. A request, never a confirmed stop."""
         with self._lock:
@@ -353,7 +497,7 @@ class LeRobotArmAdapter:
             return CallResult(call_id, OUTCOME_REFUSED, detail="no call of this id is in flight")
         call.request_stop(self._clock())
         return CallResult(call_id, OUTCOME_CANCELLED, detail=refusal_detail(REASON_STOP_REQUESTED),
-                          evidence={"stop_requested": True, "stop_confirmed": False})
+                          evidence={"stop_requested": True, "stop_confirmed": False, "source": self.source})
 
     def safe_stop(self) -> CallResult:
         """HOLD, never torque off: interrupt every call on this arm and command it to stay where it is."""
@@ -361,7 +505,8 @@ class LeRobotArmAdapter:
         now = self._clock()
         for call in calls:
             call.request_stop(now)
-        evidence: dict[str, Any] = {"stop_requested": True, "stop_confirmed": False, "holding": False}
+        evidence: dict[str, Any] = {"stop_requested": True, "stop_confirmed": False, "holding": False,
+                                    "source": self.source}
         if not self.session.connected:
             # Never connected (or LeRobot disconnected it): nothing this pack
             # commanded is moving, and connecting now would drop torque briefly.
@@ -376,16 +521,54 @@ class LeRobotArmAdapter:
                           evidence={**evidence, "holding": True, "torque": "on", "arm": state})
 
     def observe(self, *, phase: str, execution_id: str) -> dict[str, Any]:
-        """Every motor's position as this arm reads it now. Its own word, never another resource's observation."""
+        """What the contracts' evidence is judged from, read now.
+
+        Every motor's position (the arm's own word), ``object_held`` (1 or 0,
+        the gripper signature) and, when the arm has a camera,
+        ``objects_on_table`` and ``objects_in_containers`` -- counted from a
+        fresh capture alone, without reading the arm.
+        """
         if phase not in OBSERVATION_PHASES:
             raise ValueError("Unknown observation phase")
         positions = self.session.read()
-        return {"schema": OBSERVATION_SCHEMA, "phase": phase, "execution_id": execution_id,
-                "joints": {motor: round(value, 3) for motor, value in positions.items()}}
+        grip = self._grip(positions)
+        observation: dict[str, Any] = {
+            "schema": OBSERVATION_SCHEMA, "phase": phase, "execution_id": execution_id,
+            "joints": {motor: round(value, 3) for motor, value in positions.items()},
+            "source": self.source, OBSERVED_HELD: 1 if grip["held"] else 0,
+            "gripper_position": grip["position"],
+        }
+        if grip["effort"] is not None:
+            observation["gripper_effort"] = grip["effort"]
+        capture = self._look()
+        if capture is not None:
+            observation.update(scene_counts(capture, self.config.perception))
+            observation["perception_source"] = capture.source
+        return observation
 
     def served_identity(self) -> dict[str, str]:
         """The resource this adapter is wired to: its configuration, read without touching the arm."""
-        return {"resource_id": self.served_resource_id, "deployment_mode": DEPLOYMENT_MODE}
+        mode = self.session.backend.deployment_mode if self.session.backend else DEPLOYMENT_MODE
+        return {"resource_id": self.served_resource_id, "deployment_mode": mode}
+
+    def connection_status(self) -> dict[str, Any]:
+        """The arm's link and fault state, in the shape the execution host's fault latch reads.
+
+        ``fault`` is ``{"reason": <code>, "since": <ISO 8601>}`` for a latched
+        fault and ``None`` when this session holds none. ``state`` is
+        ``failed`` for a latched fault, ``connected`` while connected, and
+        absent while the arm has not been connected yet (it connects lazily).
+        """
+        session = self.session
+        code = session.fault_code
+        status: dict[str, Any] = {"fault": None if code is None else {"reason": code,
+                                                                       "since": session.fault_since or ""}}
+        if code is not None:
+            status["state"] = "failed"
+            status["last_error"] = str(session.fault or session.mismatch or code)[:200]
+        elif session.connected:
+            status["state"] = "connected"
+        return status
 
     # -- arguments ----------------------------------------------------------------------
 
@@ -550,12 +733,450 @@ class LeRobotArmAdapter:
         })
 
     def _grasp(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.grasp``: close until the gripper stops; an object in the way is expected."""
-        return self._gripper(call_id, call, arguments, self.config.gripper.closed, accept_still=True)
+        """``manipulation.grasp``: close, then judge the gripper signature; closing on nothing is not a grasp."""
+        self._no_arguments(arguments)
+        _unsent(self.session.ensure_connected)
+        before = _unsent(self.session.read)
+        gripper = self.config.gripper
+        target = {gripper.joint: gripper.closed}
+        leg = {"start": dict(before), "target": target}
+        counter = [0]
+        try:
+            after, grip, verdict, reached_command = self._close(call, before, counter, leg)
+        except _Interrupted as interrupted:
+            return self._interrupted(call_id, call, interrupted.reason, leg["start"], leg["target"])
+        except _Lost as lost:
+            return self._lost(call_id, call, lost.code, counter[0])
+        except _ShortOfTarget as short:
+            return self._not_reached(call_id, call, before, short.positions,
+                                     {"gripper_target": gripper.closed, "reached_command": False})
+        evidence = {"arm": self._state(after), "arm_before": self._state(before), "gripper_target": gripper.closed,
+                    "reached_command": reached_command, "grip": grip, "object_held": verdict is None,
+                    "effect_applied": True}
+        if verdict is not None:
+            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(verdict),
+                              evidence={**evidence, "reason_code": verdict})
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
 
     def _release(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.release``: open to the configured open value."""
-        return self._gripper(call_id, call, arguments, self.config.gripper.open, accept_still=False)
+        """``manipulation.release``: open to the configured open value; afterwards the gripper holds nothing."""
+        result = self._gripper(call_id, call, arguments, self.config.gripper.open, accept_still=False)
+        if result.outcome != OUTCOME_COMPLETED:
+            return result
+        grip = self._grip(self._state_positions(result.evidence["arm"]))
+        evidence = {**dict(result.evidence), "grip": grip, "object_held": grip["held"]}
+        self.session.held_object = None
+        if grip["held"]:
+            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_NOT_RELEASED),
+                              evidence={**evidence, "reason_code": REASON_NOT_RELEASED})
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
+
+    # -- the gripper signature ---------------------------------------------------------
+
+    def _grip(self, positions: Mapping[str, float]) -> dict[str, Any]:
+        """What the gripper says now: position, commanded goal, gap from closed, effort, and whether it holds."""
+        gripper = self.config.gripper
+        position = float(positions[gripper.joint])
+        goal = self.session.goals.get(gripper.joint)
+        effort = self.session.effort if gripper.effort_key else None
+        return {"position": round(position, 3), "goal": None if goal is None else round(goal, 3),
+                "gap": round(gripper.gap(position), 3), "effort": None if effort is None else round(effort, 3),
+                "held": gripper.holds(position, goal, effort)}
+
+    def _state_positions(self, state: Mapping[str, Any]) -> dict[str, float]:
+        """The gripper position of an ``arm`` state, as a reading."""
+        return {self.config.gripper.joint: float(state["gripper"]["position"])}
+
+    def _close(self, call: _Call, start: Mapping[str, float], counter: list[int],
+               leg: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any], str | None, bool]:
+        """Close the gripper and judge it: ``(reading, grip, why it holds nothing or None, reached closed)``.
+
+        Fully closed is ``no_object_held``. Stopped short, the jaws must stay
+        put for ``gripper.hold_samples`` readings: creeping on toward closed by
+        more than ``motion.still_drift`` is ``object_slipped``; a signature
+        that does not show a held object is ``no_object_held``.
+        """
+        positions, reached_command = self._close_jaws(call, start, counter, leg)
+        positions, grip, verdict = self._judge_grip(call, positions, reached_command)
+        return positions, grip, verdict, reached_command
+
+    def _close_jaws(self, call: _Call, start: Mapping[str, float], counter: list[int],
+                    leg: dict[str, Any]) -> tuple[dict[str, float], bool]:
+        """Command the gripper closed and wait until it is closed or stopped; ``(reading, reached closed)``."""
+        gripper = self.config.gripper
+        target = {gripper.joint: gripper.closed}
+        leg["start"], leg["target"] = dict(start), target
+        positions = self._drive(call, start, target, counter)
+        positions, accepted = self._settle(call, positions, target, tolerance=gripper.tolerance, accept_still=True)
+        if not accepted:
+            raise _ShortOfTarget(positions)
+        return positions, abs(positions[gripper.joint] - gripper.closed) <= gripper.tolerance
+
+    def _judge_grip(self, call: _Call, positions: dict[str, float],
+                    reached_command: bool) -> tuple[dict[str, float], dict[str, Any], str | None]:
+        """The hold window after closing: ``(last reading, grip, why it holds nothing or None)``."""
+        gripper, motion = self.config.gripper, self.config.motion
+        if reached_command:
+            return positions, self._grip(positions), REASON_NO_OBJECT
+        contact = gripper.gap(positions[gripper.joint])
+        creep = 0.0
+        for _ in range(gripper.hold_samples):
+            self._check(call)
+            self._sleep(motion.poll_interval_s)
+            positions = self._after_send(self.session.read)
+            creep = max(creep, contact - gripper.gap(positions[gripper.joint]))
+        grip = self._grip(positions)
+        if creep > motion.still_drift:
+            return positions, grip, REASON_SLIPPED
+        return positions, grip, None if grip["held"] else REASON_NO_OBJECT
+
+    def _open(self, call: _Call, start: Mapping[str, float], counter: list[int],
+              leg: dict[str, Any]) -> dict[str, float]:
+        """Open the gripper to its open value and wait until it is there."""
+        gripper = self.config.gripper
+        target = {gripper.joint: gripper.open}
+        leg["start"], leg["target"] = dict(start), target
+        positions = self._drive(call, start, target, counter)
+        positions, reached = self._settle(call, positions, target, tolerance=gripper.tolerance, accept_still=False)
+        if not reached:
+            raise _ShortOfTarget(positions)
+        return positions
+
+    # -- perception ---------------------------------------------------------------------
+
+    def _camera(self) -> Any:
+        """The arm's camera (one per session), or None when the config names none."""
+        if self.session.camera is None and self.config.perception is not None:
+            self.session.camera = build_camera(self.config)
+        return self.session.camera
+
+    def _look(self) -> Capture | None:
+        """One capture, or None when there is no camera or it gave no frame."""
+        camera = self._camera()
+        if camera is None:
+            return None
+        try:
+            return camera.capture()
+        except (CameraUnavailable, OSError, ImportError):
+            return None
+
+    def _look_for(self, *ids: str | None) -> Capture | None:
+        """Up to ``perception.max_captures`` looks, until every named object is seen; the last capture."""
+        wanted = [item for item in ids if item]
+        attempts = self.config.perception.max_captures if self.config.perception is not None else 1
+        capture = None
+        for _ in range(attempts):
+            capture = self._look()
+            if capture is None or all(find(capture, item) is not None for item in wanted):
+                return capture
+        return capture
+
+    def _capture(self, *ids: str | None) -> Capture:
+        """A capture (looking again for named objects it missed); refused (nothing sent) without one."""
+        capture = self._look_for(*ids)
+        if capture is None:
+            raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"camera": self.config.perception is not None})
+        return capture
+
+    def _locate_objects(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
+        """``perception.locate_objects``: the objects on the table as the camera sees them now. Moves nothing."""
+        if not set(arguments) <= {"kind", "label"} or not all(isinstance(value, str) for value in arguments.values()):
+            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
+        capture = self._capture()
+        body = locate_result(capture, self.config.perception.frame, kind=arguments.get("kind"),
+                             label=arguments.get("label"))
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence={**body, "source": capture.source})
+
+    def _record(self, item: Detection | None, capture: Capture) -> dict[str, Any] | None:
+        if item is None:
+            return None
+        return object_record(item, frame=self.config.perception.frame.id, observed_at=capture.observed_at,
+                             source=capture.source)
+
+    # -- planning -------------------------------------------------------------------------
+
+    def _chain(self) -> Any:
+        chain = self.config.kinematics
+        if chain is None:
+            raise _Refused(REASON_KINEMATICS_UNAVAILABLE, {})
+        return chain
+
+    def _table_z(self) -> float:
+        perception = self.config.perception
+        return perception.frame.table_z_m if perception is not None else 0.0
+
+    def _plan(self, chain: Any, seed: Mapping[str, float], points: Sequence[tuple[float, float, float]],
+              yaw: float | None) -> list[list[dict[str, float]]]:
+        """Joint targets along straight tool paths through ``points`` (first one reached in joint space).
+
+        Every pose is solved before anything moves; one with no solution
+        within the limits refuses the call.
+        """
+        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
+        step = chain.grasp.path_step_m
+        legs: list[list[dict[str, float]]] = []
+        current = dict(seed)
+        previous: tuple[float, float, float] | None = None
+        for point in points:
+            pieces = 1 if previous is None else max(1, math.ceil(math.dist(previous, point) / step))
+            leg = []
+            for index in range(1, pieces + 1):
+                fraction = index / pieces
+                waypoint = point if previous is None else tuple(
+                    a + (b - a) * fraction for a, b in zip(previous, point, strict=True))
+                solution = chain.solve(waypoint, current, limits, yaw=yaw)
+                if solution is None:
+                    raise _Refused(REASON_POSE_UNREACHABLE, {"target": [round(value, 4) for value in waypoint]})
+                current = {**current, **solution}
+                leg.append(solution)
+            legs.append(leg)
+            previous = point
+        return legs
+
+    def _follow(self, call: _Call, start: Mapping[str, float], path: Sequence[Mapping[str, float]],
+                counter: list[int], leg: dict[str, Any]) -> dict[str, float]:
+        """Drive through each joint target, then settle at the last one within ``motion.tolerance``."""
+        positions = dict(start)
+        for target in path:
+            leg["start"], leg["target"] = dict(positions), dict(target)
+            positions = self._drive(call, positions, target, counter)
+        positions, reached = self._settle(call, positions, path[-1], tolerance=self.config.motion.tolerance,
+                                          accept_still=False)
+        if not reached:
+            raise _ShortOfTarget(positions)
+        return positions
+
+    def _position_arguments(self, arguments: Mapping[str, Any], id_key: str,
+                            pose_keys: frozenset[str]) -> tuple[str | None, dict[str, float]]:
+        """``(id, {})`` or ``(None, {x, y[, yaw]})``; refused otherwise."""
+        given = set(arguments)
+        if given == {id_key} and isinstance(arguments[id_key], str) and arguments[id_key].strip():
+            return arguments[id_key].strip()[:64], {}
+        numbers = {key: arguments[key] for key in given if key in pose_keys}
+        if given and given <= pose_keys and {"x", "y"} <= given and all(_finite(value) for value in numbers.values()):
+            return None, {key: float(value) for key, value in numbers.items()}
+        raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
+
+    def _ended(self, call_id: str, call: _Call, error: Exception, leg: Mapping[str, Any], counter: list[int],
+               before: Mapping[str, float], extra: Mapping[str, Any]) -> CallResult:
+        """A pick or a place a stop, a lost reply or a short leg ended: the same outcomes as a move."""
+        if isinstance(error, _Interrupted):
+            result = self._interrupted(call_id, call, error.reason, leg["start"], leg["target"])
+        elif isinstance(error, _Lost):
+            result = self._lost(call_id, call, error.code, counter[0])
+        else:
+            result = self._not_reached(call_id, call, before, error.positions, {})  # type: ignore[attr-defined]
+        return replace(result, evidence={**dict(result.evidence), **extra})
+
+    # -- pick and place ---------------------------------------------------------------------
+
+    def _pick_target(self, capture: Capture | None, object_id: str | None, pose: Mapping[str, float]) -> _Target:
+        default = self._chain().grasp.default_object_height_m
+        if object_id is not None:
+            if capture is None:
+                raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"object_id": object_id})
+            item = find(capture, object_id)
+            if item is None or item.kind != "block":
+                raise _Refused(REASON_OBJECT_NOT_FOUND, {"object_id": object_id,
+                                                         "seen": [entry.id for entry in capture.detections]})
+            height = item.size[2] if item.size is not None else default
+            return _Target(item.x, item.y, item.z, item.yaw, height, item)
+        item = (nearest(capture, pose["x"], pose["y"], kind="block", radius=self.config.perception.match_radius_m)
+                if capture is not None else None)
+        return _Target(pose["x"], pose["y"], self._table_z(), pose.get("yaw"), default, item)
+
+    def _pick(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
+        """``manipulation.pick``: locate, plan, open, approach, descend, grasp, verify the grip, lift, verify."""
+        object_id, pose = self._position_arguments(arguments, "object_id", frozenset({"x", "y", "yaw"}))
+        chain = self._chain()
+        _unsent(self.session.ensure_connected)
+        phases = _Phases(self._clock)
+        with phases("perceive"):
+            capture = self._capture(object_id) if object_id is not None else self._look()
+            target = self._pick_target(capture, object_id, pose)
+        before = _unsent(self.session.read)
+        with phases("plan"):
+            started = time.perf_counter()
+            grasp_z = target.z + target.height / 2.0
+            geometry = chain.grasp
+            approach, descend, lift = self._plan(chain, before, [
+                (target.x, target.y, grasp_z + geometry.approach_height_m), (target.x, target.y, grasp_z),
+                (target.x, target.y, grasp_z + geometry.lift_height_m)], target.yaw)
+            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                    "waypoints": len(approach) + len(descend) + len(lift)}
+        frame = chain.frame
+        extra: dict[str, Any] = {"object_id": object_id or (target.detection.id if target.detection else None),
+                                 "target": target.pose(frame), "plan": plan,
+                                 "perception_before": self._record(target.detection, capture) if capture else None}
+        counter: list[int] = [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
+        positions = dict(before)
+        try:
+            with phases("open"):
+                if self.config.gripper.state(positions[self.config.gripper.joint]) != "open":
+                    positions = self._open(call, positions, counter, leg)
+            with phases("approach"):
+                positions = self._follow(call, positions, approach, counter, leg)
+            with phases("descend"):
+                positions = self._follow(call, positions, descend, counter, leg)
+            with phases("grasp"):
+                positions, reached_command = self._close_jaws(call, positions, counter, leg)
+            with phases("verify_grip"):
+                positions, grip, verdict = self._judge_grip(call, positions, reached_command)
+            if verdict is not None:
+                return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
+            with phases("lift"):
+                positions = self._follow(call, positions, lift, counter, leg)
+            with phases("verify"):
+                positions = self._after_send(self.session.read)
+                grip = self._grip(positions)
+                after = self._look_for(extra["object_id"])
+                lifted, seen = self._lifted(after, target, extra["object_id"])
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
+        extra["perception_after"] = {"object_lifted": lifted, "object": self._record(seen, after) if after else None,
+                                     "counts": scene_counts(after, self.config.perception) if after else None}
+        if not grip["held"]:
+            return self._pick_failed(call_id, REASON_SLIPPED, before, positions, grip, phases, extra)
+        if lifted is False:
+            return self._pick_failed(call_id, REASON_PERCEPTION_DISAGREES, before, positions, grip, phases, extra)
+        self.session.held_object = extra["object_id"]
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence={
+            "arm": self._state(positions), "arm_before": self._state(before), "object_held": True, "grip": grip,
+            **extra, **phases.evidence(), "effect_applied": True,
+        })
+
+    def _pick_failed(self, call_id: str, reason: str, before: Mapping[str, float], positions: Mapping[str, float],
+                     grip: Mapping[str, Any], phases: _Phases, extra: Mapping[str, Any]) -> CallResult:
+        """A pick that ended still and holds nothing (or not what the camera sees): failed, with what was read."""
+        self.session.held_object = None
+        return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason), evidence={
+            "reason_code": reason, "arm": self._state(positions), "arm_before": self._state(before),
+            "object_held": False, "grip": dict(grip), "perception_after": None, **dict(extra),
+            **phases.evidence(), "effect_applied": True,
+        })
+
+    def _lifted(self, capture: Capture | None, target: _Target, object_id: str | None
+                ) -> tuple[bool | None, Detection | None]:
+        """Whether the camera sees the object off the table: True, False (still resting there) or None (unseen)."""
+        if capture is None:
+            return None, None
+        settings = self.config.perception
+        item = find(capture, object_id) if object_id else None
+        if item is None:
+            item = nearest(capture, target.x, target.y, kind="block", radius=settings.match_radius_m)
+            if item is not None and on_table(item, settings):
+                return False, item
+            return None, item
+        if not capture.camera.get("height_observed") or not item.height_known:
+            return None, item
+        return not on_table(item, settings), item
+
+    def _place_target(self, capture: Capture | None, container_id: str | None, pose: Mapping[str, float],
+                      held: Detection | None) -> _Target:
+        geometry = self._chain().grasp
+        height = held.size[2] if held is not None and held.size is not None else geometry.default_object_height_m
+        if container_id is not None:
+            if capture is None:
+                raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"container_id": container_id})
+            item = find(capture, container_id)
+            if item is None or item.kind != "container":
+                raise _Refused(REASON_CONTAINER_NOT_FOUND, {"container_id": container_id,
+                                                            "seen": [entry.id for entry in capture.detections]})
+            rim = item.z + (item.size[2] if item.size is not None else 0.0)
+            return _Target(item.x, item.y, rim, item.yaw, height, item)
+        return _Target(pose["x"], pose["y"], self._table_z(), None, height, None)
+
+    def _place(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
+        """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify."""
+        container_id, pose = self._position_arguments(arguments, "container_id", frozenset({"x", "y"}))
+        chain = self._chain()
+        _unsent(self.session.ensure_connected)
+        before = _unsent(self.session.read)
+        held_grip = self._grip(before)
+        if not held_grip["held"]:
+            raise _Refused(REASON_NOTHING_HELD, {"grip": held_grip})
+        phases = _Phases(self._clock)
+        held_id = getattr(self.session, "held_object", None)
+        with phases("perceive"):
+            capture = self._capture(container_id) if container_id is not None else self._look()
+            held = find(capture, held_id) if capture is not None and held_id else None
+            target = self._place_target(capture, container_id, pose, held)
+        with phases("plan"):
+            started = time.perf_counter()
+            release_z = target.z + chain.grasp.place_clearance_m + target.height / 2.0
+            approach, descend, retreat = self._plan(chain, before, [
+                (target.x, target.y, release_z + chain.grasp.approach_height_m), (target.x, target.y, release_z),
+                (target.x, target.y, release_z + chain.grasp.approach_height_m)], None)
+            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
+                    "waypoints": len(approach) + len(descend) + len(retreat)}
+        extra: dict[str, Any] = {"container_id": container_id, "object_id": held_id,
+                                 "target": target.pose(chain.frame), "plan": plan,
+                                 "perception_before": self._record(target.detection, capture) if capture else None}
+        counter: list[int] = [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
+        positions = dict(before)
+        try:
+            with phases("approach"):
+                positions = self._follow(call, positions, approach, counter, leg)
+            with phases("descend"):
+                positions = self._follow(call, positions, descend, counter, leg)
+                still_held = self._grip(positions)
+            if not still_held["held"]:
+                # It slipped out on the way: nothing to release, and the camera need not be asked.
+                self.session.held_object = None
+                return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_SLIPPED), evidence={
+                    "reason_code": REASON_SLIPPED, "arm": self._state(positions), "arm_before": self._state(before),
+                    "grip": still_held, "released": False, "object_held": False, "perception_after": None,
+                    **extra, **phases.evidence(), "effect_applied": True})
+            with phases("release"):
+                positions = self._open(call, positions, counter, leg)
+            with phases("verify_release"):
+                grip = self._grip(positions)
+            with phases("retreat"):
+                positions = self._follow(call, positions, retreat, counter, leg)
+            with phases("verify"):
+                after = self._look_for(held_id, container_id)
+                inside, seen, container = self._placed(after, target, container_id, held_id)
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
+        self.session.held_object = None if not grip["held"] else held_id
+        key = "object_in_container" if container_id is not None else "object_at_target"
+        extra["perception_after"] = {key: inside, "object": self._record(seen, after) if after else None,
+                                     "container": self._record(container, after) if after else None,
+                                     "counts": scene_counts(after, self.config.perception) if after else None}
+        evidence = {"arm": self._state(positions), "arm_before": self._state(before), "grip": grip,
+                    "released": not grip["held"], "object_held": grip["held"], **extra, **phases.evidence(),
+                    "effect_applied": True}
+        if grip["held"]:
+            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_NOT_RELEASED),
+                              evidence={**evidence, "reason_code": REASON_NOT_RELEASED})
+        if container_id is not None and inside is not True:
+            reason = REASON_PLACEMENT_UNOBSERVED if inside is None else REASON_NOT_IN_CONTAINER
+            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason),
+                              evidence={**evidence, "reason_code": reason})
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
+
+    def _placed(self, capture: Capture | None, target: _Target, container_id: str | None, held_id: str | None
+                ) -> tuple[bool | None, Detection | None, Detection | None]:
+        """After the release: whether the camera sees the object inside the container (or at the table target)."""
+        if capture is None:
+            return None, None, None
+        settings = self.config.perception
+        item = find(capture, held_id) if held_id else None
+        if item is None:
+            item = nearest(capture, target.x, target.y, kind="block", radius=settings.match_radius_m * 2)
+        if container_id is None:
+            if item is None:
+                return None, None, None
+            close = math.hypot(item.x - target.x, item.y - target.y) <= settings.match_radius_m
+            return close and on_table(item, settings), item, None
+        container = find(capture, container_id)
+        if item is None or container is None:
+            # Either one unseen: whether it is inside is not known.
+            return None, item, container
+        holder = container_holding(item, capture.detections)
+        return holder is not None and holder.id == container_id, item, container
 
     # -- teaching ------------------------------------------------------------------
 

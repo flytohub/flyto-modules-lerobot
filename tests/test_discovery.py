@@ -1,7 +1,8 @@
 """Resource discovery: a configured arm is reported from its configuration, never by moving or connecting it.
 
 Connecting a LeRobot follower configures its motors with torque briefly off,
-so discovery never connects, and the pack reports no telemetry. The manifest carries the arm's own
+so discovery never connects; its telemetry sampler reads only an arm already connected
+(``test_faults_and_telemetry.py``). The manifest carries the arm's own
 limits and taught poses as the move's bounds -- configuration, not code.
 """
 
@@ -64,8 +65,8 @@ def test_a_configured_arm_is_one_manifest_and_nothing_connects(configured, facto
     assert manifest["deployment_mode"] == "real"
     assert manifest["adapter"]["adapter_id"] == ADAPTER_ID and manifest["module_pack"] == MODULE_PACK
     assert manifest["capability_ids"] == list(CAPABILITY_IDS)
-    assert manifest["telemetry_channels"] == []
-    assert not hasattr(discovery.discover_resource_manifests, "telemetry_sampler")
+    assert [row["channel_id"] for row in manifest["telemetry_channels"]] == [
+        "joint_positions", "gripper", "object_held", "arm_fault"]
 
 
 def test_the_move_bounds_are_the_arms_own_limits_and_taught_poses(configured, config_data):

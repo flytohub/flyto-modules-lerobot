@@ -81,7 +81,8 @@ def test_a_core_without_contracts_never_gets_a_step_that_moves_the_arm_or_writes
     """Without a contract Cloud would grade an arm move or a pose write by a floor no one wrote for it."""
     with caplog.at_level(logging.WARNING):
         registered = built(contracts=False)
-    assert list(registered) == [MANIPULATION_STATE.module_id]
+    # Only what moves nothing and writes nothing: reading the arm and locating objects.
+    assert list(registered) == [MANIPULATION_STATE.module_id, "perception.locate_objects"]
     assert MOVE_JOINTS.module_id in caplog.text and MARK_POSE.module_id in caplog.text
 
 
