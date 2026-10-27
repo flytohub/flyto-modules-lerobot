@@ -141,6 +141,8 @@ REASON_NOT_IN_CONTAINER = "object_not_in_container"
 REASON_PLACEMENT_UNOBSERVED = "placement_not_observed"
 #: The gripper says held, but the camera sees the object still on the table.
 REASON_PERCEPTION_DISAGREES = "perception_disagrees"
+#: The gripper says held, but the camera on the arm does not see an object between the jaws.
+REASON_NOT_SEEN_IN_JAWS = "object_not_seen_in_jaws"
 #: The arm config names no camera, or the camera gave no frame; nothing was sent.
 REASON_PERCEPTION_UNAVAILABLE = "perception_unavailable"
 #: The arm config declares no kinematic chain usable on this arm -- none, or, on hardware, one whose joint
@@ -184,6 +186,7 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_NOTHING_HELD: "夾爪目前沒有夾著物品，沒有可放置的東西，沒有送出任何動作指令。",
         REASON_NOT_IN_CONTAINER: "放開後攝影機沒有看到物品在容器內。",
         REASON_PERCEPTION_DISAGREES: "夾爪判定夾住，但攝影機看到物品仍在桌面上。",
+        REASON_NOT_SEEN_IN_JAWS: "夾爪判定夾住，但手臂上的攝影機沒有看到夾爪之間有物品。",
         REASON_PLACEMENT_UNOBSERVED: "放開後攝影機沒有看到物品，無法確認是否放進容器。",
         REASON_PERCEPTION_UNAVAILABLE: "沒有可用的攝影機畫面，沒有送出任何動作指令。",
         REASON_KINEMATICS_UNAVAILABLE: (
@@ -219,6 +222,7 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_NOTHING_HELD: "The gripper holds nothing to place; nothing was sent",
         REASON_NOT_IN_CONTAINER: "After the release the camera does not see the object inside the container",
         REASON_PERCEPTION_DISAGREES: "The gripper reads held but the camera sees the object still on the table",
+        REASON_NOT_SEEN_IN_JAWS: "The gripper reads held but the camera on the arm sees no object between the jaws",
         REASON_PLACEMENT_UNOBSERVED: "After the release the camera did not see the object; the placement is unverified",
         REASON_PERCEPTION_UNAVAILABLE: "No camera frame is available; nothing was sent",
         REASON_KINEMATICS_UNAVAILABLE: (

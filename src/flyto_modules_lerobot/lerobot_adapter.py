@@ -41,8 +41,15 @@ command every body joint to the position it reads now, torque on, and report
 ``stop_requested`` -- never a confirmed physical stop. A physical 12 V cut-off
 switch on the arm's supply is required for any real run.
 
-A move is sent as waypoints no further apart than ``motion.max_step``, so a
-stop or cancel takes effect within one step. Which capability does what is
+A motion is one time-optimal joint trajectory (``trajectory.py``): every
+joint within its own servo's speed and acceleration, all joints in step,
+through via points without stopping, sent one set point per control period
+(``motion.step_interval_s``), no two further apart than ``motion.max_step``.
+Each period checks for a stop before sending and reads the arm after (the
+fault check), so a stop or cancel takes effect within one period
+(``stop_to_hold_ms``); nothing waits for a set point to be reached. A motion
+ends when the arm has converged -- within tolerance and still -- never
+after a fixed wait. Which capability does what is
 read from ``capabilities.SPECS`` (the row's ``action``); which joints exist,
 their limits, the gripper's values and the poses are the arm's config.
 
@@ -113,6 +120,7 @@ from .capabilities import (
     REASON_NOT_IN_CONTAINER,
     REASON_NOT_REACHED,
     REASON_NOT_RELEASED,
+    REASON_NOT_SEEN_IN_JAWS,
     REASON_NOTHING_HELD,
     REASON_OBJECT_NOT_FOUND,
     REASON_OUTSIDE_LIMITS,
@@ -144,15 +152,21 @@ from .perception import (
     CameraUnavailable,
     Capture,
     Detection,
+    Spot,
+    arm_hides,
     build_camera,
+    camera_geometry,
     container_holding,
     find,
     locate_result,
     nearest,
     object_record,
     on_table,
+    resting_inside,
     scene_counts,
 )
+from .trajectory import Trajectory, motion_limits
+from .trajectory import plan as plan_trajectory
 
 OBSERVATION_SCHEMA = "flyto.lerobot.observation.v1"
 OBSERVATION_PHASES = frozenset({"before", "after", "post_stop", "settled"})
@@ -171,6 +185,8 @@ _GRIPPER_ACTIONS = frozenset({"grasp", "release", "pick", "place"})
 # How an interrupted move ends, by why it was interrupted.
 _STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, REASON_DEADLINE: OUTCOME_TIMEOUT}
 _DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)
+# The most of a spot a frame may show covered by the arm and still count as seeing it (edge pixels).
+_MAX_COVERED = 0.02
 # What a stop measurement says when it could not measure.
 _UNMEASURED: Mapping[str, Any] = {"stop_measured": False, "stop_to_still_ms": None, "overshoot": None}
 
@@ -263,16 +279,26 @@ class _Phases:
         self._clock = clock
         self.started = clock()
         self.rows: list[dict[str, Any]] = []
+        self._current: tuple[str, float] = ("", self.started)
 
     @contextmanager
     def __call__(self, name: str) -> Iterator[None]:
         """Time one phase; it is recorded even when it ends the call."""
-        begun = self._clock()
+        self._current = (name, self._clock())
         try:
             yield
         finally:
-            self.rows.append({"phase": name, "started_ms": round((begun - self.started) * 1000.0, 3),
-                              "ms": round((self._clock() - begun) * 1000.0, 3)})
+            self._close()
+
+    def switch(self, name: str) -> None:
+        """End the phase running now and start ``name`` in its place (one motion that spans two phases)."""
+        self._close()
+        self._current = (name, self._clock())
+
+    def _close(self) -> None:
+        name, begun = self._current
+        self.rows.append({"phase": name, "started_ms": round((begun - self.started) * 1000.0, 3),
+                          "ms": round((self._clock() - begun) * 1000.0, 3)})
 
     def evidence(self) -> dict[str, Any]:
         """``phases`` and ``latency_ms`` (each phase and the total)."""
@@ -427,6 +453,9 @@ class LeRobotArmAdapter:
         holding = positions is not None
         evidence: dict[str, Any] = {"reason_code": reason, "stop_requested": True, "stop_confirmed": False,
                                     "holding": holding, "effect_applied": None, **_UNMEASURED}
+        if call.stop_requested_at is not None and holding:
+            # From the stop request to the hold being on the wire: at most one control period plus one exchange.
+            evidence["stop_to_hold_ms"] = round(max(0.0, self._clock() - call.stop_requested_at) * 1000.0, 1)
         if positions is not None:
             evidence["arm"] = self._state(positions)
             evidence.update(self._stop_measurement(call, positions, self._clock(), start, target))
@@ -545,6 +574,8 @@ class LeRobotArmAdapter:
         if capture is not None:
             observation.update(scene_counts(capture, self.config.perception))
             observation["perception_source"] = capture.source
+            # The camera is part of this device when it is on the arm: the counts are the arm's own word.
+            observation["camera_on_arm"] = self._mounted
         return observation
 
     def served_identity(self) -> dict[str, str]:
@@ -626,53 +657,120 @@ class LeRobotArmAdapter:
         except (ArmUnreachable, CommandLost, NotCalibrated, MotorsMismatch) as error:
             raise _Lost(REASON_EFFECT_UNKNOWN) from error
 
-    def _drive(self, call: _Call, start: Mapping[str, float], target: Mapping[str, float],
-               counter: list[int]) -> dict[str, float]:
-        """Send ``target`` as waypoints no more than ``max_step`` apart; the reading after the last."""
-        motion = self.config.motion
-        span = max(abs(target[motor] - start[motor]) for motor in target)
-        steps = max(1, math.ceil(span / motion.max_step))
-        positions = dict(start)
-        for index in range(1, steps + 1):
+    def _stream(self, call: _Call, trajectory: Trajectory, counter: list[int], *,
+                marks: Sequence[tuple[float, Callable[[], None]]] = (),
+                watch: Callable[[float, dict[str, float]], bool] | None = None,
+                ) -> tuple[dict[str, float], float | None]:
+        """Send the trajectory's set points, one per control period; ``(last reading, when ``watch`` stopped it)``.
+
+        Each period: check for a stop, send the set point, read the arm (the
+        fault check: LeRobot's protection trips on a read), then wait out the
+        rest of the period. Nothing waits for the arm to reach a set point, so
+        a stop or cancel is acted on within one period. ``marks`` run once the
+        set points pass their time; ``watch`` sees every reading, and when it
+        says so the stream ends there (the caller brakes or acts).
+        """
+        period = self.config.motion.step_interval_s
+        pending = sorted(marks, key=lambda mark: mark[0])
+        positions: dict[str, float] = {}
+        began = self._clock()
+        for tick, (at, setpoint) in enumerate(trajectory.setpoints(), 1):
             self._check(call)
-            waypoint = {motor: start[motor] + (target[motor] - start[motor]) * index / steps for motor in target}
             counter[0] += 1
-            self._after_send(lambda waypoint=waypoint: self.session.command(waypoint))
-            self._sleep(motion.step_interval_s)
+            self._after_send(lambda setpoint=setpoint: self.session.command(setpoint))
             positions = self._after_send(self.session.read)
+            while pending and pending[0][0] <= at:
+                pending.pop(0)[1]()
+            if watch is not None and watch(at, positions):
+                return positions, at
+            self._sleep(max(0.0, began + tick * period - self._clock()))
+        for _at, mark in pending:
+            mark()
+        return positions, None
+
+    def _brake(self, call: _Call, trajectory: Trajectory, at: float, counter: list[int]) -> dict[str, float]:
+        """Bring the path to rest from ``at`` along the same path, as hard as each servo may brake."""
+        period = self.config.motion.step_interval_s
+        positions: dict[str, float] = {}
+        began = self._clock()
+        for tick, setpoint in enumerate(trajectory.stopping(at), 1):
+            self._check(call)
+            counter[0] += 1
+            self._after_send(lambda setpoint=setpoint: self.session.command(setpoint))
+            positions = self._after_send(self.session.read)
+            self._sleep(max(0.0, began + tick * period - self._clock()))
         return positions
 
-    def _settle(self, call: _Call, positions: dict[str, float], target: Mapping[str, float], *,
-                tolerance: float, accept_still: bool) -> tuple[dict[str, float], bool]:
-        """Wait for the target, or for the arm to stop moving; ``(last reading, ended as accepted)``.
+    def _converge(self, call: _Call, positions: dict[str, float], target: Mapping[str, float], *,
+                  tolerance: float, accept_still: bool) -> tuple[dict[str, float], bool]:
+        """Read until the arm has converged or stopped; ``(last reading, ended as accepted)``.
 
-        A move or a release is accepted only at the target. A grasp is also
-        accepted when the gripper stopped closing (an object is in the way);
-        still moving at the timeout is never accepted.
+        Converged: every motor within ``tolerance`` of the target *and* still
+        (it moved no more than ``motion.still_drift`` since the reading
+        before, one ``motion.poll_interval_s`` earlier). A reading inside the
+        tolerance that is still moving is not an arrival. Still but short of
+        the target is accepted only for a grasp (an object is in the way).
+        ``motion.settle_timeout_s`` bounds a servo that never converges; it is
+        never waited out by a servo that does.
         """
         motion = self.config.motion
         started = self._clock()
+        previous = positions
         while True:
             self._check(call)
-            if all(abs(positions[motor] - value) <= tolerance for motor, value in target.items()):
-                return positions, True
             if self._clock() - started > motion.settle_timeout_s:
-                return positions, False
+                return previous, False
             self._sleep(motion.poll_interval_s)
             current = self._after_send(self.session.read)
-            still = all(abs(current[motor] - positions[motor]) <= motion.still_drift for motor in target)
-            positions = current
+            still = all(abs(current[motor] - previous[motor]) <= motion.still_drift for motor in target)
             if still:
-                return positions, accept_still
+                within = all(abs(current[motor] - value) <= tolerance for motor, value in target.items())
+                return current, within or accept_still
+            previous = current
+
+    def _move(self, call: _Call, start: Mapping[str, float], vias: Sequence[Mapping[str, float]],
+              counter: list[int], leg: dict[str, Any], *, tolerance: float, accept_still: bool = False,
+              phases: _Phases | None = None, via_phases: Mapping[int, str] | None = None,
+              watch: Callable[[dict[str, float]], bool] | None = None, watch_from: int = 0,
+              ) -> tuple[dict[str, float], bool, bool]:
+        """One continuous motion through ``vias``: ``(last reading, accepted, stopped early by watch)``.
+
+        The whole motion is one time-optimal trajectory (``trajectory.plan``)
+        that comes to rest only at its last via point, where the arm then
+        converges. ``via_phases`` switches the call's phase as the set points
+        pass a via point. ``watch``, armed once the set points pass via point
+        ``watch_from``, stops the motion early: it brakes along the same path
+        and the motion ends where it came to rest.
+        """
+        # Every via point names every motor the motion turns; one it does not name stays where it was.
+        motors = tuple(dict.fromkeys(motor for via in vias for motor in via))
+        running = {motor: float(start[motor]) for motor in motors}
+        points = []
+        for via in vias:
+            running = {**running, **{motor: float(value) for motor, value in via.items()}}
+            points.append(dict(running))
+        trajectory = plan_trajectory(start, points, motion_limits(self.config))
+        leg["start"], leg["target"] = {motor: start[motor] for motor in motors}, dict(points[-1])
+        marks = [(trajectory.via_times[index], (lambda name=name: phases.switch(name)))
+                 for index, name in (via_phases or {}).items() if phases is not None]
+        armed = trajectory.via_times[watch_from] if watch is not None else math.inf
+        seen = None if watch is None else (lambda at, reading: at >= armed and watch(reading))
+        positions, stopped = self._stream(call, trajectory, counter, marks=marks, watch=seen)
+        if stopped is not None:
+            return self._brake(call, trajectory, stopped, counter), True, True
+        positions, accepted = self._converge(call, positions, points[-1], tolerance=tolerance,
+                                             accept_still=accept_still)
+        return positions, accepted, False
 
     def _run(self, call_id: str, call: _Call, target: Mapping[str, float], *, tolerance: float,
              accept_still: bool) -> tuple[CallResult | None, dict[str, float], dict[str, float], bool]:
-        """Read, drive, settle. ``(result if it ended early, before, after, reached)``."""
+        """Read, move, converge. ``(result if it ended early, before, after, reached)``."""
         before = _unsent(self.session.read)
         counter = [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(target)}
         try:
-            after = self._drive(call, before, target, counter)
-            after, reached = self._settle(call, after, target, tolerance=tolerance, accept_still=accept_still)
+            after, reached, _early = self._move(call, before, [target], counter, leg, tolerance=tolerance,
+                                                accept_still=accept_still)
         except _Interrupted as interrupted:
             return self._interrupted(call_id, call, interrupted.reason, before, target), before, before, False
         except _Lost as lost:
@@ -788,57 +886,96 @@ class LeRobotArmAdapter:
         """The gripper position of an ``arm`` state, as a reading."""
         return {self.config.gripper.joint: float(state["gripper"]["position"])}
 
-    def _close(self, call: _Call, start: Mapping[str, float], counter: list[int],
-               leg: dict[str, Any]) -> tuple[dict[str, float], dict[str, Any], str | None, bool]:
+    def _close(self, call: _Call, start: Mapping[str, float], counter: list[int], leg: dict[str, Any],
+               phases: _Phases | None = None) -> tuple[dict[str, float], dict[str, Any], str | None, bool]:
         """Close the gripper and judge it: ``(reading, grip, why it holds nothing or None, reached closed)``.
 
-        Fully closed is ``no_object_held``. Stopped short, the jaws must stay
-        put for ``gripper.hold_samples`` readings: creeping on toward closed by
-        more than ``motion.still_drift`` is ``object_slipped``; a signature
-        that does not show a held object is ``no_object_held``.
+        The jaws close on a trajectory at the gripper servo's speed. Once they
+        stop short of their set point (contact), the closed value is
+        commanded at once: the squeeze is the servo's own torque limit. The
+        signature is then judged reading by reading (:meth:`_judge_grip`).
+        With the camera on the arm, a grip the signature confirms must also
+        show an object between the jaws in the camera's image
+        (``object_not_seen_in_jaws`` otherwise; ``grip.camera_sees_object``).
         """
-        positions, reached_command = self._close_jaws(call, start, counter, leg)
-        positions, grip, verdict = self._judge_grip(call, positions, reached_command)
-        return positions, grip, verdict, reached_command
-
-    def _close_jaws(self, call: _Call, start: Mapping[str, float], counter: list[int],
-                    leg: dict[str, Any]) -> tuple[dict[str, float], bool]:
-        """Command the gripper closed and wait until it is closed or stopped; ``(reading, reached closed)``."""
         gripper = self.config.gripper
         target = {gripper.joint: gripper.closed}
         leg["start"], leg["target"] = dict(start), target
-        positions = self._drive(call, start, target, counter)
-        positions, accepted = self._settle(call, positions, target, tolerance=gripper.tolerance, accept_still=True)
-        if not accepted:
-            raise _ShortOfTarget(positions)
-        return positions, abs(positions[gripper.joint] - gripper.closed) <= gripper.tolerance
+        trajectory = plan_trajectory(start, [target], motion_limits(self.config))
+        last = [float(start[gripper.joint])]
+        moved = [False]
 
-    def _judge_grip(self, call: _Call, positions: dict[str, float],
-                    reached_command: bool) -> tuple[dict[str, float], dict[str, Any], str | None]:
-        """The hold window after closing: ``(last reading, grip, why it holds nothing or None)``."""
+        def touching(at: float, reading: dict[str, float]) -> bool:
+            position = reading[gripper.joint]
+            drift, last[0] = abs(position - last[0]), position
+            moved[0] = moved[0] or abs(position - start[gripper.joint]) > self.config.motion.still_drift
+            ahead = abs(trajectory.at(at)[gripper.joint] - position) > gripper.tolerance
+            return moved[0] and drift <= self.config.motion.still_drift and ahead
+
+        positions, contact = self._stream(call, trajectory, counter, watch=touching)
+        if contact is not None:
+            counter[0] += 1
+            self._after_send(lambda: self.session.command(target))
+        positions, grip, verdict, closed = self._judge_grip(call, positions, phases)
+        if verdict is None and self._mounted:
+            # The camera rides on the fixed jaw: a held object sits between the jaws in its image.
+            look = self._look()
+            seen = None if look is None else bool(look.camera.get("in_hand"))
+            grip = {**grip, "camera_sees_object": seen}
+            if seen is False:
+                verdict = REASON_NOT_SEEN_IN_JAWS
+        return positions, grip, verdict, closed
+
+    def _judge_grip(self, call: _Call, positions: dict[str, float], phases: _Phases | None
+                    ) -> tuple[dict[str, float], dict[str, Any], str | None, bool]:
+        """Read the gripper until its signature is settled: ``(reading, grip, why it holds nothing or None, closed)``.
+
+        Fully closed and still is ``no_object_held``. Stopped short, the
+        signature must show a held object on ``gripper.hold_samples``
+        readings in a row, counted from the first still one; creeping on
+        toward closed by more than ``motion.still_drift`` after that is
+        ``object_slipped``, and a signature that shows no held object on as
+        many readings is ``no_object_held``. Still moving at
+        ``motion.settle_timeout_s`` is short of target.
+        """
         gripper, motion = self.config.gripper, self.config.motion
-        if reached_command:
-            return positions, self._grip(positions), REASON_NO_OBJECT
-        contact = gripper.gap(positions[gripper.joint])
-        creep = 0.0
-        for _ in range(gripper.hold_samples):
+        started = self._clock()
+        previous = positions
+        contact: float | None = None
+        held = unheld = 0
+        while True:
             self._check(call)
+            if self._clock() - started > motion.settle_timeout_s:
+                raise _ShortOfTarget(previous)
             self._sleep(motion.poll_interval_s)
-            positions = self._after_send(self.session.read)
-            creep = max(creep, contact - gripper.gap(positions[gripper.joint]))
-        grip = self._grip(positions)
-        if creep > motion.still_drift:
-            return positions, grip, REASON_SLIPPED
-        return positions, grip, None if grip["held"] else REASON_NO_OBJECT
+            current = self._after_send(self.session.read)
+            position = current[gripper.joint]
+            still = abs(position - previous[gripper.joint]) <= motion.still_drift
+            previous = current
+            if still and abs(position - gripper.closed) <= gripper.tolerance:
+                return current, self._grip(current), REASON_NO_OBJECT, True
+            if contact is not None and contact - gripper.gap(position) > motion.still_drift:
+                return current, self._grip(current), REASON_SLIPPED, False
+            if not still:
+                held = unheld = 0
+                continue
+            if contact is None:
+                contact = gripper.gap(position)
+                if phases is not None:
+                    phases.switch("verify_grip")
+            grip = self._grip(current)
+            held, unheld = (held + 1, 0) if grip["held"] else (0, unheld + 1)
+            if held >= gripper.hold_samples:
+                return current, grip, None, False
+            if unheld >= gripper.hold_samples:
+                return current, grip, REASON_NO_OBJECT, False
 
     def _open(self, call: _Call, start: Mapping[str, float], counter: list[int],
               leg: dict[str, Any]) -> dict[str, float]:
-        """Open the gripper to its open value and wait until it is there."""
+        """Open the gripper to its open value at the servo's speed and wait until it has converged there."""
         gripper = self.config.gripper
         target = {gripper.joint: gripper.open}
-        leg["start"], leg["target"] = dict(start), target
-        positions = self._drive(call, start, target, counter)
-        positions, reached = self._settle(call, positions, target, tolerance=gripper.tolerance, accept_still=False)
+        positions, reached, _early = self._move(call, start, [target], counter, leg, tolerance=gripper.tolerance)
         if not reached:
             raise _ShortOfTarget(positions)
         return positions
@@ -851,15 +988,52 @@ class LeRobotArmAdapter:
             self.session.camera = build_camera(self.config)
         return self.session.camera
 
+    @property
+    def _mounted(self) -> bool:
+        """Whether the arm's camera is on the arm (eye-in-hand) rather than fixed over the table."""
+        perception = self.config.perception
+        return perception is not None and getattr(perception.camera, "mount", None) is not None
+
+    @property
+    def _view_phase(self) -> str:
+        """The phase that moves the arm for a verifying look: to the look pose (eye-in-hand) or clear of the view."""
+        return "look_pose" if self._mounted else "clear_view"
+
     def _look(self) -> Capture | None:
-        """One capture, or None when there is no camera or it gave no frame."""
+        """One capture, or None when there is no camera or it gave no frame.
+
+        A camera on the arm is placed by the arm's chain at the joints read
+        for the capture; that reading is recorded with it.
+        """
         camera = self._camera()
         if camera is None:
             return None
         try:
-            return camera.capture()
-        except (CameraUnavailable, OSError, ImportError):
+            joints = self.session.read() if self._mounted else None
+            capture = camera.capture(joints)
+        except (CameraUnavailable, OSError, ImportError, *_DRIVER_ERRORS):
             return None
+        self.session.captures.append((self._clock(), capture))
+        return capture
+
+    def _recent(self, *ids: str | None) -> Capture | None:
+        """The newest frame young enough to plan by (``perception.reuse_within_s``) that saw all of ``ids`` whole.
+
+        Only a look that plans may take it; a look that verifies always takes
+        a new frame. Positions are in the table frame, so a frame from a
+        camera on the arm serves wherever the arm is now; what makes it stale
+        is only its age.
+        """
+        perception = self.config.perception
+        if perception is None:
+            return None
+        now = self._clock()
+        for taken_at, capture in reversed(self.session.captures):
+            if now - taken_at > perception.reuse_within_s:
+                return None
+            if all((item := find(capture, wanted)) is not None and item.height_known for wanted in ids if wanted):
+                return capture
+        return None
 
     def _look_for(self, *ids: str | None) -> Capture | None:
         """Up to ``perception.max_captures`` looks, until every named object is seen; the last capture."""
@@ -872,9 +1046,18 @@ class LeRobotArmAdapter:
                 return capture
         return capture
 
-    def _capture(self, *ids: str | None) -> Capture:
-        """A capture (looking again for named objects it missed); refused (nothing sent) without one."""
-        capture = self._look_for(*ids)
+    def _capture(self, *ids: str | None, plan: bool = False) -> Capture:
+        """A capture; refused (nothing sent) without one.
+
+        To plan by, a young enough frame that saw the named objects whole
+        serves; failing that, a new look, and when that one sees them only in
+        part (behind the jaws or what they hold), the newest young frame that
+        saw them whole.
+        """
+        capture = (self._recent(*ids) if plan else None) or self._look_for(*ids)
+        if plan and capture is not None and any(
+                (item := find(capture, wanted)) is not None and not item.height_known for wanted in ids if wanted):
+            capture = self._recent(*ids) or capture
         if capture is None:
             raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"camera": self.config.perception is not None})
         return capture
@@ -944,30 +1127,121 @@ class LeRobotArmAdapter:
         return legs
 
     def _follow(self, call: _Call, start: Mapping[str, float], path: Sequence[Mapping[str, float]],
-                counter: list[int], leg: dict[str, Any]) -> dict[str, float]:
-        """Drive through each joint target, then settle at the last one within ``motion.tolerance``."""
-        positions = dict(start)
-        for target in path:
-            leg["start"], leg["target"] = dict(positions), dict(target)
-            positions = self._drive(call, positions, target, counter)
-        positions, reached = self._settle(call, positions, path[-1], tolerance=self.config.motion.tolerance,
-                                          accept_still=False)
+                counter: list[int], leg: dict[str, Any], *, phases: _Phases | None = None,
+                via_phases: Mapping[int, str] | None = None) -> dict[str, float]:
+        """One continuous motion through every joint target, converged at the last within ``motion.tolerance``."""
+        positions, reached, _early = self._move(call, start, path, counter, leg, tolerance=self.config.motion.tolerance,
+                                                phases=phases, via_phases=via_phases)
         if not reached:
             raise _ShortOfTarget(positions)
         return positions
 
-    def _clear_view(self, call: _Call, positions: dict[str, float], counter: list[int],
-                    leg: dict[str, Any]) -> dict[str, float]:
-        """Move to the perception's observe pose before a verifying look, so the arm does not hide the table.
-
-        Only a taught pose is driven to; without one the look is taken from where the move ended.
-        """
+    def _observe_pose(self) -> Any:
+        """The perception's taught observe pose, or None."""
         perception = self.config.perception
         name = perception.observe_pose if perception is not None else None
         pose = self.config.poses.get(name) if name else None
-        if pose is None or not pose.taught:
-            return positions
-        return self._follow(call, positions, [dict(pose.joints)], counter, leg)
+        return pose if pose is not None and pose.taught else None
+
+    def _occlusion(self) -> tuple[Any, float] | None:
+        """``(camera geometry, arm clearance)`` when the config models what the arm hides; None otherwise."""
+        perception, chain = self.config.perception, self.config.kinematics
+        if perception is None or chain is None or perception.arm_clearance_m is None:
+            return None
+        geometry = camera_geometry(perception)
+        return None if geometry is None else (geometry, perception.arm_clearance_m)
+
+    def _hidden(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> bool:
+        """Whether the arm, at these joints, hides any of ``spots`` from the camera (the occlusion model)."""
+        geometry, clearance = model
+        arm = self.config.kinematics.points(positions)
+        return any(arm_hides(geometry, arm, clearance, spot) for spot in spots)
+
+    def _over(self, seed: Mapping[str, float], x: float, y: float) -> dict[str, float] | None:
+        """Joints that hold the camera on the arm straight over ``(x, y)`` at ``perception.verify_height_m``."""
+        perception = self.config.perception
+        mount = getattr(perception.camera, "mount", None) if perception is not None else None
+        if mount is None or perception.verify_height_m is None:
+            return None
+        camera = self.config.kinematics.mounted(mount.link, mount.origin, mount.forward, mount.up)
+        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
+        solved = camera.solve((x, y, self._table_z() + perception.verify_height_m), seed, limits, yaw=None)
+        return None if solved is None else {**dict(seed), **solved}
+
+    def _away_and_look(self, call: _Call, positions: dict[str, float], path: Sequence[Mapping[str, float]],
+                       counter: list[int], leg: dict[str, Any], phases: _Phases, spots: Sequence[Spot],
+                       over: tuple[float, float] | None = None) -> tuple[dict[str, float], bool]:
+        """Drive ``path`` (a lift or a retreat), then on toward the observe pose until the camera sees ``spots``.
+
+        ``(last reading, stopped before the observe pose)``. The arm hides the
+        table from an overhead camera; whether it hides one of ``spots`` is the
+        occlusion model (``perception.arm_hides``, the arm's links cast along
+        the camera's rays). Once ``path`` is done, the motion stops -- braking
+        along the same path -- as soon as the model says every spot is clear,
+        and does not move at all past ``path`` when it is clear already.
+        Without a model the arm goes all the way to the observe pose; without
+        an observe pose the look is taken where ``path`` ends. Stopping early
+        never settles a verification by itself: the caller's look must show
+        every spot free of the arm in its own frame (:meth:`_shows`) and give a
+        settled answer, or the arm goes on to the observe pose and looks again.
+        """
+        above = self._over(path[-1], *over) if over is not None else None
+        if above is not None:
+            # A camera on the arm looks straight down at what it verifies: no slant to hide how high things rest.
+            return self._follow(call, positions, [*path, above], counter, leg, phases=phases,
+                                via_phases={len(path) - 1: self._view_phase}), False
+        pose = self._observe_pose()
+        if pose is None:
+            return self._follow(call, positions, path, counter, leg), False
+        model = self._occlusion()
+        watch = None if model is None else (lambda reading: not self._hidden(model, reading, spots))
+        tolerance = self.config.motion.tolerance
+        positions, reached, early = self._move(call, positions, [*path, dict(pose.joints)], counter, leg,
+                                               tolerance=tolerance, phases=phases,
+                                               via_phases={len(path) - 1: self._view_phase},
+                                               watch=watch, watch_from=len(path) - 1)
+        if early and not self._hidden(model, positions, spots):
+            return positions, True
+        if early:
+            positions = self._follow(call, positions, [dict(pose.joints)], counter, leg)
+        elif not reached:
+            raise _ShortOfTarget(positions)
+        return positions, False
+
+    @staticmethod
+    def _shows(capture: Capture | None, spots: Sequence[Spot]) -> bool:
+        """Whether this very frame shows every spot free of the arm (the camera's own word, not the model's)."""
+        if capture is None:
+            return False
+        for spot in spots:
+            covered = capture.covered(spot)
+            if covered is None or covered > _MAX_COVERED:
+                return False
+        return True
+
+    def _to_observe_pose(self, call: _Call, positions: dict[str, float], counter: list[int],
+                         leg: dict[str, Any]) -> dict[str, float]:
+        """The rest of the way to the observe pose, for a second look when the first one did not settle it."""
+        return self._follow(call, positions, [dict(self._observe_pose().joints)], counter, leg)
+
+    def _spots(self, capture: Capture | None, target: _Target, held_id: str | None) -> tuple[Spot, ...]:
+        """What a verifying look must see past the arm: the target, and every object the first look saw.
+
+        The contracts' evidence counts the objects on the table and in the
+        containers from a look after the call, so a look that loses any of
+        them behind the arm is not a look at the table. The object in the
+        gripper is not on the table and is left out.
+        """
+        table = self._table_z()
+
+        def spot(item: Detection | None, x: float, y: float, width: float) -> Spot:
+            if item is not None and item.size is not None:
+                return Spot(item.x, item.y, table, math.hypot(item.size[0], item.size[1]) / 2.0)
+            return Spot(x, y, table, width / 2.0 * math.sqrt(2.0))
+
+        seen = [spot(item, item.x, item.y, 0.0) for item in (capture.detections if capture is not None else ())
+                if item.id != held_id and item is not target.detection]
+        return (spot(target.detection, target.x, target.y, target.height), *seen)
 
     def _position_arguments(self, arguments: Mapping[str, Any], id_key: str,
                             pose_keys: frozenset[str]) -> tuple[str | None, dict[str, float]]:
@@ -1015,7 +1289,7 @@ class LeRobotArmAdapter:
         _unsent(self.session.ensure_connected)
         phases = _Phases(self._clock)
         with phases("perceive"):
-            capture = self._capture(object_id) if object_id is not None else self._look()
+            capture = self._capture(object_id, plan=True) if object_id is not None else self._look()
             target = self._pick_target(capture, object_id, pose)
         before = _unsent(self.session.read)
         with phases("plan"):
@@ -1041,25 +1315,39 @@ class LeRobotArmAdapter:
             with phases("approach"):
                 positions = self._follow(call, positions, approach, counter, leg)
             with phases("descend"):
+                # Converged above the target before going down to it: the servos lag their set points, and
+                # a descent begun while the arm still trails sideways lands a jaw on the object.
                 positions = self._follow(call, positions, descend, counter, leg)
             with phases("grasp"):
-                positions, reached_command = self._close_jaws(call, positions, counter, leg)
-            with phases("verify_grip"):
-                positions, grip, verdict = self._judge_grip(call, positions, reached_command)
+                positions, grip, verdict, _closed = self._close(call, positions, counter, leg, phases)
+            # What the camera on the arm saw between the jaws at the grasp, carried to the end of the call.
+            in_jaws = {key: grip[key] for key in ("camera_sees_object",) if key in grip}
             if verdict is not None:
                 return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
+            # The look must see the spot the object was taken from, and the rest of the table, past the arm.
+            spots = self._spots(capture, target, None)
             with phases("lift"):
-                positions = self._follow(call, positions, lift, counter, leg)
-            with phases("clear_view"):
-                positions = self._clear_view(call, positions, counter, leg)
+                positions, early = self._away_and_look(call, positions, lift, counter, leg, phases, spots)
             with phases("verify"):
-                positions = self._after_send(self.session.read)
-                grip = self._grip(positions)
+                # The gripper is read after the look, so a grip lost while the camera looked is not missed.
                 after = self._look_for(extra["object_id"])
                 lifted, seen = self._lifted(after, target, extra["object_id"])
+                positions = self._after_send(self.session.read)
+                grip = {**self._grip(positions), **in_jaws}
+            if early and (lifted is False or not self._shows(after, spots)):
+                # Not settled from where the arm stopped: look again from the observe pose.
+                early = False
+                with phases(f"{self._view_phase}_again"):
+                    positions = self._to_observe_pose(call, positions, counter, leg)
+                with phases("verify_again"):
+                    after = self._look_for(extra["object_id"])
+                    lifted, seen = self._lifted(after, target, extra["object_id"])
+                    positions = self._after_send(self.session.read)
+                    grip = {**self._grip(positions), **in_jaws}
         except (_Interrupted, _Lost, _ShortOfTarget) as error:
             return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
         extra["perception_after"] = {"object_lifted": lifted, "object": self._record(seen, after) if after else None,
+                                     "table_seen": self._shows(after, spots), "early_look": early,
                                      "counts": scene_counts(after, self.config.perception) if after else None}
         if not grip["held"]:
             return self._pick_failed(call_id, REASON_SLIPPED, before, positions, grip, phases, extra)
@@ -1124,7 +1412,7 @@ class LeRobotArmAdapter:
         phases = _Phases(self._clock)
         held_id = getattr(self.session, "held_object", None)
         with phases("perceive"):
-            capture = self._capture(container_id) if container_id is not None else self._look()
+            capture = self._capture(container_id, plan=True) if container_id is not None else self._look()
             held = find(capture, held_id) if capture is not None and held_id else None
             target = self._place_target(capture, container_id, pose, held)
         with phases("plan"):
@@ -1145,6 +1433,8 @@ class LeRobotArmAdapter:
             with phases("approach"):
                 positions = self._follow(call, positions, approach, counter, leg)
             with phases("descend"):
+                # Converged above the target before going down to it: the servos lag their set points, and
+                # a descent begun while the arm still trails sideways lands a jaw on the object.
                 positions = self._follow(call, positions, descend, counter, leg)
                 still_held = self._grip(positions)
             if not still_held["held"]:
@@ -1158,19 +1448,29 @@ class LeRobotArmAdapter:
                 positions = self._open(call, positions, counter, leg)
             with phases("verify_release"):
                 grip = self._grip(positions)
+            # The look must see the container, and the rest of the table, past the arm.
+            spots = self._spots(capture, target, held_id)
             with phases("retreat"):
-                positions = self._follow(call, positions, retreat, counter, leg)
-            with phases("clear_view"):
-                positions = self._clear_view(call, positions, counter, leg)
+                positions, early = self._away_and_look(call, positions, retreat, counter, leg, phases, spots,
+                                                       over=(target.x, target.y) if self._mounted else None)
             with phases("verify"):
                 after = self._look_for(held_id, container_id)
                 inside, seen, container = self._placed(after, target, container_id, held_id)
+            if early and (inside is not True or not self._shows(after, spots)):
+                # Not settled from where the arm stopped: look again from the observe pose.
+                early = False
+                with phases(f"{self._view_phase}_again"):
+                    positions = self._to_observe_pose(call, positions, counter, leg)
+                with phases("verify_again"):
+                    after = self._look_for(held_id, container_id)
+                    inside, seen, container = self._placed(after, target, container_id, held_id)
         except (_Interrupted, _Lost, _ShortOfTarget) as error:
             return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
         self.session.held_object = None if not grip["held"] else held_id
         key = "object_in_container" if container_id is not None else "object_at_target"
         extra["perception_after"] = {key: inside, "object": self._record(seen, after) if after else None,
                                      "container": self._record(container, after) if after else None,
+                                     "table_seen": self._shows(after, spots), "early_look": early,
                                      "counts": scene_counts(after, self.config.perception) if after else None}
         evidence = {"arm": self._state(positions), "arm_before": self._state(before), "grip": grip,
                     "released": not grip["held"], "object_held": grip["held"], **extra, **phases.evidence(),
@@ -1203,7 +1503,12 @@ class LeRobotArmAdapter:
             # Either one unseen: whether it is inside is not known.
             return None, item, container
         holder = container_holding(item, capture.detections)
-        return holder is not None and holder.id == container_id, item, container
+        if holder is None or holder.id != container_id:
+            return False, item, container
+        if not item.height_known:
+            # Over the container but partly hidden: whether it rests on the floor or on a wall is not known.
+            return None, item, container
+        return resting_inside(item, holder, settings), item, container
 
     # -- teaching ------------------------------------------------------------------
 

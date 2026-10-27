@@ -9,5 +9,7 @@
 - `../examples/am-arm200.json` -- the AM-ARM200 arm config (placeholder limits, untaught poses).
 - `../src/flyto_modules_lerobot/models/am-arm200/README.md` -- the vendored official AM-ARM200 URDF and meshes: source, licence, decimation, what is assumed.
 - `../NOTICE` -- third-party attribution (Apache-2.0).
-- `../examples/am-arm200-sim.json`, `../examples/am-arm200-mujoco.json` -- SIMULATION configs (in-process, MuJoCo).
+- `../examples/am-arm200-sim.json`, `../examples/am-arm200-mujoco.json` -- SIMULATION configs (in-process, MuJoCo, fixed overhead camera).
+- `../examples/am-arm200-mujoco-wrist.json` -- SIMULATION config of the arm as shipped: its own camera on the fixed jaw (eye-in-hand).
+- `../ARCHITECTURE.md#motion-trajectorypy-2026-10-28` -- how a move is timed; `#the-camera-on-the-arm-eye-in-hand-2026-10-28` -- the wrist camera.
 - `../README.md#simulation` -- running the sensing loop in simulation, the benchmark and the viewers.

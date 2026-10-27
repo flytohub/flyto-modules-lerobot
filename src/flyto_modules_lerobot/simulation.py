@@ -13,8 +13,9 @@ table, read by robot type -- never a branch on a name.
 
 The world (:class:`SimWorld`) holds:
 
-* the body joints and the gripper, each moving toward its goal at a speed
-  limit (config unit per second);
+* the body joints and the gripper, each moving toward its goal at its servo
+  class's no-load speed (``servos``), or the simulation's ``joint_speed`` /
+  ``gripper_speed`` for a config without servo classes;
 * a table with blocks and containers (positions, sizes, colours), from the
   config's ``simulation.objects``;
 * gripper physics: closing on a block within reach stops the jaws at the
@@ -51,6 +52,8 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+from .trajectory import servo_speed
 
 #: The robot type an arm config names to be served by this simulator.
 SIM_ROBOT_TYPE = "sim"
@@ -422,6 +425,10 @@ class SimWorld:
         self.positions: dict[str, float] = {name: float(start.get(name, 0.0)) for name in config.joint_names}
         self.positions[gripper.joint] = gripper.open
         self.goals = dict(self.positions)
+        # How fast each motor turns: its servo class's no-load speed when the config names one, else the
+        # simulation's own joint or gripper speed.
+        self.speeds = {name: servo_speed(config, name) or sim.joint_speed for name in config.joint_names}
+        self.speeds[gripper.joint] = servo_speed(config, gripper.joint) or sim.gripper_speed
         self.objects: dict[str, SimObject] = {
             spec.id: SimObject(spec.id, spec.kind, spec.label, spec.colour, spec.x, spec.y, sim.table_z_m,
                                spec.yaw, spec.size)
@@ -554,7 +561,7 @@ class SimWorld:
         joint = gripper.joint
         closing = self._closing()
         current, goal = self.positions[joint], self.goals[joint]
-        limit = self.sim.gripper_speed * dt
+        limit = self.speeds[joint] * dt
         moved = current + max(-limit, min(limit, goal - current))
         heading_closed = (goal - current) * closing > 0
         if self.held is not None:
@@ -595,9 +602,8 @@ class SimWorld:
             now = self.clock()
             dt = max(0.0, now - self._stepped_at)
             self._stepped_at = now
-            limit = self.sim.joint_speed * dt
             for name in self.config.joint_names:
-                current, goal = self.positions[name], self.goals[name]
+                current, goal, limit = self.positions[name], self.goals[name], self.speeds[name] * dt
                 self.positions[name] = current + max(-limit, min(limit, goal - current))
             self._step_gripper(dt)
             self._carry()

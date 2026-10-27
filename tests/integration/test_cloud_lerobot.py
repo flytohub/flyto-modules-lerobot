@@ -154,7 +154,7 @@ def test_cloud_declares_every_capability_the_manifest_states(arm_config):
     move, = [row for row in manifest["capability_contracts"] if row["capability_id"] == MOVE_JOINTS.capability_id]
     bounds = {item.name: item for item in arguments_from_json_schema(move["input_schema"])}
     assert (bounds["elbow_flex"].minimum, bounds["elbow_flex"].maximum) == (-90.0, 90.0)
-    assert set(bounds["pose"].choices) == {"ready", "fixture_pick", "tray_place"}
+    assert set(bounds["pose"].choices) == {"ready", "fixture_pick", "tray_place", "look"}
 
 
 def test_cloud_refuses_the_arm_declared_as_merely_controlled(arm_config):

@@ -24,7 +24,7 @@ def test_the_am_arm200_example_loads_as_six_joints_and_a_gripper():
         "shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_yaw", "wrist_roll",
     )
     assert config.gripper.joint == "gripper"
-    assert set(config.poses) == {"ready", "fixture_pick", "tray_place"}
+    assert set(config.poses) == {"ready", "fixture_pick", "tray_place", "look"}
     assert config.lerobot.robot_type == "so101_follower"
     assert config.lerobot.options["arm_profile"] == "am-follower-6dof"
 
@@ -51,9 +51,9 @@ def test_toml_is_read_the_same_as_json(tmp_path):
         lines += [f"{joint} = {value}" for joint, value in pose["joints"].items()]
     path = tmp_path / "arm.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    # The TOML carries every section but the servo classes and the kinematic chain.
+    # The TOML carries every section but the servo classes, the kinematic chain and the camera.
     assert load_arm_config(path) == parse_arm_config(
-        {key: value for key, value in data.items() if key not in ("servos", "kinematics")})
+        {key: value for key, value in data.items() if key not in ("servos", "kinematics", "perception")})
 
 
 def test_lerobot_is_always_told_to_keep_torque_on_disconnect():

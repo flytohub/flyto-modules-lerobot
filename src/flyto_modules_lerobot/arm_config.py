@@ -16,8 +16,9 @@ TOML file per arm, never in code:
 * ``motion`` -- step size, tolerances and timing for a move.
 * ``poses`` -- named joint targets; each says whether it was ``taught`` on
   this arm. An untaught pose is refused, never moved to.
-* ``servos`` (optional) -- each motor's servo class: torques and no-load
-  speed, with their source; a ``motion`` faster than a servo is refused.
+* ``servos`` (optional) -- each motor's servo class: torques, no-load speed
+  and acceleration, with their source. A move's trajectory keeps every joint
+  within its own servo's speed and acceleration (``trajectory.py``).
 * ``kinematics`` (optional) -- the arm's kinematic chain, for Cartesian pick
   and place (``kinematics.py``), written out or read from a robot
   description (``urdf_model.py``).
@@ -74,6 +75,7 @@ _MOTION_KEYS = frozenset({"max_step", "step_interval_s", "tolerance", "settle_ti
 _POSE_KEYS = frozenset({"taught", "joints", "notes"})
 _SERVOS_KEYS = frozenset({"classes", "joints"})
 _SERVO_CLASS_KEYS = frozenset({"voltage_v", "gear_ratio", "stall_torque_nm", "rated_torque_nm", "no_load_speed_rad_s",
+                               "max_acceleration_rad_s2",
                                "estimated", "source"})
 _LOADERS = {
     ".json": lambda text: json.loads(text),
@@ -159,6 +161,8 @@ class ServoClass:
     gear_ratio: str | None
     source: str
     estimated: tuple[str, ...]
+    # The fastest the servo changes speed (rad/s^2), None when the config does not say.
+    max_acceleration_rad_s2: float | None = None
 
 
 @dataclass(frozen=True)
@@ -359,7 +363,7 @@ def _poses(raw: Any, joints: tuple[JointLimit, ...]) -> Mapping[str, Pose]:
     return MappingProxyType(poses)
 
 
-def _servos(raw: Any, motors: tuple[str, ...], motion: MotionConfig, unit: str) -> Mapping[str, ServoClass]:
+def _servos(raw: Any, motors: tuple[str, ...]) -> Mapping[str, ServoClass]:
     """``servos``: named servo classes and which motor is which; every motor or none."""
     if raw is None:
         return MappingProxyType({})
@@ -382,6 +386,9 @@ def _servos(raw: Any, motors: tuple[str, ...], motion: MotionConfig, unit: str) 
             gear_ratio=None if ratio is None else _text(ratio, f"{where}.gear_ratio")[:32],
             source=_text(entry.get("source"), f"{where}.source")[:500],
             estimated=tuple(str(field) for field in estimated),
+            max_acceleration_rad_s2=(None if entry.get("max_acceleration_rad_s2") is None else
+                                     _positive(entry.get("max_acceleration_rad_s2"),
+                                               f"{where}.max_acceleration_rad_s2")),
         )
     assigned = _mapping(body.get("joints"), "servos.joints")
     if set(assigned) != set(motors):
@@ -390,13 +397,6 @@ def _servos(raw: Any, motors: tuple[str, ...], motion: MotionConfig, unit: str) 
     if unknown:
         raise ArmConfigError(f"servos.joints names an undeclared servo class: {', '.join(unknown)}")
     servos = {str(motor): classes[str(name)] for motor, name in assigned.items()}
-    to_radians = {"deg": math.pi / 180.0, "rad": 1.0}.get(unit)
-    if to_radians is not None and motion.step_interval_s > 0:
-        commanded = motion.max_step / motion.step_interval_s * to_radians
-        slowest = min(servos.values(), key=lambda servo: servo.no_load_speed_rad_s)
-        if commanded > slowest.no_load_speed_rad_s:
-            raise ArmConfigError(f"motion commands {commanded:.2f} rad/s, faster than servo class {slowest.name} "
-                                 f"turns unloaded ({slowest.no_load_speed_rad_s:.2f} rad/s)")
     return MappingProxyType(servos)
 
 
@@ -443,7 +443,7 @@ def parse_arm_config(data: Any, *, config_dir: Path | None = None) -> ArmConfig:
         motion=motion,
         poses=poses,
         lerobot=lerobot,
-        servos=_servos(body.get("servos"), (*(joint.name for joint in joints), gripper.joint), motion, unit),
+        servos=_servos(body.get("servos"), (*(joint.name for joint in joints), gripper.joint)),
         **_sections(body, joints=joints, unit=unit, poses=poses, lerobot=lerobot, config_dir=config_dir),
     )
 

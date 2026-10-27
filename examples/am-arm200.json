@@ -2,7 +2,7 @@
   "schema": "flyto.lerobot.arm.v1",
   "resource_id": "am-arm200-01",
   "display_name": "AM-ARM200",
-  "notes": "Example for the AM-ARM200 follower (6 joints + gripper) on lerobot_alohamini. Joint names and the am-follower-6dof profile follow that fork's so_follower.py. Every limit below is a conservative PLACEHOLDER, not a measurement, and every pose is untaught (taught: false), so move_joints refuses them until they are taught on the real arm. A physical 12 V cut-off switch on the follower's supply is required for any real run. The kinematic chain is read from the official AM-ARM200 URDF packaged with this pack (models/am-arm200, liyiteng/AM-ARM 5b03af1); each joint's sign and offset against that URDF is NOT yet confirmed on the physical arm (verified_on_hardware: false), so pick and place are refused on this arm until they are. Servo classes follow the lerobot_alohamini am-follower-6dof profile (STS3095 on shoulder_pan, shoulder_lift, elbow_flex; STS3215 on the rest).",
+  "notes": "Example for the AM-ARM200 follower (6 joints + gripper) on lerobot_alohamini. Joint names and the am-follower-6dof profile follow that fork's so_follower.py. Every limit below is a conservative PLACEHOLDER, not a measurement, and every pose is untaught (taught: false), so move_joints refuses them until they are taught on the real arm. A physical 12 V cut-off switch on the follower's supply is required for any real run. The kinematic chain is read from the official AM-ARM200 URDF packaged with this pack (models/am-arm200, liyiteng/AM-ARM 5b03af1); each joint's sign and offset against that URDF is NOT yet confirmed on the physical arm (verified_on_hardware: false), so pick and place are refused on this arm until they are. Servo classes follow the lerobot_alohamini am-follower-6dof profile (STS3095 on shoulder_pan, shoulder_lift, elbow_flex; STS3215 on the rest). Motion (2026-10-28): every move is a trajectory within each servo's no-load speed and estimated acceleration, streamed every 20 ms (max_step 6 per period is a cap, not the pace); this control period and the convergence thresholds are UNVERIFIED on hardware: measure stop_to_hold_ms, stop_to_still_ms and overshoot on the arm before relying on them. Camera (2026-10-28): the arm's own 720p USB camera on the fixed jaw (URDF left_camera), eye-in-hand; its device index, field of view, image orientation, colour classes and the 'look' pose (untaught here) are UNVERIFIED on hardware.",
   "lerobot": {
     "robot_module": "lerobot.robots.so_follower",
     "robot_type": "so101_follower",
@@ -49,11 +49,11 @@
     "tolerance": 5.0
   },
   "motion": {
-    "max_step": 3.0,
-    "step_interval_s": 0.05,
+    "max_step": 6.0,
+    "step_interval_s": 0.02,
     "tolerance": 3.0,
     "settle_timeout_s": 5.0,
-    "poll_interval_s": 0.05,
+    "poll_interval_s": 0.02,
     "still_drift": 0.5
   },
   "poses": {
@@ -89,6 +89,17 @@
         "wrist_yaw": 0.0,
         "wrist_roll": 0.0
       }
+    },
+    "look": {
+      "taught": false,
+      "joints": {
+        "shoulder_pan": -1.4,
+        "shoulder_lift": -67.8,
+        "elbow_flex": 80.0,
+        "wrist_flex": 80.0,
+        "wrist_yaw": 0.0,
+        "wrist_roll": -88.6
+      }
     }
   },
   "servos": {
@@ -99,8 +110,11 @@
         "stall_torque_nm": 9.32,
         "rated_torque_nm": 2.21,
         "no_load_speed_rad_s": 3.25,
-        "estimated": [],
-        "source": "Feetech STS3095-C002 at 12 V as listed by the OpenELAB reseller (95 kg.cm stall, 22.5 kg.cm rated, 31 rpm no load); no Feetech datasheet was found. Gear ratio 1/399 from the AM-ARM README (liyiteng/AM-ARM 5b03af1); that repository's bom.md says 1/345."
+        "max_acceleration_rad_s2": 38.97,
+        "estimated": [
+          "max_acceleration_rad_s2"
+        ],
+        "source": "Feetech STS3095-C002 at 12 V as listed by the OpenELAB reseller (95 kg.cm stall, 22.5 kg.cm rated, 31 rpm no load); no Feetech datasheet was found. Gear ratio 1/399 from the AM-ARM README (liyiteng/AM-ARM 5b03af1); that repository's bom.md says 1/345. Acceleration: LeRobot's FeetechMotorsBus.configure_motors writes Acceleration 254 (and Maximum_Acceleration 254 on protocol 0) to every motor at lerobot_alohamini ec65318; at 100 steps/s^2 per unit (Feetech STS register convention, 4096 steps per turn) that is 38.97 rad/s^2 at the shaft. The unit is not from a Feetech datasheet, and under load the stall torque may limit it further: estimated."
       },
       "sts3215": {
         "voltage_v": 12.0,
@@ -108,8 +122,11 @@
         "stall_torque_nm": 2.94,
         "rated_torque_nm": 0.98,
         "no_load_speed_rad_s": 4.72,
-        "estimated": [],
-        "source": "Feetech STS3215 (C018, 12 V, 1/345) as listed by RobotShop and OpenELAB (30 kg.cm stall, 10 kg.cm rated, 0.222 s/60 deg no load); no Feetech datasheet was found. Gear ratio from the AM-ARM README and bom.md (liyiteng/AM-ARM 5b03af1)."
+        "max_acceleration_rad_s2": 38.97,
+        "estimated": [
+          "max_acceleration_rad_s2"
+        ],
+        "source": "Feetech STS3215 (C018, 12 V, 1/345) as listed by RobotShop and OpenELAB (30 kg.cm stall, 10 kg.cm rated, 0.222 s/60 deg no load); no Feetech datasheet was found. Gear ratio from the AM-ARM README and bom.md (liyiteng/AM-ARM 5b03af1). Acceleration: LeRobot's FeetechMotorsBus.configure_motors writes Acceleration 254 (and Maximum_Acceleration 254 on protocol 0) to every motor at lerobot_alohamini ec65318; at 100 steps/s^2 per unit (Feetech STS register convention, 4096 steps per turn) that is 38.97 rad/s^2 at the shaft. The unit is not from a Feetech datasheet, and under load the stall torque may limit it further: estimated."
       }
     },
     "joints": {
@@ -218,5 +235,102 @@
       "axis_tolerance": 0.03,
       "damping": 0.05
     }
+  },
+  "perception": {
+    "frame": {
+      "id": "table",
+      "description": "Table plane: origin under the arm base, x forward, y to the arm's left, z up, metres. An object's pose is its bottom centre.",
+      "table_z_m": 0.0
+    },
+    "camera": {
+      "kind": "usb",
+      "id": "wrist-usb",
+      "device": 0,
+      "width": 1280,
+      "height": 720,
+      "stride": 2,
+      "fovy_deg": 60.0,
+      "mount": {
+        "link": "left_camera",
+        "origin": [
+          0.0,
+          0.0,
+          0.02
+        ],
+        "forward": [
+          0,
+          0,
+          1
+        ],
+        "up": [
+          0,
+          1,
+          0
+        ],
+        "joint_error_deg": 0.5,
+        "fk_error_m": 0.005,
+        "fovy_source": "ESTIMATE: the AM-ARM200 bill of materials lists a 720p USB camera, 36 x 36 mm, without a lens; 60 deg vertical (about 91 deg horizontal at 16:9) is a common board-camera lens, not a measured value. The optical axis is the camera mesh's +z (its lens barrel stands out of the board on that side); image up is the mesh's +y, unverified. The lens centre is put 20 mm out along +z, just past the barrel's end on the mesh (19.1 mm)."
+      },
+      "uncertainty": {
+        "xy_m": 0.006,
+        "yaw_rad": 0.2
+      },
+      "classes": {
+        "red": {
+          "kind": "block",
+          "label": "red block",
+          "hue_deg": [
+            340.0,
+            15.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.25,
+          "min_area_px": 60,
+          "size_m": [
+            0.03,
+            0.03,
+            0.03
+          ]
+        },
+        "green": {
+          "kind": "block",
+          "label": "green block",
+          "hue_deg": [
+            90.0,
+            160.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.25,
+          "min_area_px": 60,
+          "size_m": [
+            0.03,
+            0.03,
+            0.03
+          ]
+        },
+        "blue": {
+          "kind": "container",
+          "label": "blue bin",
+          "hue_deg": [
+            200.0,
+            250.0
+          ],
+          "min_saturation": 0.5,
+          "min_value": 0.2,
+          "min_area_px": 400,
+          "size_m": [
+            0.09,
+            0.09,
+            0.04
+          ]
+        }
+      }
+    },
+    "on_table_tolerance_m": 0.03,
+    "match_radius_m": 0.04,
+    "max_captures": 3,
+    "observe_pose": "look",
+    "verify_height_m": 0.25,
+    "reuse_within_s": 3.0
   }
 }

@@ -112,9 +112,45 @@ the move's `pose` enum when the host next publishes the manifest.
 | Cancel or safe stop during a move | cancelled, holding | `stop_requested` | null |
 | Deadline passed during a move | timeout, holding | `deadline_reached` | null |
 
-Arguments are checked before the arm is connected. A move is sent as
-waypoints at most `motion.max_step` apart, each followed by a readback, so a
-stop takes effect within one step.
+Arguments are checked before the arm is connected. A move is one
+time-optimal joint trajectory (`trajectory.py`, below), streamed one set
+point per control period (`motion.step_interval_s`), no two further apart
+than `motion.max_step`. Each period checks for a stop before it sends, so a
+stop takes effect within one period (`stop_to_hold_ms`).
+
+## Motion (`trajectory.py`, 2026-10-28)
+
+Only the servos' physics may take time. A continuous motion (a move, the
+approach and descend of a pick or a place, a lift or retreat and the way on
+to the observe pose) is planned as one trajectory through its via points:
+
+- every joint within its own servo class's no-load speed and acceleration
+  (`servos`, converted to the config's unit through the chain; the gripper
+  through the jaw mapping), and within `max_step` per period;
+- all joints in step on each segment; via points on a straight tool path
+  passed at speed; a corner no faster than each joint can turn in one period
+  at its acceleration; at rest only at the end (trapezoid / triangle
+  profiles from a backward and a forward pass);
+- streamed: each period checks for a stop, sends the set point, reads the
+  arm (LeRobot's protection trips on a read, so this is the fault check) and
+  waits out the rest of the period. Nothing waits for a set point to be
+  reached.
+
+The one place a motion converges before the next begins is above the target
+of a pick or a place: the servos lag their set points, and a descent begun
+while the arm still trails sideways lands a jaw on the object.
+
+A motion ends when the arm has **converged**: within tolerance and still (it
+moved no more than `motion.still_drift` since the reading one
+`motion.poll_interval_s` earlier). A reading inside the tolerance that is
+still moving is not an arrival. `motion.settle_timeout_s` only bounds a
+servo that never converges.
+
+The gripper closes on the same kind of trajectory at its servo's speed; when
+the jaws stop short of their set point (contact) the closed value is
+commanded at once, so the squeeze is the servo's own torque limit. The grip
+is confirmed on `gripper.hold_samples` readings in a row from the first still
+one (creeping on is `object_slipped`, fully closed is `no_object_held`).
 
 ## The motor check (`driver.py`)
 
@@ -140,8 +176,9 @@ process never connected). Nothing here ever disables torque.
 
 ### Every stop of a move is measured
 
-A move interrupted by a cancel, a safe stop or its deadline is held, then
-measured by reading only: the adapter polls every `motion.poll_interval_s`
+A move interrupted by a cancel, a safe stop or its deadline is held --
+`stop_to_hold_ms` runs from the stop request to the hold being sent, at most
+one control period plus one exchange -- then measured by reading only: the adapter polls every `motion.poll_interval_s`
 until two readings in a row of the commanded motors lie within
 `motion.still_drift` of each other (the rule a move settles by), for at most
 `motion.settle_timeout_s`. The call's evidence carries:
@@ -176,16 +213,37 @@ when the config loads and its serial port exists; it never names the port.
 A pick runs timed phases -- `perceive`, `plan`, `open`, `approach`,
 `descend`, `grasp`, `verify_grip`, `lift`, `clear_view`, `verify` -- and a
 place `perceive`, `plan`, `approach`, `descend`, `release`,
-`verify_release`, `retreat`, `clear_view`, `verify`. `clear_view` drives to
-`perception.observe_pose` when the config names a taught one (so the arm
-does not hide the table from the camera), and is empty otherwise. Each result carries `phases` (`phase`, `started_ms`,
+`verify_release`, `retreat`, `clear_view`, `verify` (`look_pose` instead of
+`clear_view` when the camera is on the arm). The descent is one motion
+through its solved points, begun from an arm converged above the target;
+`lift`/`retreat` and `clear_view` are one motion.
+
+`clear_view` heads for `perception.observe_pose` (a taught pose) and stops
+as soon as the camera's view of the table is clear: the occlusion model
+(`perception.arm_hides`) casts the arm's links -- capsules of
+`perception.arm_clearance_m` around the chain's polyline -- along the
+camera's rays (`perception.camera_geometry`) onto every object the call's
+first look saw, and the target. Once the lift or retreat is done, the motion
+brakes along the same path at the first reading the model calls clear, or
+does not move on at all when the table is clear already. The verifying look
+must then show every one of those spots free of the arm in its own frame
+(`Capture.covered`: the share of matte black, grey pixels over the spot;
+`perception.camera.arm_max_value`) and give a settled answer; otherwise the
+arm goes on to the observe pose and looks again (`clear_view_again`,
+`verify_again`). Without a model the arm goes to the observe pose; without
+an observe pose the look is taken where the motion ended. A pick reads the
+gripper after its look, so a grip lost while the camera looked is not
+missed. A verifying look always takes a new frame; a look that only plans
+(the perceive of a pick or a place) may reuse a frame younger than
+`perception.reuse_within_s`. Each result carries `phases` (`phase`, `started_ms`,
 `ms`) and `latency_ms` (per phase and `total`, the adapter's clock), `plan`
 (`solver`, `wall_ms`, `waypoints`), `target` (table-frame pose),
 `perception_before` / `perception_after` and `grip` (`position`, `goal`,
 `gap`, `effort`, `held`). Every pose is solved before anything moves.
-Moves between poses are straight tool paths cut into `kinematics.grasp.path_step_m`
-pieces, each driven as `max_step` waypoints, so a stop still takes effect
-within one step and is measured as before.
+Moves between poses are straight tool paths solved every
+`kinematics.grasp.path_step_m`; the solutions are the via points of one
+trajectory, so a stop still takes effect within one period and is measured
+as before.
 
 `observe` adds `source`, `object_held` (0/1), `gripper_position`,
 `gripper_effort` (when reported) and, with a camera, `objects_on_table`,
@@ -221,3 +279,43 @@ arm geometry that touches anything. Each joint's position servo is limited
 to its servo class's stall torque, and its set point moves no faster than
 the class's no-load speed. Without `model`, a written-out chain is drawn as
 capsules with slide fingers as before.
+
+## The camera on the arm (eye-in-hand, 2026-10-28)
+
+The AM-ARM200's own camera (720p USB, 36 x 36 mm) is the URDF link
+`left_camera`, fixed to `left_Fixed_Jaw`. `perception.camera.mount` names
+that link, the lens's `origin`, its optical axis (`forward`) and image `up`
+in the link's frame, and how wrong the chain may be (`joint_error_deg`,
+`fk_error_m`). There is no calibration constant: at every capture the
+adapter reads the joints, and the camera's pose is the robot description's
+chain at that reading (`KinematicChain.link_pose`, `perception.mounted_view`);
+the capture records `joints_at_capture`.
+
+- MuJoCo renders a camera in that link (`kind: rendered` with a `mount`);
+  a real arm uses `kind: usb` with a `mount` and `fovy_deg` (not tested on
+  hardware). A fixed overhead camera (`position`, or a USB homography) stays
+  a configuration of its own.
+- Locating (`perception.detect_mounted`): a blob in the jaws (centred where
+  the tool point projects, as large as something that close looks) is
+  placed at the tool point; any other is placed where its ray meets the
+  plane of its top, its heading measured in the table plane, its height
+  observed from apparent size only when seen within 15 deg of straight down
+  (else taken to rest on the table), its uncertainty widened by the chain's
+  error over the ray's range. A container cut in two by an object inside is
+  one container.
+- Pick and place perceive from where the arm is (a taught `look` pose; the
+  arm should be moved there with `move_joints`); a planning look takes the
+  newest frame within `perception.reuse_within_s` that saw its target whole,
+  because what the jaws hold covers the middle of the image. The pick
+  verifies from the look pose; the place looks straight down from
+  `perception.verify_height_m` over the container (the camera as the chain's
+  tool: `KinematicChain.mounted`, the same IK).
+- A grip the signature confirms must also show an object between the jaws
+  in the wrist camera's image (`grip.camera_sees_object`), else
+  `object_not_seen_in_jaws`.
+- "Inside a container" means resting there: centre at least half its width
+  inside the walls, bottom below half the wall's height
+  (`perception.resting_inside`), for the verdict and for the counts.
+- The camera is part of the arm, so its counts are the arm's own word:
+  evidence stays `observer: "self"`; `observe` says `camera_on_arm`.
+
