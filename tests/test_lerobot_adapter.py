@@ -327,7 +327,7 @@ def test_an_overcurrent_trip_is_an_arm_fault_and_refuses_what_follows(make_adapt
 # -- the gripper ------------------------------------------------------------------------
 
 
-def test_grasp_closes_but_never_claims_to_hold_anything(make_adapter, arm, arm_config):
+def test_grasp_on_an_object_completes_without_an_evidence_item_of_its_own(make_adapter, arm, arm_config):
     arm.blocked["gripper"] = 25.0  # an object between the fingers
     result = call(make_adapter(), GRASP)
     assert result.outcome == OUTCOME_COMPLETED, result.detail

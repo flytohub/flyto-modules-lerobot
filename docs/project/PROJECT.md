@@ -20,7 +20,9 @@ arm is the AM-ARM200 follower (liyiteng, LeRobot fork `lerobot_alohamini`).
 
 ## Owned surfaces
 
-- The five `manipulation.*` steps, their contracts and output schemas.
+- The `manipulation.*` steps and `perception.locate_objects`, their contracts and output schemas.
+- Simulation backends (`sim`, `mujoco`), perception, the kinematic chain, telemetry and the
+  simulation live view (owner 2026-10-27).
 - The thin LeRobot adapter, including the measured hold-stop and the motor
   check on connect.
 - Commissioning an arm through those capabilities (no separate tool).
@@ -30,7 +32,7 @@ arm is the AM-ARM200 follower (liyiteng, LeRobot fork `lerobot_alohamini`).
 ## Non-goals
 
 - Re-implementing motor control, the servo protocol or calibration.
-- Proving a grasp or a place from the arm's own report.
+- Proving a call by its own outcome (Cloud judges the declared evidence).
 - A CLI, an MCP server, planners, goal resolvers, recording, training,
-  datasets, teleoperation, a web or telemetry layer (owner 2026-10-23).
+  datasets, teleoperation, a web layer (owner 2026-10-23).
 - Driving the leader arm.

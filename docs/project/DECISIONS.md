@@ -168,3 +168,161 @@ A move is sent as waypoints at most `motion.max_step` apart, each read back,
 so a stop or cancel takes effect within one step and a blocked joint is seen
 early. This is goal-position sequencing through `send_action`, the same thing
 LeRobot's own `max_relative_target` does, not motor control.
+
+## 2026-10-27 -- Scope extended for the sensing closed loop (owner)
+
+Owner directive 2026-10-27, for the 11/01 demo: build the sensing closed loop
+for pick and place, in a clearly labelled simulation because the arm has not
+arrived. The owner explicitly authorised, in this pack: three capabilities
+(`perception.locate_objects`, `manipulation.pick`, `manipulation.place`),
+simulation backends, perception behind a camera interface, Cartesian
+planning with the arm's kinematic chain, evidence specs, typed fault
+reporting, telemetry channels with a sampler, per-phase timing with a
+benchmark script, a developer viewer and a live view of the simulation. No
+Cloud planning logic is added here. The 2026-10-23 scope rule still holds
+for everything else (no CLI for commissioning, no planner, no recording,
+training, datasets or teleoperation). `scripts/benchmark_sim.py` and
+`scripts/watch_mujoco.py` are developer tools under `scripts/`, not console
+scripts of the package.
+
+## 2026-10-27 -- Three ids requested from Cloud's vocabulary
+
+`perception.locate_objects` (read only), `manipulation.pick` and
+`manipulation.place` (the manipulation family's movement defaults: safe stop
+required, cancellable, `equipment.motion`). They are not in Cloud's
+vocabulary yet; another lane adds them. Until then Cloud's `declare` refuses
+them as `capability_not_in_vocabulary` and `tests/integration` records that
+as an expected failure, as for `manipulation.mark_pose`. Their rows as this
+pack declares them are `REQUESTED_ROWS` in `tests/test_capabilities.py`.
+
+## 2026-10-27 -- Simulators are backends chosen by robot type, through one table
+
+`backends.py` maps `lerobot.robot_type` to a backend row: `sim` (the
+in-process world, `simulation.py`), `mujoco` (`mujoco_sim.py`), anything
+else LeRobot's own registry. The row carries how the robot is built, the
+`deployment_mode` (`simulation`), the `source` every reading and result
+carries (`simulation` / `hardware`), how the port is judged present, and
+which ports are refused. No module compares a robot type. Both simulators
+speak the `Robot` API the driver already calls (`simulation.SimulatedArm`),
+so limits, waypoints, the hold-stop and its measurement run unchanged.
+
+The guard (from flyto-robotics' deployment-mode check): a simulation config
+must name a `sim:` port. One that names anything else -- a device path, real
+hardware -- is refused before anything is built
+(`simulation_targets_hardware`) and latched as a fault, and discovery does
+not publish it.
+
+## 2026-10-27 -- A grasp is judged by the gripper signature
+
+Closing on nothing used to be `completed` (`accept_still`). Now
+`GripperConfig.holds`: commanded closed, stopped short of closed by
+`held_min_gap`, short of open, squeezing with `held_min_effort` when the
+robot reports an effort (`effort_key`), and staying put over
+`hold_samples` readings. Jaws that close fully are `failed` /
+`no_object_held` with `object_held: false` (the gripper did move:
+`effect_applied: true`); jaws that creep on are `object_slipped`. LeRobot's
+SO follower reports no gripper effort, so a real AM-ARM200 is judged by
+position and stillness only until an effort key is configured. The logic
+follows flyto-robotics `arm_adapter.py` (`object_held` / `no_object` /
+`slipping`); its code was not copied and no second arm adapter exists.
+
+## 2026-10-27 -- Evidence specs: self-observed deltas Cloud judges from the host's observations
+
+Supersedes "Grasp and release stay unproven" (2026-10-23). The host
+observes before and after a call (`observe`), and Cloud judges each spec with
+core's arithmetic; the call's own outcome proves nothing. Every spec is
+`delta` from `before` to `after`, tolerance 0:
+
+| Capability | Specs |
+|---|---|
+| grasp | `object_held` +1 |
+| release | `object_held` -1 |
+| pick | `object_held` +1; `objects_on_table` -1 |
+| place | `object_held` -1; `objects_in_containers` +1 |
+
+`object_held` is the gripper signature, read fresh. `objects_on_table` /
+`objects_in_containers` are counted from a fresh camera capture alone
+(`perception.scene_counts`), never from the arm. All are `observer: self`:
+the camera belongs to this resource. Mixing `self` with `other_resource` in
+one contract would leave it unprovable in Cloud (`judged_across`); making
+the camera its own resource, so the perception specs become
+`other_resource`, is the follow-up. A pick or place to a table position has
+no container, so its second spec is never proven; only container places
+are. `manipulation.move_joints` still declares none (2026-10-23 reason).
+
+## 2026-10-27 -- Perception result shape, and what a planar camera cannot see
+
+`perception.locate_objects` returns `{"objects": [{id, kind, label, pose:
+{frame, x, y, z, yaw}, uncertainty: {xy_m, yaw_rad}, observed_at, source}],
+"frame": {...}, "capture": {...}}`, the shape the Cloud lane records as
+world-model object instances. A pose is the object's bottom centre in the
+table frame. Ids: the in-process simulator reports scene ids; a colour
+camera (USB or rendered) reports `<colour class>-<n>` per frame, so an id is
+stable only while one object of that colour is in view. A planar camera
+reports height only when the config gives its height above the table and
+the point under it; it then estimates an object's top from how much larger
+than its footprint it looks. A blob smaller than its footprint is partly
+covered (the gripper over a held block): its height is unknown and it is
+never counted as resting on the table. A placement the camera did not see is
+`placement_not_observed`, not `object_not_in_container`.
+
+## 2026-10-27 -- Kinematics: the pack's own chain, not LeRobot's
+
+LeRobot's `lerobot.model.kinematics.RobotKinematics` needs `placo` and a
+URDF; neither is installed with this pack, and no AM-ARM200 URDF is at hand.
+The chain is declared in the arm config (`kinematics`) and solved by damped
+least squares over its analytic Jacobian (`kinematics.py`), warm-started from
+the present joints, retried once from a neutral wrist. Both simulators use
+the same chain. The sim examples' link lengths are illustrative; the real
+arm's must be measured before a real pick is planned.
+
+## 2026-10-27 -- MuJoCo model: generated from the arm config
+
+The owner named MuJoCo as the physics simulator. Checked for an existing
+MJCF: the pinned LeRobot install ships none (its `gym_hil` tasks use other
+arms), and no SO-100/101 model is in this workspace. MuJoCo Menagerie's
+`trs_so_arm100` (Apache-2.0) exists upstream but was not fetched or vendored:
+it is a 5-joint arm with one moving jaw and mesh assets, while the AM-ARM200
+family config here is 6 joints plus a parallel gripper, and the planner's
+chain must match the simulated arm exactly. So `mujoco_sim.build_mjcf`
+generates the model from the config: the chain as hinge joints with the
+config's limits, two force-limited slide fingers, a table, free-body blocks,
+open-box containers and an overhead camera. Grasping is contact and friction;
+the camera is rendered and segmented, never read from the scene. MuJoCo is
+the `mujoco` extra; nothing imports it until a `mujoco` config is served.
+
+## 2026-10-27 -- Faults are reported in the host's fault-latch shape
+
+`ArmFault` carries a typed `fault_code` (`protection_tripped`,
+`disconnected`, `position_unreadable`, `motors_mismatch`,
+`simulation_targets_hardware`, or the simulator's own, e.g. `overcurrent`);
+the session latches it with the instant. `connection_status()` returns
+`{"state", "last_error", "fault": {"reason", "since"} | None}`, read by
+flyto-cloud `local/adapter_connection_status.py` and
+`local/equipment_faults.py`. The adapter answers a fault as a typed
+refusal rather than raising, so the status surface is the route.
+
+## 2026-10-27 -- Telemetry: four channels, sampled without connecting
+
+Supersedes "no telemetry" (2026-10-23) by owner directive. The manifest
+declares `joint_positions`, `gripper`, `object_held`, `arm_fault`
+(`capabilities.TELEMETRY_CHANNELS`); `discovery.telemetry_sampler` (the
+attribute flyto-cloud `local/resource_state_telemetry.py` looks for) reads
+only an arm this process already connected, since connecting drops torque
+briefly.
+
+## 2026-10-27 -- Watching the simulation goes through the host's existing live channels
+
+No second streaming system. The manifest's `live_channels` extension
+(`flyto.live-channels.v1`) declares two `kind: video`, `transport: ws-jpeg`,
+`max_rate_hz: 5` channels -- `sim-overhead` (the rendered camera perception
+segments) and `sim-scene` (a free-angle scene camera) -- whose host-side
+`source` is `http-poll://127.0.0.1:<FLYTO_LEROBOT_LIVE_PORT>/live/<id>`. The
+host relay's `http-poll` adapter GETs it and gets `{"format": "jpeg", "data":
+<base64>, "bytes", "source": "simulation", "label": "SIMULATION", "at"}`.
+Every frame has SIMULATION drawn into the picture, because Cloud's
+`live_frames._shape_video` keeps only the JPEG bytes: carrying `source`
+through to the browser needs a Cloud change (listed in the 2026-10-27
+handoff). Off unless the port is set and the camera renders (MuJoCo only).
+The developer's native window is `mujoco.viewer`, opened only by
+`scripts/watch_mujoco.py --viewer`.

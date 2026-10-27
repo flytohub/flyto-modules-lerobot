@@ -60,7 +60,10 @@ SIM_PORT_PREFIX = "sim:"
 SIMULATION_SOURCE = "simulation"
 
 SIMULATION_KEYS = frozenset({"seed", "initial_pose", "joint_speed", "gripper_speed", "gripper", "table_z_m",
-                             "objects", "latency", "faults"})
+                             "objects", "latency", "faults", "physics"})
+#: The MuJoCo backend's physics settings (``mujoco_sim``), with their defaults.
+PHYSICS_DEFAULTS: Mapping[str, float] = {"timestep": 0.002, "joint_kp": 40.0, "joint_damping": 1.0,
+                                         "finger_kp": 300.0, "grip_force": 6.0, "friction": 1.5}
 _GRIPPER_KEYS = frozenset({"max_opening_m", "free_effort", "contact_effort", "reach_m"})
 _OBJECT_KEYS = frozenset({"id", "kind", "label", "colour", "x", "y", "yaw", "size_m"})
 _LATENCY_KEYS = frozenset({"read_ms", "jitter_ms"})
@@ -130,6 +133,7 @@ class SimulationConfig:
     read_ms: float
     jitter_ms: float
     faults: tuple[FaultSpec, ...]
+    physics: Mapping[str, float] = field(default_factory=lambda: dict(PHYSICS_DEFAULTS))
 
 
 def _number(value: Any, where: str) -> float:
@@ -232,6 +236,9 @@ def parse_simulation(raw: Any, *, poses: Sequence[str]) -> SimulationConfig:
         raise SimulationError("simulation.objects ids must be unique")
     faults = tuple(parse_fault(item, f"simulation.faults[{index}]")
                    for index, item in enumerate(body.get("faults") or ()))
+    physics_raw = _keys(body.get("physics") or {}, "simulation.physics", frozenset(PHYSICS_DEFAULTS))
+    physics = {key: _positive(physics_raw.get(key, default), f"simulation.physics.{key}")
+               for key, default in PHYSICS_DEFAULTS.items()}
     return SimulationConfig(
         seed=seed, initial_pose=initial,
         joint_speed=_positive(body.get("joint_speed", 90.0), "simulation.joint_speed"),
@@ -247,6 +254,7 @@ def parse_simulation(raw: Any, *, poses: Sequence[str]) -> SimulationConfig:
         read_ms=_non_negative(latency.get("read_ms", 0.0), "simulation.latency.read_ms"),
         jitter_ms=_non_negative(latency.get("jitter_ms", 0.0), "simulation.latency.jitter_ms"),
         faults=faults,
+        physics=physics,
     )
 
 

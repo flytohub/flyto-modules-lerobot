@@ -100,20 +100,25 @@ untaught, so a move to them is refused until you teach and mark them.
 
 ### Usage
 
-Approve the arm's five capabilities in the Space:
+Approve the arm's capabilities in the Space:
 
 | Capability | Arguments | Returns (`output_schema`) |
 |---|---|---|
 | `manipulation.state` | none | `arm` |
 | `manipulation.move_joints` | `pose` **or** joint numbers | `arm`, `arm_before`, `target`, `pose`, `max_error` |
-| `manipulation.grasp` | none | `arm`, `arm_before`, `gripper_target`, `reached_command` |
+| `manipulation.grasp` | none | `arm`, `arm_before`, `gripper_target`, `reached_command`, `object_held`, `grip` |
 | `manipulation.release` | none | same as grasp |
 | `manipulation.mark_pose` | `pose`, optional `replace` | `arm`, `pose`, `joints`, `replaced`, `backup` |
+| `perception.locate_objects` | optional `kind`, `label` | `objects`, `frame`, `capture` |
+| `manipulation.pick` | `object_id` **or** `x`, `y` (optional `yaw`) | `object_held`, `grip`, `target`, `phases`, `latency_ms`, `perception_after`, ... |
+| `manipulation.place` | `container_id` **or** `x`, `y` | `released`, `object_held`, `grip`, `target`, `phases`, `latency_ms`, `perception_after`, ... |
 
-No call proves its own effect: a grasp or a place needs an independent
-observation Cloud does not have yet, so those steps stay unproven
-(`docs/project/DECISIONS.md`). `manipulation.mark_pose` needs a row in
-Cloud's capability vocabulary before a Space can approve it
+No outcome proves itself: grasp, release, pick and place declare evidence
+specs that Cloud judges from the host's before/after observations (the
+gripper signature, and the camera's counts of objects on the table and in
+containers). Closing on nothing is a failed grasp. `manipulation.mark_pose`,
+`perception.locate_objects`, `manipulation.pick` and `manipulation.place`
+need rows in Cloud's capability vocabulary before a Space can approve them
 (`docs/project/DECISIONS.md`).
 
 ### Commissioning an arm
@@ -143,6 +148,24 @@ this order. There is no separate tool.
    interrupts a move holds the arm (torque stays on) and reports
    `stop_to_still_ms` and `overshoot` in that call's result. Stop a few
    moves on purpose and read them before trusting the hold.
+
+### Simulation
+
+SIMULATION ONLY until the arm arrives. Point `FLYTO_LEROBOT_ARM_CONFIG` at
+`examples/am-arm200-sim.json` (in-process, no extra) or
+`examples/am-arm200-mujoco.json` (`pip install 'flyto-modules-lerobot[mujoco]'`):
+the robot type picks the backend, every result says `source: "simulation"`,
+and a simulation config refuses any port that is not a `sim:` name.
+
+```bash
+python scripts/benchmark_sim.py --backend sim       # 50 seeded episodes per scenario, P50/P95/P99 per phase
+python scripts/benchmark_sim.py --backend mujoco
+python scripts/watch_mujoco.py --viewer             # native MuJoCo window (mjpython on macOS)
+python scripts/watch_mujoco.py --live-port 8765     # the frames the host relays to the Mission Station
+```
+
+On an execution host, `FLYTO_LEROBOT_LIVE_PORT` publishes the MuJoCo
+overhead and scene cameras as `live_channels` (`ws-jpeg`).
 
 ### Architecture
 

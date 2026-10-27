@@ -42,6 +42,7 @@ import colorsys
 import importlib
 import math
 import random
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -51,8 +52,10 @@ PERCEPTION_KEYS = frozenset({"frame", "camera", "on_table_tolerance_m", "match_r
 _FRAME_KEYS = frozenset({"id", "description", "table_z_m"})
 _SIMULATED_KEYS = frozenset({"kind", "id", "xy_sigma_m", "yaw_sigma_rad", "miss_rate", "occlusion_radius_m",
                              "latency_ms", "jitter_ms"})
+_RENDERED_KEYS = frozenset({"kind", "id", "width", "height", "stride", "position", "fovy_deg", "classes",
+                            "uncertainty", "latency_ms", "jitter_ms"})
 _USB_KEYS = frozenset({"kind", "id", "device", "width", "height", "stride", "calibration", "classes",
-                       "uncertainty"})
+                       "uncertainty", "camera_height_m", "nadir_xy"})
 _CLASS_KEYS = frozenset({"kind", "label", "hue_deg", "min_saturation", "min_value", "min_area_px", "size_m"})
 _KINDS = frozenset({"block", "container"})
 
@@ -84,6 +87,9 @@ class Detection:
     size: tuple[float, float, float] | None
     xy_m: float
     yaw_rad: float
+    # False when the camera could not tell the height (the object looked smaller than its own
+    # footprint: something covers it). Such an object is never counted as resting on the table.
+    height_known: bool = True
 
     def footprint_contains(self, x: float, y: float) -> bool:
         """Whether a point lies over this object's footprint (its yaw), when its size is known."""
@@ -170,8 +176,8 @@ def locate_result(capture: Capture, frame: FrameConfig, *, kind: str | None = No
 
 
 def on_table(item: Detection, settings: PerceptionConfig) -> bool:
-    """Resting on the table: at the table's height (within tolerance)."""
-    return abs(item.z - settings.frame.table_z_m) <= settings.on_table_tolerance_m
+    """Resting on the table: at the table's height (within tolerance), with its height seen."""
+    return item.height_known and abs(item.z - settings.frame.table_z_m) <= settings.on_table_tolerance_m
 
 
 def container_holding(item: Detection, detections: Sequence[Detection]) -> Detection | None:
@@ -385,17 +391,52 @@ class Blob:
     angle: float
 
 
-def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2) -> list[Blob]:
-    """Connected regions of each colour class (4-neighbour, sampled every ``stride`` pixels)."""
-    columns, rows = range(0, frame.width, stride), range(0, frame.height, stride)
+def _labels(frame: Frame, classes: Sequence[ColourClass], stride: int) -> dict[tuple[int, int], int]:
+    """Which colour class each sampled pixel is, pixel by pixel (standard library)."""
     labels: dict[tuple[int, int], int] = {}
-    for gv, v in enumerate(rows):
-        for gu, u in enumerate(columns):
+    for gv, v in enumerate(range(0, frame.height, stride)):
+        for gu, u in enumerate(range(0, frame.width, stride)):
             pixel = frame.rgb(u, v)
             for index, colour in enumerate(classes):
                 if colour.matches(pixel):
                     labels[(gu, gv)] = index
                     break
+    return labels
+
+
+def _labels_array(array: Any, classes: Sequence[ColourClass], stride: int) -> dict[tuple[int, int], int]:
+    """The same classification over a ``height x width x 3`` RGB array, vectorised with numpy."""
+    import numpy
+
+    rgb = numpy.asarray(array)[::stride, ::stride, :3].astype(numpy.float32) / 255.0
+    high, low = rgb.max(axis=2), rgb.min(axis=2)
+    span = numpy.where(high > low, high - low, 1.0)
+    red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    hue = numpy.where(high == red, (green - blue) / span % 6.0,
+                      numpy.where(high == green, (blue - red) / span + 2.0, (red - green) / span + 4.0)) * 60.0
+    hue = numpy.where(high > low, hue, 0.0)
+    saturation = numpy.where(high > 0, (high - low) / numpy.where(high > 0, high, 1.0), 0.0)
+    taken = numpy.zeros(hue.shape, dtype=bool)
+    labels: dict[tuple[int, int], int] = {}
+    for index, colour in enumerate(classes):
+        lo, hi = colour.hue_deg
+        inside = (hue >= lo) & (hue <= hi) if lo <= hi else (hue >= lo) | (hue <= hi)
+        mask = inside & (saturation >= colour.min_saturation) & (high >= colour.min_value) & ~taken
+        taken |= mask
+        for gv, gu in zip(*numpy.nonzero(mask), strict=True):
+            labels[(int(gu), int(gv))] = index
+    return labels
+
+
+def find_blobs(frame: Frame, classes: Sequence[ColourClass], *, stride: int = 2) -> list[Blob]:
+    """Connected regions of each colour class (4-neighbour, sampled every ``stride`` pixels).
+
+    A frame that carries its pixels as an array (``frame.array``, a rendered
+    or captured image) is classified with numpy when it is importable; any
+    other frame pixel by pixel. Both give the same labels.
+    """
+    array = getattr(frame, "array", None)
+    labels = _labels_array(array, classes, stride) if array is not None else _labels(frame, classes, stride)
     seen: set[tuple[int, int]] = set()
     blobs: list[Blob] = []
     for start, index in labels.items():
@@ -439,6 +480,57 @@ class UsbCameraSettings:
     classes: tuple[ColourClass, ...]
     xy_m: float
     yaw_rad: float
+    # When known: the camera's height above the table and the table point straight under it. A
+    # planar camera then estimates an object's height from how much larger than its footprint it looks.
+    camera_height_m: float | None = None
+    nadir: tuple[float, float] | None = None
+
+
+#: A blob whose linear size is under this fraction of its footprint's is taken as partly covered.
+OCCLUDED_BELOW = 0.9
+
+
+def _pixel_area_m2(homography: Homography, u: float, v: float) -> float:
+    """The table area one pixel covers near ``(u, v)``."""
+    x0, y0 = homography.apply(u, v)
+    x1, y1 = homography.apply(u + 1.0, v)
+    x2, y2 = homography.apply(u, v + 1.0)
+    return abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0))
+
+
+def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) -> list[Detection]:
+    """Colour blobs on the table plane; with a known camera height, lifted objects are placed in 3D.
+
+    Without ``camera_height_m`` every object is reported on the table plane
+    (``z`` 0, relative to the table). With it, an object whose top face looks
+    ``k`` times wider than its footprint would on the table is at
+    ``z_top = H (1 - 1/k)``, and its centre is moved toward the point under
+    the camera by the same perspective factor. An object that looks smaller
+    than its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly
+    covered: its height is reported unknown.
+    """
+    classes = {colour.name: colour for colour in settings.classes}
+    detections = []
+    counts: dict[str, int] = {}
+    for blob in find_blobs(frame, settings.classes, stride=settings.stride):
+        colour = classes[blob.colour]
+        x, y = homography.apply(blob.u, blob.v)
+        ax, ay = homography.apply(blob.u + 10.0 * math.cos(blob.angle), blob.v + 10.0 * math.sin(blob.angle))
+        z, height_known = 0.0, True
+        if settings.camera_height_m and settings.nadir is not None and colour.size[0] * colour.size[1] > 0:
+            footprint_px = colour.size[0] * colour.size[1] / max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
+            k = math.sqrt(max(blob.area_px / footprint_px, 1e-6))
+            height_known = k >= OCCLUDED_BELOW
+            top = settings.camera_height_m * (1.0 - 1.0 / max(k, 1.0))
+            scale = (settings.camera_height_m - max(top, 0.0)) / settings.camera_height_m
+            x = settings.nadir[0] + (x - settings.nadir[0]) * scale
+            y = settings.nadir[1] + (y - settings.nadir[1]) * scale
+            z = max(0.0, top - colour.size[2])
+        counts[colour.name] = counts.get(colour.name, 0) + 1
+        detections.append(Detection(f"{colour.name}-{counts[colour.name]}", colour.kind, colour.label, x, y, z,
+                                    math.atan2(ay - y, ax - x), colour.size, settings.xy_m, settings.yaw_rad,
+                                    height_known=height_known))
+    return detections
 
 
 def opencv_frames(settings: UsbCameraSettings) -> Callable[[], Frame]:
@@ -489,19 +581,10 @@ class UsbCamera:
         """Segment one frame and place each blob on the table plane."""
         started = self._clock()
         frame = self._frame()
-        classes = {colour.name: colour for colour in self.settings.classes}
-        detections = []
-        counts: dict[str, int] = {}
-        for blob in find_blobs(frame, self.settings.classes, stride=self.settings.stride):
-            colour = classes[blob.colour]
-            x, y = self.homography.apply(blob.u, blob.v)
-            ax, ay = self.homography.apply(blob.u + 10.0 * math.cos(blob.angle), blob.v + 10.0 * math.sin(blob.angle))
-            counts[colour.name] = counts.get(colour.name, 0) + 1
-            detections.append(Detection(f"{colour.name}-{counts[colour.name]}", colour.kind, colour.label, x, y,
-                                        0.0, math.atan2(ay - y, ax - x), colour.size, self.settings.xy_m,
-                                        self.settings.yaw_rad))
+        detections = detect(frame, self.settings, self.homography)
         camera = {"camera_id": self.settings.id, "kind": "usb", "width": frame.width, "height": frame.height,
-                  "latency_ms": round((self._clock() - started) * 1000.0, 3), "height_observed": False,
+                  "latency_ms": round((self._clock() - started) * 1000.0, 3),
+                  "height_observed": self.settings.camera_height_m is not None,
                   "calibration": {"method": "homography", "points": len(self.settings.image_points),
                                   "residual_m": round(self.residual_m, 5)},
                   "seen": len(detections), "hardware_tested": False}
@@ -600,7 +683,13 @@ def _parse_usb(raw: Mapping[str, Any]) -> UsbCameraSettings:
     device = body.get("device", 0)
     if isinstance(device, bool) or not isinstance(device, (int, str)):
         raise PerceptionError("perception.camera.device must be an index or a device path")
+    height = body.get("camera_height_m")
+    nadir = body.get("nadir_xy")
+    if (height is None) != (nadir is None):
+        raise PerceptionError("perception.camera.camera_height_m and nadir_xy are given together or not at all")
     settings = UsbCameraSettings(
+        camera_height_m=None if height is None else _number(height, "perception.camera.camera_height_m"),
+        nadir=None if nadir is None else _points([nadir], "perception.camera.nadir_xy")[0],
         id=_text(body.get("id", "overhead"), "perception.camera.id"), device=device, **integers,
         image_points=_points(calibration.get("image_points"), "perception.camera.calibration.image_points"),
         table_points=_points(calibration.get("table_points"), "perception.camera.calibration.table_points"),
@@ -612,10 +701,129 @@ def _parse_usb(raw: Mapping[str, Any]) -> UsbCameraSettings:
     return settings
 
 
+@dataclass(frozen=True)
+class RenderedCameraSettings:
+    """The MuJoCo world's overhead camera: where it is, its field of view, and the colours it segments."""
+
+    id: str
+    width: int
+    height: int
+    stride: int
+    position: tuple[float, float, float]
+    fovy_deg: float
+    classes: tuple[ColourClass, ...]
+    xy_m: float
+    yaw_rad: float
+    latency_ms: float
+    jitter_ms: float
+
+    def project(self, x: float, y: float, z: float) -> tuple[float, float]:
+        """The pixel a table-frame point lands on (pinhole, looking straight down)."""
+        focal = (self.height / 2.0) / math.tan(math.radians(self.fovy_deg) / 2.0)
+        depth = self.position[2] - z
+        return (self.width / 2.0 + focal * (x - self.position[0]) / depth,
+                self.height / 2.0 - focal * (y - self.position[1]) / depth)
+
+
+@dataclass
+class ArrayFrame:
+    """An RGB image held as a ``height x width x 3`` array (a render or a capture)."""
+
+    array: Any
+
+    def __post_init__(self) -> None:
+        """Read the size from the array."""
+        self.height, self.width = int(self.array.shape[0]), int(self.array.shape[1])
+
+    def rgb(self, u: int, v: int) -> tuple[int, int, int]:
+        """One pixel."""
+        red, green, blue = self.array[v, u][:3]
+        return int(red), int(green), int(blue)
+
+
+class RenderedCamera:
+    """The MuJoCo overhead camera, located from its rendered frames alone. SIMULATION ONLY.
+
+    The homography is calibrated once from four table points projected
+    through the camera's configured pose (the simulation's "marked points");
+    every capture then segments the rendered image exactly as a USB camera's
+    frame is segmented (:func:`detect`). Nothing reads where the objects are.
+    """
+
+    def __init__(self, settings: RenderedCameraSettings, world: Any, table_z: float) -> None:
+        """Bind to a MuJoCo world and calibrate."""
+        self.settings = settings
+        self.world = world
+        self.rng: random.Random = world.camera_rng
+        cx, cy, _ = settings.position
+        span = 0.15
+        table = [(cx - span, cy - span), (cx + span, cy - span), (cx + span, cy + span), (cx - span, cy + span)]
+        image = [settings.project(x, y, table_z) for x, y in table]
+        self.homography = Homography.fit(image, table)
+        self.detection = UsbCameraSettings(settings.id, -1, settings.width, settings.height, settings.stride,
+                                           tuple(image), tuple(table), settings.classes, settings.xy_m,
+                                           settings.yaw_rad, camera_height_m=settings.position[2] - table_z,
+                                           nadir=(cx, cy))
+        self.timings: list[dict[str, float]] = []
+
+    def capture(self) -> Capture:
+        """Render one frame and locate the colour blobs in it."""
+        settings = self.settings
+        latency = settings.latency_ms + self.rng.uniform(0.0, settings.jitter_ms)
+        self.world.sleep(latency / 1000.0)
+        started = time.perf_counter()
+        frame = ArrayFrame(self.world.render(settings.width, settings.height))
+        rendered = time.perf_counter()
+        detections = detect(frame, self.detection, self.homography)
+        done = time.perf_counter()
+        timing = {"render_ms": round((rendered - started) * 1000.0, 3),
+                  "detect_ms": round((done - rendered) * 1000.0, 3)}
+        self.timings.append(timing)
+        camera = {"camera_id": settings.id, "kind": "rendered", "width": frame.width, "height": frame.height,
+                  "latency_ms": round(latency, 3), **timing, "height_observed": True,
+                  "sim_time_s": round(self.world.elapsed(), 4),
+                  "calibration": {"method": "homography", "points": 4}, "seen": len(detections)}
+        return Capture(tuple(detections), _now(), "simulation", camera)
+
+
+def _parse_rendered(raw: Mapping[str, Any]) -> RenderedCameraSettings:
+    body = _keys(raw, "perception.camera", _RENDERED_KEYS)
+    classes = _keys(body.get("classes"), "perception.camera.classes", frozenset(body.get("classes") or {}))
+    if not classes:
+        raise PerceptionError("perception.camera.classes must name at least one colour")
+    position = body.get("position")
+    if not isinstance(position, Sequence) or isinstance(position, str) or len(position) != 3:
+        raise PerceptionError("perception.camera.position must be three numbers")
+    uncertainty = _keys(body.get("uncertainty") or {}, "perception.camera.uncertainty",
+                        frozenset({"xy_m", "yaw_rad"}))
+    integers = {}
+    for key, default in (("width", 480), ("height", 360), ("stride", 1)):
+        value = body.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise PerceptionError(f"perception.camera.{key} must be a positive integer")
+        integers[key] = value
+    return RenderedCameraSettings(
+        id=_text(body.get("id", "overhead-render"), "perception.camera.id"), **integers,
+        position=tuple(_number(value, "perception.camera.position") for value in position),  # type: ignore[arg-type]
+        fovy_deg=_non_negative(body.get("fovy_deg", 45.0), "perception.camera.fovy_deg"),
+        classes=tuple(_colour_class(str(name), value) for name, value in classes.items()),
+        xy_m=_non_negative(uncertainty.get("xy_m", 0.005), "perception.camera.uncertainty.xy_m"),
+        yaw_rad=_non_negative(uncertainty.get("yaw_rad", 0.2), "perception.camera.uncertainty.yaw_rad"),
+        latency_ms=_non_negative(body.get("latency_ms", 0.0), "perception.camera.latency_ms"),
+        jitter_ms=_non_negative(body.get("jitter_ms", 0.0), "perception.camera.jitter_ms"),
+    )
+
+
 def _build_simulated(settings: SimulatedCameraSettings, config: Any) -> Camera:
     from .simulation import world_for
 
     return SimulatedCamera(settings, world_for(config))
+
+
+def _build_rendered(settings: RenderedCameraSettings, config: Any) -> Camera:
+    from .mujoco_sim import world_for
+
+    return RenderedCamera(settings, world_for(config), config.perception.frame.table_z_m)
 
 
 def _build_usb(settings: UsbCameraSettings, config: Any) -> Camera:
@@ -624,21 +832,24 @@ def _build_usb(settings: UsbCameraSettings, config: Any) -> Camera:
 
 @dataclass(frozen=True)
 class CameraKind:
-    """How one camera kind is read from config and built, and which arm backends may use it."""
+    """How one camera kind is read from config and built, and which robot types may use it (None: any)."""
 
     parse: Callable[[Mapping[str, Any]], Any]
     build: Callable[[Any, Any], Camera]
-    needs_simulation: bool
+    robot_types: frozenset[str] | None
+    # Whether its frames are rendered, so the arm can be watched live (``live_view``).
+    renders: bool = False
 
 
-#: Every camera kind an arm config may name.
+#: Every camera kind an arm config may name. A simulated or rendered camera looks at its own simulator.
 CAMERA_KINDS: Mapping[str, CameraKind] = {
-    "simulated": CameraKind(_parse_simulated, _build_simulated, needs_simulation=True),
-    "usb": CameraKind(_parse_usb, _build_usb, needs_simulation=False),
+    "simulated": CameraKind(_parse_simulated, _build_simulated, robot_types=frozenset({"sim"})),
+    "rendered": CameraKind(_parse_rendered, _build_rendered, robot_types=frozenset({"mujoco"}), renders=True),
+    "usb": CameraKind(_parse_usb, _build_usb, robot_types=None),
 }
 
 
-def parse_perception(raw: Any, *, simulated_arm: bool) -> PerceptionConfig:
+def parse_perception(raw: Any, *, robot_type: str) -> PerceptionConfig:
     """A :class:`PerceptionConfig` from an arm config's ``perception`` section, or :class:`PerceptionError`."""
     body = _keys(raw, "perception", PERCEPTION_KEYS)
     frame = _keys(body.get("frame"), "perception.frame", _FRAME_KEYS)
@@ -648,8 +859,9 @@ def parse_perception(raw: Any, *, simulated_arm: bool) -> PerceptionConfig:
     kind = CAMERA_KINDS.get(str(camera.get("kind")))
     if kind is None:
         raise PerceptionError(f"perception.camera.kind must be one of {', '.join(sorted(CAMERA_KINDS))}")
-    if kind.needs_simulation and not simulated_arm:
-        raise PerceptionError("a simulated camera looks at the simulator; this arm config is not a simulation")
+    if kind.robot_types is not None and robot_type not in kind.robot_types:
+        raise PerceptionError(f"a {camera.get('kind')} camera looks at its own simulator, which this arm config "
+                              "does not use")
     return PerceptionConfig(
         frame=FrameConfig(_text(frame.get("id"), "perception.frame.id"),
                           str(frame.get("description") or "")[:300],

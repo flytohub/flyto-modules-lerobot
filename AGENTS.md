@@ -22,6 +22,18 @@ exactly:
 Do not add a CLI or MCP server, planners, goal resolvers, recording or
 training helpers, dataset or teleoperation tools, a web or telemetry layer,
 discovery beyond the manifest, or any capability beyond those five.
+**Owner addition 2026-10-27 (sensing closed loop, `docs/project/DECISIONS.md`).**
+Three more capabilities -- `perception.locate_objects`, `manipulation.pick`,
+`manipulation.place` -- and what they need, all inside the adapter/driver
+boundary: two simulation backends selected by `lerobot.robot_type` through
+`backends.py` (`sim`: in-process, `mujoco`: MuJoCo physics, the `mujoco`
+extra), perception behind one camera interface (`perception.py`), the arm's
+kinematic chain (`kinematics.py`), evidence specs, typed fault reporting
+(`connection_status`), four telemetry channels with a sampler, a live view
+through the host's existing `live_channels` (`live_view.py`), and two
+developer scripts (`scripts/benchmark_sim.py`, `scripts/watch_mujoco.py`).
+Everything a simulator produces says `source: "simulation"`. Still no CLI,
+planner, recording, training, dataset or teleoperation tool.
 Commissioning an arm is done through the capabilities, not beside them (owner
 2026-10-23): the motor check runs on every connect, `manipulation.mark_pose`
 teaches a pose, `manipulation.move_joints` jogs, and every hold-stop of a
@@ -42,10 +54,12 @@ rejected.
   (`tests/test_lerobot_adapter.py` and `tests/test_arm_config.py` hold both).
   A physical 12 V cut-off switch is required for any real run. Measuring a
   stop (`stop_to_still_ms`, `overshoot`) only reads.
-- **The arm's report is never proof.** No contract declares a self-observed
-  spec for grasp or release, and none may until Cloud has an independent
-  observation of an object in the gripper or the place zone. A completed
-  call returns readings as data and no evidence item.
+- **An outcome is never proof.** Grasp, release, pick and place declare
+  evidence specs that Cloud judges from the host's own before/after
+  `observe` readings: `object_held` (the gripper signature, read fresh) and,
+  from a fresh camera capture alone, `objects_on_table` /
+  `objects_in_containers`. A completed call returns readings as data and no
+  evidence item. Closing on nothing is never `completed`.
 - **Outcomes say what happened to the effect.** `refused` only when nothing
   was commanded; `failed` + `effect_unknown` + `effect_applied: null` when a
   command went out and its reply or readback was lost, and it is never sent

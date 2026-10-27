@@ -6,7 +6,14 @@ host        --flyto2.external_adapters "lerobot.arm"--> plugin.build_adapter -> 
 host        --flyto2.resource_discoverers "lerobot.arm"-> discovery.discover_resource_manifests (manifest only)
                                                         capabilities.py  the one table
                                                         arm_config.py    one file per arm (FLYTO_LEROBOT_ARM_CONFIG)
-LeRobotArmAdapter --driver.ArmSession--> LeRobot Robot API (connect / get_observation / send_action)
+LeRobotArmAdapter --driver.ArmSession--> backends.py (by lerobot.robot_type)
+                                          |-- LeRobot Robot API (connect / get_observation / send_action)
+                                          |-- sim:    simulation.SimWorld   (in-process, seeded, fault injection)
+                                          `-- mujoco: mujoco_sim.MujocoWorld (contact physics, rendered camera)
+LeRobotArmAdapter --perception.build_camera--> simulated | rendered | usb camera  (perception.locate_objects)
+                  --kinematics.KinematicChain--> pick / place plans (the config's chain, DLS IK)
+discovery --telemetry_sampler--> joint_positions, gripper, object_held, arm_fault
+discovery --live_channels--> live_view.LiveView (MuJoCo frames, ws-jpeg via http-poll, loopback)
 ```
 
 ## The capability table (`capabilities.py`)
@@ -21,6 +28,14 @@ Five rows, named and classed as Cloud's vocabulary resolves them
 | `manipulation.grasp` | `manipulation.grasp` | movement | yes | `equipment.motion` | `manipulation.gripper.changed` | none |
 | `manipulation.release` | `manipulation.release` | movement | yes | `equipment.motion` | `manipulation.gripper.changed` | none |
 | `manipulation.mark_pose` | `manipulation.mark_pose` | controlled | no | -- | `poses.written` | none |
+| `perception.locate_objects` | `perception.locate_objects` | read_only | no | -- | -- | none |
+| `manipulation.pick` | `manipulation.pick` | movement | yes | `equipment.motion` | `manipulation.object.picked` | `object_held` +1, `objects_on_table` -1 |
+| `manipulation.place` | `manipulation.place` | movement | yes | `equipment.motion` | `manipulation.object.placed` | `object_held` -1, `objects_in_containers` +1 |
+
+Grasp and release now declare `object_held` +1 / -1. Every spec is a
+`delta` from `before` to `after` with tolerance 0, `observer: self`, judged
+by Cloud from what the host's `observe` returned (`DECISIONS.md` 2026-10-27).
+The three new ids are requested from Cloud's vocabulary.
 
 All are cancellable (Cloud's rows) and idempotent (absolute targets; a
 mark is kept by call id). Each declares an `output_schema` for the data a
@@ -33,9 +48,8 @@ completed call returns: `arm` (`unit`, `joints`, `gripper.position`,
 needs no stop, and writes one record the execution host keeps -- here a
 taught pose in the arm's config file.
 
-Why no evidence: see `docs/project/DECISIONS.md`. In short, nothing independent observes a
-grasp or place yet, and core's arithmetic cannot judge a move to a named pose
-without naming joints in code.
+Why move_joints still has no evidence: core's arithmetic cannot judge a move
+to a named pose without naming joints in code (`docs/project/DECISIONS.md`).
 
 ## The arm config (`arm_config.py`, `flyto.lerobot.arm.v1`)
 
@@ -71,7 +85,16 @@ the move's `pose` enum when the host next publishes the manifest.
 | Situation | Outcome | `reason_code` | `effect_applied` |
 |---|---|---|---|
 | Readback within tolerance of the target | completed | -- | true |
-| Grasp: gripper stopped closing (object in the way) | completed | -- | true (`reached_command` says if it closed fully) |
+| Grasp: the gripper signature shows an object held over the hold window | completed | -- | true (`object_held: true`) |
+| Grasp: the jaws closed fully | failed | `no_object_held` | true (`object_held: false`) |
+| Grasp: the jaws met something, then crept on | failed | `object_slipped` | true |
+| Pick / place: the camera does not see the object / container | refused | `object_not_found` / `container_not_found` | false |
+| Pick / place: a pose of the plan has no joint solution in the limits | refused | `pose_unreachable` | false |
+| Place: the gripper holds nothing | refused | `nothing_held` | false |
+| Pick: not held after the lift / camera sees it on the table | failed | `object_slipped` / `perception_disagrees` | true |
+| Place: camera sees it outside the container / did not see it | failed | `object_not_in_container` / `placement_not_observed` | true |
+| No camera, or no kinematic chain configured | refused | `perception_unavailable` / `kinematics_not_configured` | false |
+| A simulation config names a non-`sim:` port | refused (latched) | `simulation_targets_hardware` | false |
 | Bad arguments / unknown joint / gripper named in a move | refused | `arguments_refused` | false |
 | Target outside the configured limits | refused | `outside_joint_limits` | false |
 | Unknown pose / untaught pose | refused | `pose_unknown` / `pose_not_taught` | false |
@@ -146,3 +169,31 @@ LeRobot is imported only in `driver.lerobot_robot`.
 `FLYTO_LEROBOT_ARM_CONFIG` (path to the arm config) and
 `FLYTO_LEROBOT_AUTODISCOVER` (`.env.example`). The manifest is published only
 when the config loads and its serial port exists; it never names the port.
+
+## The sensing closed loop (2026-10-27)
+
+A pick runs timed phases -- `perceive`, `plan`, `open`, `approach`,
+`descend`, `grasp`, `verify_grip`, `lift`, `verify` -- and a place
+`perceive`, `plan`, `approach`, `descend`, `release`, `verify_release`,
+`retreat`, `verify`. Each result carries `phases` (`phase`, `started_ms`,
+`ms`) and `latency_ms` (per phase and `total`, the adapter's clock), `plan`
+(`solver`, `wall_ms`, `waypoints`), `target` (table-frame pose),
+`perception_before` / `perception_after` and `grip` (`position`, `goal`,
+`gap`, `effort`, `held`). Every pose is solved before anything moves.
+Moves between poses are straight tool paths cut into `kinematics.grasp.path_step_m`
+pieces, each driven as `max_step` waypoints, so a stop still takes effect
+within one step and is measured as before.
+
+`observe` adds `source`, `object_held` (0/1), `gripper_position`,
+`gripper_effort` (when reported) and, with a camera, `objects_on_table`,
+`objects_in_containers` and `perception_source`.
+
+`connection_status()` returns `{"state", "last_error", "fault"}`; `fault` is
+`{"reason": <code>, "since": <ISO 8601>}` or `None`.
+
+Simulation backends (`backends.py`): `sim` and `mujoco` share
+`simulation.SimulatedArm` (the Robot API) and the `simulation` config
+section (seed, initial pose, scene objects, latency, faults, and for MuJoCo
+`physics`). Faults: `object_moved`, `container_moved`, `grasp_slip`,
+`motor_fault`, `latency`. Examples: `examples/am-arm200-sim.json`,
+`examples/am-arm200-mujoco.json`.

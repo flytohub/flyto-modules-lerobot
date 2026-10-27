@@ -1068,7 +1068,9 @@ class LeRobotArmAdapter:
             if item is not None and on_table(item, settings):
                 return False, item
             return None, item
-        return (not on_table(item, settings)) if capture.camera.get("height_observed") else None, item
+        if not capture.camera.get("height_observed") or not item.height_known:
+            return None, item
+        return not on_table(item, settings), item
 
     def _place_target(self, capture: Capture | None, container_id: str | None, pose: Mapping[str, float],
                       held: Detection | None) -> _Target:

@@ -17,6 +17,10 @@ Serves flyto-cloud `ROADMAP.md` "CONVERGED P0" item 4 (AM-ARM200 M0 / M1).
 4. If move_joints must be proven by Cloud: a core op that compares a phase
    with a constant, or a host-echoed pose resolution (see `DECISIONS.md`).
 5. Another arm LeRobot drives: another config file, no code.
+6. Sensing closed loop (2026-10-27): done in simulation on both backends; on
+   the real arm it needs the measured chain, the mounted camera and the
+   Cloud vocabulary rows.
 
 Out of scope (owner 2026-10-23): CLI, MCP server, planners, recording,
-training, datasets, teleoperation, telemetry, web.
+training, datasets, teleoperation, web. Telemetry and the simulation live
+view were added by the owner on 2026-10-27.

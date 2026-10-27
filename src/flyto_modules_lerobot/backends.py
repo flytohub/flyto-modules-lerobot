@@ -2,7 +2,8 @@
 
 """Which backend serves an arm config: LeRobot's own robot, or the simulator. A table, read by robot type.
 
-An arm config's ``lerobot.robot_type`` is looked up in :data:`BACKENDS`; any
+An arm config's ``lerobot.robot_type`` is looked up in :data:`BACKENDS`
+(``sim``: the in-process world; ``mujoco``: the MuJoCo physics world); any
 type not listed there is one of LeRobot's own (its registry resolves it). The
 row says everything that differs between the two -- how the robot is built,
 the deployment mode the manifest and ``served_identity`` state, the
@@ -50,6 +51,12 @@ def _build_simulation(config: Any, _factory: Callable[..., Any]) -> Any:
     return simulated_robot(config)
 
 
+def _build_mujoco(config: Any, _factory: Callable[..., Any]) -> Any:
+    from .mujoco_sim import mujoco_robot
+
+    return mujoco_robot(config)
+
+
 @dataclass(frozen=True)
 class Backend:
     """One way of serving an arm config."""
@@ -73,8 +80,11 @@ LEROBOT = Backend(deployment_mode="real", source="hardware", simulated=False, bu
 SIMULATION = Backend(deployment_mode="simulation", source="simulation", simulated=True, build=_build_simulation,
                      port_present=_sim_port, refuses_port=_not_a_sim_port)
 
-#: Robot types served by something other than LeRobot's own registry.
-BACKENDS: dict[str, Backend] = {"sim": SIMULATION}
+MUJOCO = Backend(deployment_mode="simulation", source="simulation", simulated=True, build=_build_mujoco,
+                 port_present=_sim_port, refuses_port=_not_a_sim_port)
+
+#: Robot types served by something other than LeRobot's own registry: the in-process world, MuJoCo.
+BACKENDS: dict[str, Backend] = {"sim": SIMULATION, "mujoco": MUJOCO}
 
 
 def backend_for(robot_type: str) -> Backend:
@@ -82,4 +92,4 @@ def backend_for(robot_type: str) -> Backend:
     return BACKENDS.get(str(robot_type), LEROBOT)
 
 
-__all__ = ["BACKENDS", "LEROBOT", "SIMULATION", "Backend", "backend_for"]
+__all__ = ["BACKENDS", "LEROBOT", "MUJOCO", "SIMULATION", "Backend", "backend_for"]

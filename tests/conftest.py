@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from fake_lerobot import FakeFollowerArm, fake_factory
-from flyto_modules_lerobot import plugin, simulation
+from flyto_modules_lerobot import mujoco_sim, plugin, simulation
 from flyto_modules_lerobot.arm_config import ArmConfig, parse_arm_config
 from flyto_modules_lerobot.driver import ArmSession
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
@@ -83,9 +83,11 @@ def _fresh_sessions():
     """Every test starts with no arm session or simulated world open in this process."""
     plugin.reset_sessions()
     simulation.reset_worlds()
+    mujoco_sim.reset_worlds()
     yield
     plugin.reset_sessions()
     simulation.reset_worlds()
+    mujoco_sim.reset_worlds()
 
 
 def sim_example_data() -> dict:

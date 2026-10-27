@@ -16,6 +16,11 @@ The move's bounds are the config's: the taught poses by name, and each body
 joint with its limits. The manifest never carries the port. Its
 ``deployment_mode`` is the backend's: ``simulation`` for a simulated arm.
 
+Live view (``live_view.py``): a MuJoCo arm with a rendered camera, on a host
+that sets ``FLYTO_LEROBOT_LIVE_PORT`` and asks for the ``live_channels``
+extension, declares two ``ws-jpeg`` video channels (overhead and scene) whose
+loopback source starts with discovery. Off otherwise.
+
 Telemetry: the manifest declares ``capabilities.TELEMETRY_CHANNELS`` (joint
 positions, gripper, held state, fault), and :func:`telemetry_sampler` -- the
 attribute the execution host's telemetry pump looks for on this callable --
@@ -46,6 +51,7 @@ from .capabilities import (
     TELEMETRY_INTERVAL_SECONDS,
 )
 from .driver import ArmFault, ArmUnreachable, MotorsMismatch, NotCalibrated
+from .live_view import ensure_live_view, live_channels, live_port
 from .plugin import configured_config, session_for
 
 MANIFEST_CONTRACT = "flyto.resource-manifest.v1"
@@ -64,7 +70,8 @@ def move_input_schema(config: ArmConfig) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": [], "additionalProperties": False}
 
 
-def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = False) -> dict[str, Any]:
+def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = False,
+                   live_view: bool = False) -> dict[str, Any]:
     """The resource manifest, from the capability table and the arm config."""
     schemas = {MOVE_JOINTS.capability_id: move_input_schema(config)}
     manifest: dict[str, Any] = {
@@ -85,6 +92,9 @@ def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = F
     }
     if module_pack:
         manifest["module_pack"] = MODULE_PACK
+    live = live_channels(config, live_port())
+    if live_view and live:
+        manifest["live_channels"] = live
     return manifest
 
 
@@ -108,7 +118,11 @@ def discover_resource_manifests(
         return []
     extensions = {str(item) for item in (manifest_extensions or ())}
     observed_at = datetime.now(UTC).isoformat(timespec="milliseconds")
-    return [build_manifest(config, observed_at=observed_at, module_pack="module_pack" in extensions)]
+    manifest = build_manifest(config, observed_at=observed_at, module_pack="module_pack" in extensions,
+                              live_view="live_channels" in extensions)
+    if "live_channels" in manifest:
+        ensure_live_view(config)
+    return [manifest]
 
 
 def _samples(config: ArmConfig, observed_at: str) -> list[dict[str, Any]]:
@@ -155,7 +169,7 @@ def telemetry_sampler(*, execution_host_id: str) -> list[dict[str, Any]]:
 
 
 discover_resource_manifests.module_pack = MODULE_PACK  # type: ignore[attr-defined]
-discover_resource_manifests.manifest_extensions = ("module_pack",)  # type: ignore[attr-defined]
+discover_resource_manifests.manifest_extensions = ("module_pack", "live_channels")  # type: ignore[attr-defined]
 discover_resource_manifests.telemetry_sampler = telemetry_sampler  # type: ignore[attr-defined]
 discover_resource_manifests.telemetry_interval_seconds = TELEMETRY_INTERVAL_SECONDS  # type: ignore[attr-defined]
 

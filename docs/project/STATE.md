@@ -37,6 +37,22 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   port raises `ArmUnreachable` and leaves no fault. Without the `feetech`
   extra the robot cannot be built, so the install line names it.
 
+2026-10-27 -- sensing closed loop, SIMULATION ONLY (branch `claude/sim-sensing-loop`):
+
+- `perception.locate_objects`, `manipulation.pick`, `manipulation.place`;
+  grasp judged by the gripper signature (closing on nothing is `failed` /
+  `no_object_held`); evidence specs on grasp, release, pick, place; typed
+  fault codes in `connection_status()`; four telemetry channels.
+- Two simulation backends: `sim` (in-process, 50/50 nominal pick+place in
+  the seeded benchmark) and `mujoco` (contact physics, rendered camera,
+  46/50 nominal). Zero false completions in every benchmark scenario on
+  both: no call said `completed` while the simulator's ground truth
+  disagreed.
+- Cloud `e1f9bfa13`'s own dispatcher took before/after observations of a
+  grasp and Cloud's contract arithmetic proved `object_held` from them.
+- The USB camera path (colour blobs, homography, height from apparent size)
+  is tested on synthetic images only; not on hardware.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.
@@ -44,8 +60,13 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   poses are untaught. Measure limits, teach `ready`, `fixture_pick`,
   `tray_place` on the arm with `manipulation.mark_pose`, and record `motion`
   values that suit it.
-- **Nothing is proven by Cloud.** move_joints, grasp, release and mark_pose declare no
-  evidence (`DECISIONS.md`).
+- **move_joints and mark_pose declare no evidence** (`DECISIONS.md`). Grasp,
+  release, pick and place declare self-observed specs; the perception half
+  would be `other_resource` once the camera is its own resource.
+- **No Cloud rows for `perception.locate_objects`, `manipulation.pick`,
+  `manipulation.place`** (another lane adds them).
+- **Simulation only.** No real camera, no measured kinematic chain, no real
+  pick. The sim examples' link lengths are illustrative.
 - **The 12 V cut-off switch** must be fitted and tested before any real run.
   The stop measurement has run only against the fake follower (including
   one that moves with time and runs on after a new goal); no real stop has

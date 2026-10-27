@@ -390,7 +390,7 @@ def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: 
         return {
             "kinematics": (parse_kinematics(body["kinematics"], body_joints=[joint.name for joint in joints],
                                             unit=unit) if "kinematics" in body else None),
-            "perception": (parse_perception(body["perception"], simulated_arm=simulated)
+            "perception": (parse_perception(body["perception"], robot_type=lerobot.robot_type)
                            if "perception" in body else None),
             "simulation": parse_simulation(body["simulation"], poses=tuple(poses)) if simulated else None,
         }

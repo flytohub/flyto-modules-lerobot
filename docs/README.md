@@ -7,3 +7,5 @@
 - `docs/project/STATE.md` -- what is verified now, and what is not.
 - `docs/project/ROADMAP.md`, `docs/project/tasks.md` -- what comes next.
 - `../examples/am-arm200.json` -- the AM-ARM200 arm config (placeholder limits, untaught poses).
+- `../examples/am-arm200-sim.json`, `../examples/am-arm200-mujoco.json` -- SIMULATION configs (in-process, MuJoCo).
+- `../README.md#simulation` -- running the sensing loop in simulation, the benchmark and the viewers.
