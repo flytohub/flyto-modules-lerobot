@@ -81,6 +81,25 @@ flattens `joints` into that shape.
 false). Its input schema is fixed in the table. A newly taught pose reaches
 the move's `pose` enum when the host next publishes the manifest.
 
+## The adapter's modules (2026-10-28)
+
+`LeRobotArmAdapter` is one object, because every capability shares one arm
+session, one config and one motion loop. Its code is split by
+responsibility:
+
+| Module | Holds |
+|---|---|
+| `lerobot_adapter.py` | the entry point (`invoke`, `cancel`, `safe_stop`, `observe`), the motion loop, the gripper, `mark_pose` |
+| `adapter_common.py` | what all of them share: the refusal and interruption errors, `_Call`, `_Phases`, `_Target`, limits |
+| `arm_looks.py` (`_LooksMixin`) | where the camera looks from (`_view_pose`), each look, the look after a failure, the look that stops once its spots are clear |
+| `arm_pick.py` (`_PickMixin`) | `manipulation.pick`, including the look past the arm for a target seen in part |
+| `arm_place.py` (`_PlaceMixin`) | `manipulation.place`, including the container re-check and a drop in transit |
+
+`_view_pose` is the one place a look's vantage is chosen. It starts from the
+taught observe pose. When the occlusion model (`perception.arm_margin`) says
+that pose covers a spot the look must see, it turns the arm about its base to
+the clearest angle within limits.
+
 ## What an outcome claims (`lerobot_adapter.py`)
 
 | Situation | Outcome | `reason_code` | `effect_applied` |
@@ -90,9 +109,11 @@ the move's `pose` enum when the host next publishes the manifest.
 | Grasp: the jaws closed fully | failed | `no_object_held` | true (`object_held: false`) |
 | Grasp: the jaws met something, then crept on | failed | `object_slipped` | true |
 | Pick / place: the camera does not see the object / container | refused | `object_not_found` / `container_not_found` | false |
-| Pick: the look it plans on shows its target only in part (cut by the arm or another object) | refused | `target_partly_seen` | false |
+| Pick: the look it plans on shows its target only in part, and no pose sees it better than where the arm stands | refused | `target_partly_seen` | false |
+| Pick: still in part after moving where the arm does not hide it and looking again (jaws never sent down) | failed | `target_partly_seen` | true (`object_held: false`, `perception_after`) |
 | Pick / place: a pose of the plan has no joint solution in the limits | refused | `pose_unreachable` | false |
-| Place: the gripper holds nothing | refused | `nothing_held` | false |
+| Place: the gripper holds nothing, and no pick before it proved anything held | refused | `nothing_held` | false |
+| Place: the jaws lost what the pick proved held (dropped in transit); looked past the arm | failed | `nothing_held` | true (`object_held: false`, `released: false`, `perception_after`) |
 | Place bound to a container (`x`, `y` + `container_label`, `container_uncertainty_m`): seen now farther from (`x`, `y`) than both looks' uncertainty together / not seen | refused (fixed camera) or failed holding the object after the look's move (camera on the arm) | `container_moved` / `container_not_found` | false / true (`released: false`, `object_held: true`) |
 | Place: the container where it goes seen only in part, even from straight over it | refused / failed holding (as above) | `container_not_found` | false / true |
 | Locate: a camera on the arm whose view, where the arm is, cannot place a whole object at its centre within `perception.max_uncertainty_m` | refused (nothing moves) | `viewpoint_unsuitable` | false |

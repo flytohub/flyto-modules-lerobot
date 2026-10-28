@@ -315,3 +315,55 @@ def test_a_slipped_block_falls_out_of_the_jaws_and_the_gripper_reads_it(data, af
     # The gripper signature Cloud judges from (the host's ``observe``) says what physically happened.
     assert rig.adapter.observe(phase="after", execution_id="slip")["object_held"] == 0
     assert rig.world.fault_log[-1]["kind"] == "grasp_slip"
+
+
+def test_a_block_dropped_in_transit_is_seen_from_the_observe_pose(data):
+    """A block that slipped out after the pick lies beside the arm's base, hidden from where the arm
+    stood; the place moves to the observe pose before it fails, and that look sees it (end-to-end
+    grasp_slip, 2026-10-28: 28 of 50 re-picks held on ``not_observed`` when the place refused in place)."""
+    rig = Rig(data)
+    assert rig.call("manipulation.pick", {"object_id": "red-1"}).outcome == OUTCOME_COMPLETED
+    rig.world.inject({"kind": "grasp_slip", "after_held_s": 0.0})
+    for _ in range(30):
+        rig.clock.sleep(0.05)
+        rig.world.step()
+    truth = rig.world.data.body("block-red").xpos
+    result = rig.call("manipulation.place", {"x": 0.2, "y": -0.14})
+    assert result.outcome == OUTCOME_FAILED and result.evidence["reason_code"] == "nothing_held"
+    assert result.evidence["released"] is False and result.evidence["object_held"] is False
+    seen = result.evidence["perception_after"]["object"]
+    assert seen is not None and seen["label"] == "red block"
+    assert ((seen["pose"]["x"] - truth[0]) ** 2 + (seen["pose"]["y"] - truth[1]) ** 2) ** 0.5 < 0.02
+    assert "red block" in {item["label"] for item in result.evidence["perception_after"]["objects"]}
+
+
+def test_a_look_at_a_spot_the_observe_pose_hides_turns_the_arm_away(data):
+    """The observe pose is one taught pose; the arm standing there hides a block beside its base from the
+    overhead camera (unseen in every case measured, 2026-10-28). The look pose for that spot turns the
+    arm about its base until the occlusion model clears it, and the camera then sees the block whole."""
+    from flyto_modules_lerobot.perception import Spot
+
+    rig = Rig(data)
+    world, adapter = rig.world, rig.adapter
+    world.inject({"kind": "object_moved", "object_id": "block-red", "x": 0.09, "y": 0.0, "at_s": world.elapsed()})
+    observe = dict(data["poses"]["observe"]["joints"])
+
+    def look_from(joints):
+        for name, value in joints.items():
+            world.data.qpos[world._joint[name].qposadr[0]] = world._to_q(name, value)
+            world.goals[name] = value
+            world._ctrl[name] = world._to_q(name, value)
+        world.mj.mj_forward(world.model, world.data)
+        return [item for item in adapter._look().detections if item.label == "red block"]
+
+    for _ in range(10):
+        rig.clock.sleep(0.02)
+        world.step()
+    assert not [item for item in look_from(observe) if item.height_known], "the observe pose hides it"
+    view = adapter._view_pose((Spot(0.09, 0.0, 0.0, data["perception"]["match_radius_m"]),))
+    assert view["shoulder_pan"] != observe["shoulder_pan"]
+    assert {name: value for name, value in view.items() if name != "shoulder_pan"} == {
+        name: value for name, value in observe.items() if name != "shoulder_pan"}
+    seen = look_from(view)
+    assert seen and seen[0].height_known and not seen[0].seen_in_part
+    assert ((seen[0].x - 0.09) ** 2 + seen[0].y ** 2) ** 0.5 < 0.02

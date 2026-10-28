@@ -186,6 +186,8 @@ class ArmSession:
         self.captures: collections.deque[tuple[float, Any]] = collections.deque(maxlen=8)
         # The id of the object a completed pick left in the gripper (None: unknown or nothing).
         self.held_object: str | None = None
+        # Its label as the pick saw it, to find it again if it is dropped (None: unknown).
+        self.held_label: str | None = None
         # Calls in flight on this arm, from every adapter: a stop interrupts them all.
         self.calls_in_flight: set[Any] = set()
 

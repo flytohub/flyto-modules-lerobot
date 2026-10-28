@@ -311,24 +311,31 @@ def _to_segment(px: float, py: float, a: tuple[float, float], b: tuple[float, fl
     return math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy))
 
 
-def arm_hides(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float, spot: Spot) -> bool:
-    """Whether the arm, as capsules of radius ``clearance`` along the polyline ``arm``, covers any of ``spot``.
+def arm_margin(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float, spot: Spot) -> float:
+    """How far ``spot`` lies outside the arm's cast, in metres on its plane: negative when the arm covers it.
 
+    The arm is capsules of radius ``clearance`` along the polyline ``arm``.
     Each link's part above the spot is cast along the camera's rays onto the
-    spot's plane (magnified the way the camera sees it); the spot is hidden
-    when it comes within the cast capsule.
+    spot's plane (magnified the way the camera sees it); the margin is the
+    least distance from the spot's edge to a cast capsule. A link reaching
+    past the eye's height is not modelled: minus infinity, never trusted.
     """
+    margin = math.inf
     for a, b in pairwise(arm):
         clipped = _clip(a, b, spot.z)
         if clipped is None:
             continue
         ends = [_shadow(point, spot.z, geometry.eye) for point in clipped]
         if any(end is None for end in ends):
-            return True  # a link reaching past the eye's height: do not trust the model
+            return -math.inf
         (ax, ay, sa), (bx, by, sb) = ends  # type: ignore[misc]
-        if _to_segment(spot.x, spot.y, (ax, ay), (bx, by)) <= clearance * max(sa, sb) + spot.radius:
-            return True
-    return False
+        margin = min(margin, _to_segment(spot.x, spot.y, (ax, ay), (bx, by)) - clearance * max(sa, sb) - spot.radius)
+    return margin
+
+
+def arm_hides(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float, spot: Spot) -> bool:
+    """Whether the arm, as capsules of radius ``clearance`` along the polyline ``arm``, covers any of ``spot``."""
+    return arm_margin(geometry, arm, clearance, spot) <= 0.0
 
 
 #: An arm pixel is grey: its colour channels differ by no more than this share of the brightest.
@@ -1926,6 +1933,7 @@ __all__ = [
     "Spot",
     "UsbCamera",
     "arm_hides",
+    "arm_margin",
     "build_camera",
     "camera_geometry",
     "container_holding",

@@ -271,22 +271,78 @@ class _PartlyCovered:
         return replace(inner, detections=cut)
 
 
+class _CoveredWhereItStands(_PartlyCovered):
+    """The same cut, only in frames taken with the arm where it stood: moved away, the camera sees it whole."""
+
+    def __init__(self, camera, object_id: str, world) -> None:
+        super().__init__(camera, object_id)
+        self.world, self.joints = world, dict(world.positions)
+
+    def capture(self, joints=None):
+        now = self.world.positions
+        here = all(abs(now.get(name, value) - value) < 0.5 for name, value in self.joints.items())
+        return super().capture(joints) if here else self.camera.capture(joints)
+
+
 @pytest.mark.parametrize("by_pose", [False, True])
-def test_a_pick_whose_target_the_arm_partly_covers_is_refused_before_moving(sim, by_pose):
+def test_a_pick_whose_target_stays_partly_covered_is_never_grasped(sim, by_pose):
     """A blob cut by the arm gives a centre and a heading the object does not have: jaws sent there land on it.
 
     The regrasp after a missed pick looked past the arm parked at the old
     target and planned on a block seen in part (up to 14 mm and 36 degrees
-    off). Such a target is refused, typed, before anything is sent.
+    off). Such a target is never grasped. The pick first moves where the arm
+    does not hide it and looks again; a target still seen in part fails there,
+    holding nothing, the jaws never sent down, with the look it took.
     """
     seen = sim.call(LOCATE_OBJECTS.capability_id).evidence["objects"]
     red = next(item for item in seen if item["id"] == "block-red")["pose"]
     sim.session.camera = _PartlyCovered(sim.adapter._camera(), "block-red")
     sim.clock.sleep(5.0)  # no young frame that saw it whole is left to plan by
-    before = dict(sim.world.positions)
     arguments = {"x": red["x"], "y": red["y"], "yaw": red["yaw"]} if by_pose else {"object_id": "block-red"}
     result = sim.call(PICK.capability_id, arguments)
-    assert result.outcome == OUTCOME_REFUSED, result.detail
+    assert result.outcome == OUTCOME_FAILED, result.detail
     assert result.evidence["reason_code"] == REASON_TARGET_PARTLY_SEEN
-    assert result.evidence["effect_applied"] is False
-    assert sim.world.positions == before
+    assert result.evidence["object_held"] is False
+    phases = [row["phase"] for row in result.evidence["phases"]]
+    assert not {"approach", "descend", "grasp"} & set(phases), phases
+    assert phases[-1] == "perceive_again"
+    assert result.evidence["perception_after"]["after_failure"] == REASON_TARGET_PARTLY_SEEN
+
+
+def test_a_target_the_arm_covered_where_it_stood_is_picked_from_where_it_is_seen_whole(sim):
+    """Moved clear, the camera sees the target whole, and the grasp is planned on that look."""
+    sim.call(LOCATE_OBJECTS.capability_id)
+    sim.session.camera = _CoveredWhereItStands(sim.adapter._camera(), "block-red", sim.world)
+    sim.clock.sleep(5.0)
+    result = sim.call(PICK.capability_id, {"object_id": "block-red"})
+    assert result.outcome == OUTCOME_COMPLETED, result.detail
+    phases = [row["phase"] for row in result.evidence["phases"]]
+    assert phases.index("perceive_again") < phases.index("grasp")
+    assert sim.session.held_object == "block-red"
+
+
+def test_a_block_dropped_in_transit_is_looked_for_before_the_place_fails(sim):
+    """A place whose jaws lost what the pick proved held moves to look and fails with that look.
+
+    Refused where the arm stood, the look Cloud took next did not see the
+    block, which lay under the arm (end-to-end grasp_slip, 2026-10-28: 28 of
+    50 re-picks held on ``not_observed``). The place now looks past the arm
+    first, so the re-pick can be bound to where the block lies. A place with
+    no pick before it is still refused before anything moves (above).
+    """
+    assert sim.call(PICK.capability_id, {"object_id": "block-red"}).outcome == OUTCOME_COMPLETED
+    sim.world.inject({"kind": "grasp_slip", "after_held_s": 0.0})
+    for _ in range(20):
+        sim.clock.sleep(0.05)
+        sim.world.step()
+    result = sim.call(PLACE.capability_id, {"container_id": "bin-blue"})
+    assert result.outcome == OUTCOME_FAILED and result.evidence["reason_code"] == REASON_NOTHING_HELD
+    evidence = result.evidence
+    assert evidence["object_held"] is False and evidence["released"] is False
+    assert evidence["effect_applied"] is True and evidence["arm"] != evidence["arm_before"]
+    # The look from the observe pose rides on the failure (whether it sees the block is MuJoCo's to show:
+    # ``test_mujoco_backend.test_a_block_dropped_in_transit_is_seen_from_the_observe_pose``).
+    look = evidence["perception_after"]
+    assert look["after_failure"] == REASON_NOTHING_HELD and isinstance(look["objects"], list)
+    assert [row["phase"] for row in evidence["phases"]][-1] == "look_after_failure"
+    assert sim.session.held_object is None

@@ -262,6 +262,11 @@ POWER_CUTOFF_DETAIL = (
 )
 
 
+#: A place whose jaws lost what the pick proved held: it moved to look, and released nothing.
+DROPPED_IN_TRANSIT_DETAIL = (
+    "夾爪已經沒有夾著先前夾起的物品（搬運途中掉落）；手臂已移到觀察位置重新拍照，沒有放下任何東西。")
+
+
 def refusal_detail(code: str) -> str:
     """The zh-TW sentence shown to the person for a refusal code."""
     return REFUSAL_DETAILS.get(code, "")
