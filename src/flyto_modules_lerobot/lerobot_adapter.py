@@ -86,67 +86,65 @@ import json
 import math
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
+from .adapter_common import (
+    _DRIVER_ERRORS,
+    _GRIPPER_ACTIONS,
+    _STOP_OUTCOMES,
+    _UNMEASURED,
+    OBSERVATION_PHASES,
+    OBSERVATION_SCHEMA,
+    _Call,
+    _finite,
+    _Interrupted,
+    _Lost,
+    _Phases,
+    _Refused,
+    _ShortOfTarget,
+    _unsent,
+)
 from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_COMPLETED,
     OUTCOME_FAILED,
     OUTCOME_REFUSED,
-    OUTCOME_TIMEOUT,
     CallResult,
 )
 from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
+from .arm_looks import _LooksMixin
+from .arm_pick import _PickMixin
+from .arm_place import _PlaceMixin
 from .backends import backend_for
 from .capabilities import (
-    CONTAINER_REF_ARGUMENTS,
     DEPLOYMENT_MODE,
-    DROPPED_IN_TRANSIT_DETAIL,
     MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
-    MAX_LABEL_LENGTH,
-    MAX_OBSERVED_AT_LENGTH,
     OBSERVED_HELD,
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
     REASON_CONFIG_NOT_WRITABLE,
-    REASON_CONTAINER_MOVED,
-    REASON_CONTAINER_NOT_FOUND,
     REASON_DEADLINE,
     REASON_EFFECT_UNKNOWN,
     REASON_FAULT,
     REASON_KINEMATICS_UNAVAILABLE,
-    REASON_MOTORS_MISMATCH,
     REASON_NO_OBJECT,
-    REASON_NOT_CALIBRATED,
-    REASON_NOT_IN_CONTAINER,
     REASON_NOT_REACHED,
     REASON_NOT_RELEASED,
     REASON_NOT_SEEN_IN_JAWS,
-    REASON_NOTHING_HELD,
-    REASON_OBJECT_NOT_FOUND,
     REASON_OUTSIDE_LIMITS,
-    REASON_PERCEPTION_DISAGREES,
-    REASON_PERCEPTION_UNAVAILABLE,
-    REASON_PLACEMENT_UNOBSERVED,
     REASON_POSE_NOT_TAUGHT,
     REASON_POSE_TAUGHT,
     REASON_POSE_UNKNOWN,
     REASON_POSE_UNREACHABLE,
-    REASON_SIMULATION_ON_HARDWARE,
     REASON_SLIPPED,
     REASON_STOP_REQUESTED,
-    REASON_TARGET_PARTLY_SEEN,
-    REASON_UNREACHABLE,
-    REASON_VIEWPOINT_UNSUITABLE,
     SPECS_BY_CAPABILITY,
     refusal_detail,
 )
 from .driver import (
-    FAULT_SIMULATION_ON_HARDWARE,
     ArmFault,
     ArmSession,
     ArmUnreachable,
@@ -156,207 +154,13 @@ from .driver import (
 )
 from .evidence import policy_refusal
 from .perception import (
-    CameraUnavailable,
-    Capture,
-    Detection,
-    Spot,
-    arm_hides,
-    arm_margin,
-    build_camera,
-    camera_geometry,
-    container_holding,
-    container_under,
-    find,
-    locate_result,
-    mounted_view,
-    nearest,
-    object_record,
-    on_table,
-    resting_inside,
     scene_counts,
 )
 from .trajectory import Trajectory, motion_limits
 from .trajectory import plan as plan_trajectory
 
-OBSERVATION_SCHEMA = "flyto.lerobot.observation.v1"
-OBSERVATION_PHASES = frozenset({"before", "after", "post_stop", "settled"})
 
-# Why the arm could not be used, by the driver's error, before anything was sent.
-_UNSENT_REASONS: Mapping[type, str] = {
-    ArmUnreachable: REASON_UNREACHABLE,
-    NotCalibrated: REASON_NOT_CALIBRATED,
-    ArmFault: REASON_FAULT,
-    MotorsMismatch: REASON_MOTORS_MISMATCH,
-}
-# A latched fault whose code says more than "the arm's protection tripped".
-_FAULT_REASONS: Mapping[str, str] = {FAULT_SIMULATION_ON_HARDWARE: REASON_SIMULATION_ON_HARDWARE}
-# The capabilities that move the gripper (a stop holds it too while one runs).
-_GRIPPER_ACTIONS = frozenset({"grasp", "release", "pick", "place"})
-# How an interrupted move ends, by why it was interrupted.
-_STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, REASON_DEADLINE: OUTCOME_TIMEOUT}
-_DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)
-# The most of a spot a frame may show covered by the arm and still count as seeing it (edge pixels).
-_MAX_COVERED = 0.02
-# How far the base turns per try when the observe pose hides a spot a look must see (``_view_pose``).
-VIEW_TURN_STEP_DEG = 15
-# What a stop measurement says when it could not measure.
-_UNMEASURED: Mapping[str, Any] = {"stop_measured": False, "stop_to_still_ms": None, "overshoot": None}
-
-
-def _finite(value: Any) -> bool:
-    """A real, finite number; booleans are not numbers here."""
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
-
-
-class _Refused(Exception):
-    """A call refused before anything was commanded."""
-
-    def __init__(self, code: str, observed: Mapping[str, Any] | None = None) -> None:
-        """The refusal code, and what was read when it was decided."""
-        super().__init__(code)
-        self.code = code
-        self.observed = dict(observed or {})
-
-
-class _Interrupted(Exception):
-    """A stop, a cancel or the deadline interrupted a move."""
-
-    def __init__(self, reason: str) -> None:
-        """Why the move was interrupted (``stop_requested`` or ``deadline_reached``)."""
-        super().__init__(reason)
-        self.reason = reason
-
-
-class _Lost(Exception):
-    """After a command went out, nothing says what happened."""
-
-    def __init__(self, code: str) -> None:
-        """``effect_unknown``, or ``arm_fault`` when LeRobot's protection tripped meanwhile."""
-        super().__init__(code)
-        self.code = code
-
-
-@dataclass(eq=False)
-class _Call:
-    """One call in flight: what may interrupt it, and which motors it moves."""
-
-    deadline_at: float
-    moves_gripper: bool = False
-    cancel: threading.Event = field(default_factory=threading.Event)
-    # When a stop, a cancel or the deadline first interrupted it (the adapter's clock).
-    stop_requested_at: float | None = None
-
-    def request_stop(self, now: float) -> None:
-        """Interrupt this call; the first request's time is the one a stop is measured from."""
-        if self.stop_requested_at is None:
-            self.stop_requested_at = now
-        self.cancel.set()
-
-
-class _ShortOfTarget(Exception):
-    """A leg of a pick or a place stopped moving short of its target."""
-
-    def __init__(self, positions: Mapping[str, float]) -> None:
-        """Where the arm stopped."""
-        super().__init__("short of target")
-        self.positions = dict(positions)
-
-
-def _unsent_reason(error: Exception) -> str:
-    code = getattr(error, "fault_code", None)
-    if code in _FAULT_REASONS:
-        return _FAULT_REASONS[code]
-    return next(reason for kind, reason in _UNSENT_REASONS.items() if isinstance(error, kind))
-
-
-def _unsent(step: Callable[[], Any]) -> Any:
-    """Run a step nothing has been commanded before; a driver error is the call's typed refusal."""
-    try:
-        return step()
-    except MotorsMismatch as error:
-        raise _Refused(REASON_MOTORS_MISMATCH, {"reported": list(error.reported),
-                                                "configured": list(error.configured)}) from error
-    except (ArmUnreachable, NotCalibrated, ArmFault) as error:
-        observed: dict[str, Any] = {"error": type(error).__name__}
-        if getattr(error, "fault_code", None):
-            observed["fault_code"] = error.fault_code  # type: ignore[attr-defined]
-        raise _Refused(_unsent_reason(error), observed) from error
-
-
-class _Phases:
-    """When each phase of a pick or a place started and how long it took (the adapter's clock)."""
-
-    def __init__(self, clock: Callable[[], float]) -> None:
-        """Start the call's clock now."""
-        self._clock = clock
-        self.started = clock()
-        self.rows: list[dict[str, Any]] = []
-        self._current: tuple[str, float] = ("", self.started)
-
-    @contextmanager
-    def __call__(self, name: str) -> Iterator[None]:
-        """Time one phase; it is recorded even when it ends the call."""
-        self._current = (name, self._clock())
-        try:
-            yield
-        finally:
-            self._close()
-
-    def switch(self, name: str) -> None:
-        """End the phase running now and start ``name`` in its place (one motion that spans two phases)."""
-        self._close()
-        self._current = (name, self._clock())
-
-    def _close(self) -> None:
-        name, begun = self._current
-        self.rows.append({"phase": name, "started_ms": round((begun - self.started) * 1000.0, 3),
-                          "ms": round((self._clock() - begun) * 1000.0, 3)})
-
-    def evidence(self) -> dict[str, Any]:
-        """``phases`` and ``latency_ms`` (each phase and the total)."""
-        latency = {row["phase"]: row["ms"] for row in self.rows}
-        latency["total"] = round((self._clock() - self.started) * 1000.0, 3)
-        return {"phases": list(self.rows), "latency_ms": latency}
-
-
-@dataclass(frozen=True)
-class _Target:
-    """Where a pick or a place goes in the table frame, and the object or container it is about."""
-
-    x: float
-    y: float
-    z: float
-    yaw: float | None
-    height: float
-    detection: Detection | None
-
-    def pose(self, frame: str) -> dict[str, Any]:
-        return {"frame": frame, "x": round(self.x, 4), "y": round(self.y, 4), "z": round(self.z, 4),
-                "yaw": round(self.yaw or 0.0, 4)}
-
-
-@dataclass(frozen=True)
-class _ContainerRef:
-    """The located container's record a place is bound to (``container_ref``)."""
-
-    label: str
-    x: float
-    y: float
-    uncertainty_m: float
-    observed_at: str | None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"label": self.label, "x": round(self.x, 4), "y": round(self.y, 4),
-                "uncertainty_m": round(self.uncertainty_m, 4), "observed_at": self.observed_at}
-
-
-def _level(vector: Sequence[float]) -> tuple[float, float] | None:
-    """A direction's horizontal part, as a unit vector; None when it points (almost) straight up or down."""
-    length = math.hypot(vector[0], vector[1])
-    return None if length < 1e-6 else (vector[0] / length, vector[1] / length)
-
-
-class LeRobotArmAdapter:
+class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin):
     """One arm, through its shared LeRobot session."""
 
     # capability row ``action`` -> handler method.
@@ -1035,40 +839,6 @@ class LeRobotArmAdapter:
             if held >= gripper.hold_samples or unheld >= gripper.hold_samples:
                 return current, grip
 
-    def _after_failure(self, call: _Call, positions: dict[str, float], counter: list[int], leg: dict[str, Any],
-                       phases: _Phases, label: str | None, reason: str) -> tuple[dict[str, float], dict[str, Any]]:
-        """Where the object is after a grasp that holds nothing, seen past the arm: ``(reading, look)``.
-
-        It slipped out and fell, or the jaws closed beside it: under or near
-        the arm either way, which hides it from a look from where the arm
-        stopped. The arm goes to a pose that does not hide where the jaws
-        were (:meth:`_view_pose`: the observe pose, turned about the base when
-        that pose itself hides the spot; a camera on the arm: its look pose)
-        and a new look reports the object of its label nearest where the jaws
-        were (``object``; None when the label is not known), with every loose
-        block it sees (``objects``) -- so the failure says where it lies, and
-        the arm is left where a read-only look sees it too.
-        """
-        jaws = self.config.kinematics.forward(positions).position if self.config.kinematics is not None else None
-        fell = (Spot(jaws[0], jaws[1], self._table_z(), self.config.perception.match_radius_m),) if jaws else ()
-        view = self._view_pose(fell)
-        if view is not None:
-            with phases(f"{self._view_phase}_after_failure"):
-                positions = self._follow(call, positions, [view], counter, leg)
-        with phases("look_after_failure"):
-            after = self._look()
-        if after is None:
-            return positions, {"object": None, "objects": [], "object_on_table": None, "counts": None,
-                               "after_failure": reason}
-        loose = [item for item in after.detections if item.kind == "block"
-                 and item.id not in after.camera.get("in_hand", ())]
-        blocks = [item for item in loose if label is not None and item.label == label]
-        found = (min(blocks, key=lambda item: math.hypot(item.x - jaws[0], item.y - jaws[1]))
-                 if blocks and jaws is not None else None)
-        return positions, {"object": self._record(found, after),
-                           "objects": [self._record(item, after) for item in loose],
-                           "object_on_table": None if found is None else on_table(found, self.config.perception),
-                           "counts": scene_counts(after, self.config.perception), "after_failure": reason}
 
     def _open(self, call: _Call, start: Mapping[str, float], counter: list[int],
               leg: dict[str, Any]) -> dict[str, float]:
@@ -1082,123 +852,15 @@ class LeRobotArmAdapter:
 
     # -- perception ---------------------------------------------------------------------
 
-    def _camera(self) -> Any:
-        """The arm's camera (one per session), or None when the config names none."""
-        if self.session.camera is None and self.config.perception is not None:
-            self.session.camera = build_camera(self.config)
-        return self.session.camera
 
-    @property
-    def _mounted(self) -> bool:
-        """Whether the arm's camera is on the arm (eye-in-hand) rather than fixed over the table."""
-        perception = self.config.perception
-        return perception is not None and getattr(perception.camera, "mount", None) is not None
 
-    @property
-    def _view_phase(self) -> str:
-        """The phase that moves the arm for a verifying look: to the look pose (eye-in-hand) or clear of the view."""
-        return "look_pose" if self._mounted else "clear_view"
 
-    def _look(self) -> Capture | None:
-        """One capture, or None when there is no camera or it gave no frame.
 
-        A camera on the arm is placed by the arm's chain at the joints read
-        for the capture; that reading is recorded with it.
-        """
-        camera = self._camera()
-        if camera is None:
-            return None
-        try:
-            joints = self.session.read() if self._mounted else None
-            capture = camera.capture(joints)
-        except (CameraUnavailable, OSError, ImportError, *_DRIVER_ERRORS):
-            return None
-        self.session.captures.append((self._clock(), capture))
-        return capture
 
-    def _recent(self, *ids: str | None) -> Capture | None:
-        """The newest frame young enough to plan by (``perception.reuse_within_s``) that saw all of ``ids`` whole.
 
-        Only a look that plans may take it; a look that verifies always takes
-        a new frame. Positions are in the table frame, so a frame from a
-        camera on the arm serves wherever the arm is now; what makes it stale
-        is only its age.
-        """
-        perception = self.config.perception
-        if perception is None:
-            return None
-        now = self._clock()
-        for taken_at, capture in reversed(self.session.captures):
-            if now - taken_at > perception.reuse_within_s:
-                return None
-            if all((item := find(capture, wanted)) is not None and item.height_known and not item.seen_in_part
-                   for wanted in ids if wanted):
-                return capture
-        return None
 
-    def _look_for(self, *ids: str | None) -> Capture | None:
-        """Up to ``perception.max_captures`` looks, until every named object is seen; the last capture."""
-        wanted = [item for item in ids if item]
-        attempts = self.config.perception.max_captures if self.config.perception is not None else 1
-        capture = None
-        for _ in range(attempts):
-            capture = self._look()
-            if capture is None or all(find(capture, item) is not None for item in wanted):
-                return capture
-        return capture
 
-    def _capture(self, *ids: str | None, plan: bool = False) -> Capture:
-        """A capture; refused (nothing sent) without one.
 
-        To plan by, a young enough frame that saw the named objects whole
-        serves; failing that, a new look, and when that one sees them only in
-        part (behind the jaws or what they hold), the newest young frame that
-        saw them whole.
-        """
-        capture = (self._recent(*ids) if plan else None) or self._look_for(*ids)
-        if plan and capture is not None and any(
-                (item := find(capture, wanted)) is not None and (not item.height_known or item.seen_in_part)
-                for wanted in ids if wanted):
-            capture = self._recent(*ids) or capture
-        if capture is None:
-            raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"camera": self.config.perception is not None})
-        return capture
-
-    def _locate_objects(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``perception.locate_objects``: the objects on the table as the camera sees them now. Moves nothing."""
-        if not set(arguments) <= {"kind", "label"} or not all(isinstance(value, str) for value in arguments.values()):
-            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
-        capture = self._capture()
-        unsuitable = self._unsuitable(capture)
-        if unsuitable is not None:
-            raise _Refused(REASON_VIEWPOINT_UNSUITABLE, {"viewpoint": unsuitable,
-                                                         "max_uncertainty_m": self.config.perception.max_uncertainty_m})
-        body = locate_result(capture, self.config.perception.frame, kind=arguments.get("kind"),
-                             label=arguments.get("label"))
-        return CallResult(call_id, OUTCOME_COMPLETED, evidence={**body, "source": capture.source})
-
-    def _unsuitable(self, capture: Capture) -> Mapping[str, Any] | None:
-        """The viewpoint of a look by a camera on the arm that cannot place things well enough; None when it can.
-
-        Such a camera measures from wherever the arm is. A look whose centre
-        ray misses the table, or that could place a whole object at its
-        image's centre only within more than ``perception.max_uncertainty_m``
-        (:func:`perception.viewpoint`), cannot see the table at the resolution
-        the config requires. A fixed camera's viewpoint is its calibration.
-        """
-        point = capture.camera.get("viewpoint")
-        limit = self.config.perception.max_uncertainty_m
-        if point is None or limit is None:
-            return None
-        if not point.get("table_in_view") or point["within_m"] > limit:
-            return point
-        return None
-
-    def _record(self, item: Detection | None, capture: Capture) -> dict[str, Any] | None:
-        if item is None:
-            return None
-        return object_record(item, frame=self.config.perception.frame.id, observed_at=capture.observed_at,
-                             source=capture.source)
 
     # -- planning -------------------------------------------------------------------------
 
@@ -1259,161 +921,15 @@ class LeRobotArmAdapter:
             raise _ShortOfTarget(positions)
         return positions
 
-    def _observe_pose(self) -> Any:
-        """The perception's taught observe pose, or None."""
-        perception = self.config.perception
-        name = perception.observe_pose if perception is not None else None
-        pose = self.config.poses.get(name) if name else None
-        return pose if pose is not None and pose.taught else None
 
-    def _view_pose(self, spots: Sequence[Spot]) -> dict[str, float] | None:
-        """Joints for a look that sees every spot past the arm; None without a taught observe pose.
 
-        The observe pose is one taught pose, and the arm standing there hides
-        what lies beside it from an overhead camera: a block that fell beside
-        the base was unseen from it in every case measured, and seen whole
-        with the arm turned away (MuJoCo, 2026-10-28). So when the occlusion
-        model (``perception.arm_margin``) says the observe pose covers a spot,
-        the arm turns about its base -- the one joint that sweeps its whole
-        cast across the table and leaves the camera's height and the arm's
-        reach alone -- to the angle within its limits where the spots lie
-        farthest outside its cast, the smallest turn among equals. The model
-        is a single capsule radius for every link, so it can call a spot
-        covered from every angle that a frame shows clear: the clearest angle
-        is taken rather than none, and the caller's own frame decides what
-        was seen (:meth:`_shows`). Without the model, or a base that turns
-        about the vertical, the taught pose is the look, as before.
-        """
-        pose = self._observe_pose()
-        if pose is None:
-            return None
-        joints = dict(pose.joints)
-        model, chain = self._occlusion(), self.config.kinematics
-        if model is None or not spots or self._margin(model, joints, spots) > 0.0:
-            return joints
-        base = chain.base_yaw_joint(joints)
-        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
-        if base is None or base not in limits:
-            return joints
-        low, high = limits[base]
-        step = math.radians(VIEW_TURN_STEP_DEG) / chain.to_radians  # the config's unit
-        best, clearest = joints, self._margin(model, joints, spots)
-        for count in range(1, 180 // VIEW_TURN_STEP_DEG + 1):
-            for sign in (1, -1):
-                angle = joints[base] + sign * count * step
-                if not low <= angle <= high:
-                    continue
-                turned = {**joints, base: angle}
-                margin = self._margin(model, turned, spots)
-                if margin > clearest:
-                    best, clearest = turned, margin
-        return best
 
-    def _margin(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> float:
-        """How far the spots lie outside the arm's cast at these joints, the closest one's (``arm_margin``)."""
-        geometry, clearance = model
-        arm = self.config.kinematics.points(positions)
-        return min(arm_margin(geometry, arm, clearance, spot) for spot in spots)
 
-    def _occlusion(self) -> tuple[Any, float] | None:
-        """``(camera geometry, arm clearance)`` when the config models what the arm hides; None otherwise."""
-        perception, chain = self.config.perception, self.config.kinematics
-        if perception is None or chain is None or perception.arm_clearance_m is None:
-            return None
-        geometry = camera_geometry(perception)
-        return None if geometry is None else (geometry, perception.arm_clearance_m)
 
-    def _hidden(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> bool:
-        """Whether the arm, at these joints, hides any of ``spots`` from the camera (the occlusion model)."""
-        geometry, clearance = model
-        arm = self.config.kinematics.points(positions)
-        return any(arm_hides(geometry, arm, clearance, spot) for spot in spots)
 
-    def _over(self, seed: Mapping[str, float], x: float, y: float) -> dict[str, float] | None:
-        """Joints that hold the camera on the arm straight over ``(x, y)`` at ``perception.verify_height_m``."""
-        perception = self.config.perception
-        mount = getattr(perception.camera, "mount", None) if perception is not None else None
-        if mount is None or perception.verify_height_m is None:
-            return None
-        camera = self.config.kinematics.mounted(mount.link, mount.origin, mount.forward, mount.up)
-        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
-        solved = camera.solve((x, y, self._table_z() + perception.verify_height_m), seed, limits, yaw=None)
-        return None if solved is None else {**dict(seed), **solved}
 
-    def _away_and_look(self, call: _Call, positions: dict[str, float], path: Sequence[Mapping[str, float]],
-                       counter: list[int], leg: dict[str, Any], phases: _Phases, spots: Sequence[Spot],
-                       over: tuple[float, float] | None = None) -> tuple[dict[str, float], bool]:
-        """Drive ``path`` (a lift or a retreat), then on toward the observe pose until the camera sees ``spots``.
 
-        ``(last reading, stopped before the observe pose)``. The arm hides the
-        table from an overhead camera; whether it hides one of ``spots`` is the
-        occlusion model (``perception.arm_hides``, the arm's links cast along
-        the camera's rays). Once ``path`` is done, the motion stops -- braking
-        along the same path -- as soon as the model says every spot is clear,
-        and does not move at all past ``path`` when it is clear already.
-        Without a model the arm goes all the way to the observe pose; without
-        an observe pose the look is taken where ``path`` ends. Stopping early
-        never settles a verification by itself: the caller's look must show
-        every spot free of the arm in its own frame (:meth:`_shows`) and give a
-        settled answer, or the arm goes on to the observe pose and looks again.
-        """
-        above = self._over(path[-1], *over) if over is not None else None
-        if above is not None:
-            # A camera on the arm looks straight down at what it verifies: no slant to hide how high things rest.
-            return self._follow(call, positions, [*path, above], counter, leg, phases=phases,
-                                via_phases={len(path) - 1: self._view_phase}), False
-        view = self._view_pose(spots)
-        if view is None:
-            return self._follow(call, positions, path, counter, leg), False
-        model = self._occlusion()
-        watch = None if model is None else (lambda reading: not self._hidden(model, reading, spots))
-        tolerance = self.config.motion.tolerance
-        positions, reached, early = self._move(call, positions, [*path, view], counter, leg,
-                                               tolerance=tolerance, phases=phases,
-                                               via_phases={len(path) - 1: self._view_phase},
-                                               watch=watch, watch_from=len(path) - 1)
-        if early and not self._hidden(model, positions, spots):
-            return positions, True
-        if early:
-            positions = self._follow(call, positions, [view], counter, leg)
-        elif not reached:
-            raise _ShortOfTarget(positions)
-        return positions, False
 
-    @staticmethod
-    def _shows(capture: Capture | None, spots: Sequence[Spot]) -> bool:
-        """Whether this very frame shows every spot free of the arm (the camera's own word, not the model's)."""
-        if capture is None:
-            return False
-        for spot in spots:
-            covered = capture.covered(spot)
-            if covered is None or covered > _MAX_COVERED:
-                return False
-        return True
-
-    def _to_view_pose(self, call: _Call, positions: dict[str, float], counter: list[int],
-                      leg: dict[str, Any], spots: Sequence[Spot]) -> dict[str, float]:
-        """The rest of the way to a pose that sees ``spots``, for a second look when the first did not settle it."""
-        return self._follow(call, positions, [self._view_pose(spots)], counter, leg)
-
-    def _spots(self, capture: Capture | None, target: _Target, held_id: str | None) -> tuple[Spot, ...]:
-        """What a verifying look must see past the arm: the target, and every object the first look saw.
-
-        The contracts' evidence counts the objects on the table and in the
-        containers from a look after the call, so a look that loses any of
-        them behind the arm is not a look at the table. The object in the
-        gripper is not on the table and is left out.
-        """
-        table = self._table_z()
-
-        def spot(item: Detection | None, x: float, y: float, width: float) -> Spot:
-            if item is not None and item.size is not None:
-                return Spot(item.x, item.y, table, math.hypot(item.size[0], item.size[1]) / 2.0)
-            return Spot(x, y, table, width / 2.0 * math.sqrt(2.0))
-
-        seen = [spot(item, item.x, item.y, 0.0) for item in (capture.detections if capture is not None else ())
-                if item.id != held_id and item is not target.detection]
-        return (spot(target.detection, target.x, target.y, target.height), *seen)
 
     def _position_arguments(self, arguments: Mapping[str, Any], id_key: str,
                             pose_keys: frozenset[str]) -> tuple[str | None, dict[str, float]]:
@@ -1439,552 +955,23 @@ class LeRobotArmAdapter:
 
     # -- pick and place ---------------------------------------------------------------------
 
-    def _pick_target(self, capture: Capture | None, object_id: str | None, pose: Mapping[str, float]) -> _Target:
-        default = self._chain().grasp.default_object_height_m
-        if object_id is not None:
-            if capture is None:
-                raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"object_id": object_id})
-            item = find(capture, object_id)
-            if item is None or item.kind != "block":
-                raise _Refused(REASON_OBJECT_NOT_FOUND, {"object_id": object_id,
-                                                         "seen": [entry.id for entry in capture.detections]})
-            height = item.size[2] if item.size is not None else default
-            return _Target(item.x, item.y, item.z, item.yaw, height, item)
-        item = (nearest(capture, pose["x"], pose["y"], kind="block", radius=self.config.perception.match_radius_m)
-                if capture is not None else None)
-        return _Target(pose["x"], pose["y"], self._table_z(), pose.get("yaw"), default, item)
 
-    def _seen_whole(self, capture: Capture | None, target: _Target) -> None:
-        """Refused (nothing sent) when the look the grasp is planned on shows its target only in part.
 
-        A blob cut by the arm or another object has the visible part's centre
-        and outline, not the object's: jaws sent there land on the object. The
-        camera says so (``Detection.seen_in_part``). A requested position
-        with nothing detected at it is planned as asked.
-        """
-        item = target.detection
-        if capture is not None and item is not None and item.seen_in_part:
-            raise _Refused(REASON_TARGET_PARTLY_SEEN, {"object_id": item.id, "seen_at": [round(item.x, 4),
-                                                                                          round(item.y, 4)]})
 
-    def _look_past_arm(self, call_id: str, call: _Call, seen: tuple[Capture, _Target], arguments: tuple[Any, Any],
-                       before: Mapping[str, float], motion: tuple[list[int], dict[str, Any], _Phases]
-                       ) -> tuple[Capture | None, _Target, dict[str, float]] | CallResult:
-        """A target the planning look saw only in part: move where the arm does not hide it and look again.
 
-        ``(capture, target, reading)`` once the new look sees it whole, and the
-        grasp is planned from there. The look was cut by the arm (or another
-        object): refusing left every later look to be taken from the same
-        place, which hid it again -- a block beside the base was seen in part
-        or not at all from the observe pose, and whole with the arm turned
-        away. When no pose would be better than where the arm stands it is
-        refused as before, nothing sent. Once the arm moved, a target still
-        not seen whole fails, holding nothing, with the look it took
-        (``perception_after.objects``) for a retry to be bound to.
-        """
-        (capture, target), (object_id, pose), (counter, leg, phases) = seen, arguments, motion
-        view = self._view_pose(self._spots(None, target, None)[:1])
-        tolerance = self.config.motion.tolerance
-        there = view is None or all(abs(float(before.get(name, value)) - value) <= tolerance
-                                    for name, value in view.items())
-        if there:
-            self._seen_whole(capture, target)
-        try:
-            with phases(f"{self._view_phase}_for_target"):
-                positions = self._follow(call, dict(before), [view], counter, leg)
-            with phases("perceive_again"):
-                capture = self._look_for(object_id) if object_id is not None else self._look()
-        except (_Interrupted, _Lost, _ShortOfTarget) as error:
-            return self._ended(call_id, call, error, leg, counter, before, phases.evidence())
-        try:
-            target = self._pick_target(capture, object_id, pose)
-            self._seen_whole(capture, target)
-        except _Refused as refused:
-            look = {"object": None, "after_failure": refused.code,
-                    "objects": [self._record(item, capture) for item in (capture.detections if capture else ())
-                                if item.kind == "block"]}
-            return self._pick_failed(call_id, refused.code, before, positions, self._grip(positions), phases,
-                                     {"object_id": object_id, "perception_after": look})
-        return capture, target, positions
 
-    def _pick(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.pick``: locate, plan, open, approach, descend, grasp, verify the grip, lift, verify."""
-        object_id, pose = self._position_arguments(arguments, "object_id", frozenset({"x", "y", "yaw"}))
-        chain = self._chain()
-        _unsent(self.session.ensure_connected)
-        phases = _Phases(self._clock)
-        with phases("perceive"):
-            capture = self._capture(object_id, plan=True) if object_id is not None else self._look()
-            target = self._pick_target(capture, object_id, pose)
-        before = _unsent(self.session.read)
-        counter: list[int] = [0]
-        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
-        start = dict(before)
-        if capture is not None and target.detection is not None and target.detection.seen_in_part:
-            seen = self._look_past_arm(call_id, call, (capture, target), (object_id, pose), before,
-                                       (counter, leg, phases))
-            if isinstance(seen, CallResult):
-                return seen
-            capture, target, start = seen
-        with phases("plan"):
-            started = time.perf_counter()
-            grasp_z = target.z + target.height / 2.0
-            geometry = chain.grasp
-            approach, descend, lift = self._plan(chain, start, [
-                (target.x, target.y, grasp_z + geometry.approach_height_m), (target.x, target.y, grasp_z),
-                (target.x, target.y, grasp_z + geometry.lift_height_m)], target.yaw)
-            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
-                    "waypoints": len(approach) + len(descend) + len(lift)}
-        frame = chain.frame
-        extra: dict[str, Any] = {"object_id": object_id or (target.detection.id if target.detection else None),
-                                 "target": target.pose(frame), "plan": plan,
-                                 "perception_before": self._record(target.detection, capture) if capture else None}
-        positions = dict(start)
-        try:
-            with phases("open"):
-                if self.config.gripper.state(positions[self.config.gripper.joint]) != "open":
-                    positions = self._open(call, positions, counter, leg)
-            with phases("approach"):
-                positions = self._follow(call, positions, approach, counter, leg)
-            with phases("descend"):
-                # Converged above the target before going down to it: the servos lag their set points, and
-                # a descent begun while the arm still trails sideways lands a jaw on the object.
-                positions = self._follow(call, positions, descend, counter, leg)
-            with phases("grasp"):
-                positions, grip, verdict, _closed = self._close(call, positions, counter, leg, phases)
-            # What the camera on the arm saw between the jaws at the grasp, carried to the end of the call.
-            in_jaws = {key: grip[key] for key in ("camera_sees_object",) if key in grip}
-            if verdict is not None:
-                # The jaws hold nothing, parked where the object was: look at where it is past the arm.
-                positions, extra["perception_after"] = self._after_failure(
-                    call, positions, counter, leg, phases, target.detection.label if target.detection else None,
-                    verdict)
-                return self._pick_failed(call_id, verdict, before, positions, grip, phases, extra)
-            # The look must see the spot the object was taken from, and the rest of the table, past the arm.
-            spots = self._spots(capture, target, None)
-            with phases("lift"):
-                positions, early = self._away_and_look(call, positions, lift, counter, leg, phases, spots)
-            with phases("verify"):
-                # The gripper is read after the look, so a grip lost while the camera looked is not missed.
-                after = self._look_for(extra["object_id"])
-                lifted, seen = self._lifted(after, target, extra["object_id"])
-                positions, grip = self._still_holding(call)
-                grip = {**grip, **in_jaws}
-            if early and (lifted is False or not self._shows(after, spots)):
-                # Not settled from where the arm stopped: look again from the observe pose.
-                early = False
-                with phases(f"{self._view_phase}_again"):
-                    positions = self._to_view_pose(call, positions, counter, leg, spots)
-                with phases("verify_again"):
-                    after = self._look_for(extra["object_id"])
-                    lifted, seen = self._lifted(after, target, extra["object_id"])
-                    positions, grip = self._still_holding(call)
-                    grip = {**grip, **in_jaws}
-            extra["perception_after"] = {
-                "object_lifted": lifted, "object": self._record(seen, after) if after else None,
-                "table_seen": self._shows(after, spots), "early_look": early,
-                "counts": scene_counts(after, self.config.perception) if after else None}
-            if not grip["held"]:
-                positions, extra["perception_after"] = self._after_failure(
-                    call, positions, counter, leg, phases, target.detection.label if target.detection else None,
-                    REASON_SLIPPED)
-                return self._pick_failed(call_id, REASON_SLIPPED, before, positions, grip, phases, extra)
-        except (_Interrupted, _Lost, _ShortOfTarget) as error:
-            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
-        if lifted is False:
-            return self._pick_failed(call_id, REASON_PERCEPTION_DISAGREES, before, positions, grip, phases, extra)
-        self.session.held_object = extra["object_id"]
-        self.session.held_label = target.detection.label if target.detection else None
-        return CallResult(call_id, OUTCOME_COMPLETED, evidence={
-            "arm": self._state(positions), "arm_before": self._state(before), "object_held": True, "grip": grip,
-            **extra, **phases.evidence(), "effect_applied": True,
-        })
 
-    def _pick_failed(self, call_id: str, reason: str, before: Mapping[str, float], positions: Mapping[str, float],
-                     grip: Mapping[str, Any], phases: _Phases, extra: Mapping[str, Any]) -> CallResult:
-        """A pick that ended still and holds nothing (or not what the camera sees): failed, with what was read."""
-        self.session.held_object = None
-        return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason), evidence={
-            "reason_code": reason, "arm": self._state(positions), "arm_before": self._state(before),
-            "object_held": False, "grip": dict(grip), "perception_after": None, **dict(extra),
-            **phases.evidence(), "effect_applied": True,
-        })
 
-    def _lifted(self, capture: Capture | None, target: _Target, object_id: str | None
-                ) -> tuple[bool | None, Detection | None]:
-        """Whether the camera sees the object off the table: True, False (still resting there) or None (unseen)."""
-        if capture is None:
-            return None, None
-        settings = self.config.perception
-        item = find(capture, object_id) if object_id else None
-        if item is None:
-            item = nearest(capture, target.x, target.y, kind="block", radius=settings.match_radius_m)
-            if item is not None and on_table(item, settings):
-                return False, item
-            return None, item
-        if not capture.camera.get("height_observed") or not item.height_known:
-            return None, item
-        return not on_table(item, settings), item
 
-    def _place_target(self, capture: Capture | None, container_id: str | None, pose: Mapping[str, float],
-                      held: Detection | None) -> _Target:
-        geometry = self._chain().grasp
-        height = held.size[2] if held is not None and held.size is not None else geometry.default_object_height_m
-        if container_id is not None:
-            if capture is None:
-                raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"container_id": container_id})
-            item = find(capture, container_id)
-            if item is None or item.kind != "container":
-                raise _Refused(REASON_CONTAINER_NOT_FOUND, {"container_id": container_id,
-                                                            "seen": [entry.id for entry in capture.detections]})
-            rim = item.z + (item.size[2] if item.size is not None else 0.0)
-            return _Target(item.x, item.y, rim, item.yaw, height, item)
-        return _Target(pose["x"], pose["y"], self._table_z(), None, height, None)
 
-    def _place_arguments(self, arguments: Mapping[str, Any]
-                         ) -> tuple[str | None, dict[str, float], _ContainerRef | None]:
-        """``(container id, {}, None)`` or ``(None, {x, y}, the bound container or None)``; refused otherwise.
 
-        The bound container (``container_label``, ``container_uncertainty_m``
-        and optionally ``container_observed_at``) comes only with a position:
-        its record's (``x``, ``y``), as Cloud sends it.
-        """
-        bound = {field: CONTAINER_REF_ARGUMENTS[field] for field in ("label", "uncertainty_m", "observed_at")}
-        given = {field: arguments[name] for field, name in bound.items() if name in arguments}
-        container_id, pose = self._position_arguments(
-            {key: value for key, value in arguments.items() if key not in bound.values()}, "container_id",
-            frozenset({"x", "y"}))
-        if not given:
-            return container_id, pose, None
-        label, uncertainty, observed_at = given.get("label"), given.get("uncertainty_m"), given.get("observed_at")
-        if (container_id is not None or not isinstance(label, str) or not label.strip()
-                or len(label) > MAX_LABEL_LENGTH or not _finite(uncertainty) or not 0.0 <= float(uncertainty) <= 10.0
-                or (observed_at is not None and (not isinstance(observed_at, str)
-                                                 or len(observed_at) > MAX_OBSERVED_AT_LENGTH))):
-            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
-        return None, pose, _ContainerRef(label.strip(), pose["x"], pose["y"], float(uncertainty), observed_at)
 
-    def _vantage(self, seed: Mapping[str, float], x: float, y: float, radius: float,
-                 top: float) -> dict[str, float] | None:
-        """Joints that put the camera on the arm straight over ``(x, y)``, a disc of ``radius`` ``top`` high in view.
 
-        The camera looks straight down from ``perception.verify_height_m``.
-        What the jaws hold sits in front of the lens and covers part of the
-        image: while the jaws do not read open, the camera is moved sideways
-        so the disc lands beside that part, on the far side of the image's
-        centre, when the image has room for it -- a look at a container it
-        hides part of could place the container only within its footprint.
-        """
-        first = self._over(seed, x, y)
-        if first is None:
-            return None
-        gripper = self.config.gripper
-        if gripper.state(first.get(gripper.joint, gripper.open)) == "open":
-            return first
-        perception, chain = self.config.perception, self.config.kinematics
-        settings = perception.camera
-        width, height = (settings.width, settings.height)
-        view = mounted_view(chain, settings.mount, first, fovy_deg=settings.fovy_deg, width=width, height=height)
-        hand = view.project(chain.forward(first).position)
-        if hand is None:
-            return first
-        side = chain.grasp.default_object_height_m
-        # What the jaws hold, at most a sphere around the tool point; the disc, at its nearest (its top).
-        sphere = math.sqrt(3.0) * side / 2.0
-        held_px = view.focal * sphere / math.sqrt(max(hand[2] ** 2 - sphere ** 2, 1e-6))
-        depth = perception.verify_height_m
-        disc_px = view.focal * radius / max(depth - top, 1e-3)
-        centre = (width / 2.0, height / 2.0)
-        away = (centre[0] - hand[0], centre[1] - hand[1])
-        length = math.hypot(*away)
-        if length < 1e-6:
-            away, length = (0.0, 1.0), 1.0
-        wanted = (hand[0] + away[0] / length * (held_px + disc_px), hand[1] + away[1] / length * (held_px + disc_px))
-        if not (disc_px <= wanted[0] <= width - disc_px and disc_px <= wanted[1] <= height - disc_px):
-            return first
-        du, dv = wanted[0] - centre[0], wanted[1] - centre[1]
-        right = _level(view.right)
-        up = _level(view.up)
-        if right is None or up is None:
-            return first
-        camera_x = x - du * depth / view.focal * right[0] + dv * depth / view.focal * up[0]
-        camera_y = y - du * depth / view.focal * right[1] + dv * depth / view.focal * up[1]
-        return self._over(first, camera_x, camera_y) or first
 
-    def _look_for_label(self, label: str) -> Capture | None:
-        """Up to ``perception.max_captures`` new looks, until a container with this label is seen; the last one."""
-        capture = None
-        for _ in range(self.config.perception.max_captures):
-            capture = self._look()
-            if capture is None or any(item.kind == "container" and item.label == label
-                                      for item in capture.detections):
-                return capture
-        return capture
 
-    def _relocate(self, call: _Call, positions: dict[str, float], counter: list[int], leg: dict[str, Any],
-                  phases: _Phases, x: float, y: float, label: str | None
-                  ) -> tuple[dict[str, float], Capture | None, bool]:
-        """A new look at where a place goes, from where the camera sees it whole: ``(reading, capture, moved)``.
 
-        A fixed camera looks from where it is. A camera on the arm first goes
-        straight over ``(x, y)`` (:meth:`_vantage`): from wherever the arm
-        is -- holding the object in front of the lens -- it may see the
-        container only in part.
-        """
-        moved = False
-        if self._mounted:
-            radius, top = self._container_extent(label)
-            vantage = self._vantage(positions, x, y, radius, top)
-            if vantage is not None:
-                # The body only: the gripper keeps squeezing what it holds.
-                vantage = {joint: vantage[joint] for joint in self.config.joint_names}
-                with phases("look_pose"):
-                    positions = self._follow(call, positions, [vantage], counter, leg)
-                moved = True
-        with phases("perceive"):
-            capture = self._look_for_label(label) if label is not None else self._look()
-        return positions, capture, moved
 
-    def _container_extent(self, label: str | None) -> tuple[float, float]:
-        """``(half the footprint's diagonal, height)`` of the container class with this label (any, at most)."""
-        classes = getattr(self.config.perception.camera, "classes", ())
-        sizes = [colour.size for colour in classes if colour.kind == "container"
-                 and (label is None or colour.label == label)]
-        return (max((math.hypot(size[0], size[1]) / 2.0 for size in sizes), default=0.0),
-                max((size[2] for size in sizes), default=0.0))
 
-    def _container_seen(self, capture: Capture | None, label: str | None, x: float, y: float) -> Detection | None:
-        """The container a place at ``(x, y)`` means: of this label the nearest; without one, the one under it."""
-        if capture is None:
-            return None
-        if label is None:
-            return container_under(capture.detections, x, y)
-        seen = [item for item in capture.detections if item.kind == "container" and item.label == label]
-        return min(seen, key=lambda item: math.hypot(item.x - x, item.y - y)) if seen else None
-
-    @staticmethod
-    def _check_reference(ref: _ContainerRef, item: Detection | None) -> dict[str, Any]:
-        """The reference against the container seen now: moved when off by more than both uncertainties together.
-
-        Each look is off by at most its own uncertainty, so two looks at a
-        container that did not move differ by at most the sum; only a larger
-        difference says it moved. The larger of the two alone would call two
-        honest looks at a still container a move (they differed by more than
-        either one's 4 mm in the in-process simulation).
-        """
-        check: dict[str, Any] = {"reference": ref.as_dict(), "seen": None, "off_m": None, "allowed_m": None,
-                                 "moved": None}
-        if item is None:
-            return check
-        off = math.hypot(item.x - ref.x, item.y - ref.y)
-        allowed = ref.uncertainty_m + item.xy_m
-        check.update(seen={"id": item.id, "x": round(item.x, 4), "y": round(item.y, 4), "xy_m": round(item.xy_m, 4),
-                           "whole": item.height_known},
-                     off_m=round(off, 4), allowed_m=round(allowed, 4), moved=off > allowed)
-        return check
-
-    def _not_placed(self, call_id: str, reason: str, moved: bool, before: Mapping[str, float],
-                    positions: Mapping[str, float], phases: _Phases, extra: Mapping[str, Any],
-                    observed: Mapping[str, Any]) -> CallResult:
-        """A place that released nothing: refused when the arm was not moved, else failed holding the object."""
-        if not moved:
-            raise _Refused(reason, observed)
-        return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason), evidence={
-            "reason_code": reason, "arm": self._state(positions), "arm_before": self._state(before),
-            "grip": self._grip(positions), "released": False, "object_held": True, "perception_after": None,
-            **dict(extra), **dict(observed), **phases.evidence(), "effect_applied": True})
-
-    def _dropped_in_transit(self, call_id: str, call: _Call, before: Mapping[str, float],
-                            grip: Mapping[str, Any]) -> CallResult:
-        """A place whose jaws lost what a pick proved held: look past the arm, then fail with that look.
-
-        The object fell between the pick and the place, under or near the
-        arm, which hides it from a look from where the arm is. Refusing
-        before moving left Cloud a look from there, which did not see it.
-        Like a pick that holds nothing (:meth:`_after_failure`), the arm goes
-        to the observe pose and looks, and the failure carries that look
-        (``perception_after.objects``) for the re-pick to be bound to.
-        Nothing is released: ``object_held: false``, ``released: false``.
-        """
-        held_id = self.session.held_object
-        self.session.held_object = None
-        phases = _Phases(self._clock)
-        counter: list[int] = [0]
-        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
-        extra: dict[str, Any] = {"object_id": held_id}
-        label = getattr(self.session, "held_label", None)
-        try:
-            positions, extra["perception_after"] = self._after_failure(
-                call, dict(before), counter, leg, phases, label, REASON_NOTHING_HELD)
-        except (_Interrupted, _Lost, _ShortOfTarget) as error:
-            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
-        return CallResult(call_id, OUTCOME_FAILED, detail=DROPPED_IN_TRANSIT_DETAIL, evidence={
-            "reason_code": REASON_NOTHING_HELD, "arm": self._state(positions), "arm_before": self._state(before),
-            "grip": dict(grip), "released": False, "object_held": False, **extra, **phases.evidence(),
-            "effect_applied": True})
-
-    def _place(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify.
-
-        Given a table position, bound to the located container there or not,
-        the place first looks again at where it goes (:meth:`_relocate`). A
-        bound container seen farther from its position than the bound and the
-        new uncertainty together has moved (``container_moved``); not seen,
-        it is ``container_not_found``: nothing is released either way.
-        Otherwise it goes into the container as seen now.
-        """
-        container_id, pose, ref = self._place_arguments(arguments)
-        chain = self._chain()
-        _unsent(self.session.ensure_connected)
-        before = _unsent(self.session.read)
-        held_grip = self._grip(before)
-        if not held_grip["held"]:
-            if getattr(self.session, "held_object", None) is None:
-                raise _Refused(REASON_NOTHING_HELD, {"grip": held_grip})
-            return self._dropped_in_transit(call_id, call, before, held_grip)
-        phases = _Phases(self._clock)
-        held_id = getattr(self.session, "held_object", None)
-        counter: list[int] = [0]
-        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
-        positions = dict(before)
-        extra: dict[str, Any] = {"container_id": container_id, "object_id": held_id, "container_check": None}
-        moved = False
-        try:
-            if ref is not None or container_id is None:
-                x, y = (ref.x, ref.y) if ref is not None else (pose["x"], pose["y"])
-                label = ref.label if ref is not None else None
-                positions, capture, moved = self._relocate(call, positions, counter, leg, phases, x, y, label)
-                found = self._container_seen(capture, label, x, y)
-                if found is not None and not found.height_known and self._mounted:
-                    # Seen only in part (behind what the jaws hold, or at the frame's edge): look again from
-                    # straight over where it was seen, so it is seen whole.
-                    positions, capture, _again = self._relocate(call, positions, counter, leg, phases, found.x,
-                                                                found.y, found.label)
-                    found = self._container_seen(capture, found.label, found.x, found.y)
-                if capture is None:
-                    return self._not_placed(call_id, REASON_PERCEPTION_UNAVAILABLE, moved, before, positions,
-                                            phases, extra, {"camera": self.config.perception is not None})
-                seen = {"seen": [item.id for item in capture.detections]}
-                if ref is not None:
-                    check = self._check_reference(ref, found)
-                    extra["container_check"] = check
-                    if found is None:
-                        return self._not_placed(call_id, REASON_CONTAINER_NOT_FOUND, moved, before, positions,
-                                                phases, extra, {"container_check": check, **seen})
-                    if check["moved"]:
-                        return self._not_placed(call_id, REASON_CONTAINER_MOVED, moved, before, positions, phases,
-                                                extra, {"container_check": check})
-                if found is not None and not found.height_known:
-                    # Still only in part: where its floor is, is not known well enough to release over it.
-                    return self._not_placed(call_id, REASON_CONTAINER_NOT_FOUND, moved, before, positions, phases,
-                                            extra, {"partly_seen": found.id, **seen})
-                # A position is a place on whatever the look shows there: inside a container's footprint it is
-                # that container (released over its rim and judged inside it), else the table.
-                container_id = found.id if found is not None else None
-            else:
-                with phases("perceive"):
-                    capture = self._capture(container_id, plan=True)
-            held = find(capture, held_id) if capture is not None and held_id else None
-            target = self._place_target(capture, container_id, pose, held)
-        except (_Interrupted, _Lost, _ShortOfTarget) as error:
-            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
-        with phases("plan"):
-            started = time.perf_counter()
-            release_z = target.z + chain.grasp.place_clearance_m + target.height / 2.0
-            try:
-                approach, descend, retreat = self._plan(chain, positions, [
-                    (target.x, target.y, release_z + chain.grasp.approach_height_m), (target.x, target.y, release_z),
-                    (target.x, target.y, release_z + chain.grasp.approach_height_m)], None)
-            except _Refused as refused:
-                return self._not_placed(call_id, refused.code, moved, before, positions, phases, extra,
-                                        refused.observed)
-            plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
-                    "waypoints": len(approach) + len(descend) + len(retreat)}
-        extra.update({"container_id": container_id, "target": target.pose(chain.frame), "plan": plan,
-                      "perception_before": self._record(target.detection, capture) if capture else None})
-        try:
-            with phases("approach"):
-                positions = self._follow(call, positions, approach, counter, leg)
-            with phases("descend"):
-                # Converged above the target before going down to it: the servos lag their set points, and
-                # a descent begun while the arm still trails sideways lands a jaw on the object.
-                positions = self._follow(call, positions, descend, counter, leg)
-                positions, still_held = self._still_holding(call)
-            if not still_held["held"]:
-                # It slipped out on the way: nothing to release. Where it went is looked at past the arm.
-                self.session.held_object = None
-                label = held.label if held is not None else None
-                positions, slipped = self._after_failure(call, positions, counter, leg, phases, label,
-                                                         REASON_SLIPPED)
-                return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_SLIPPED), evidence={
-                    "reason_code": REASON_SLIPPED, "arm": self._state(positions), "arm_before": self._state(before),
-                    "grip": still_held, "released": False, "object_held": False, "perception_after": slipped,
-                    **extra, **phases.evidence(), "effect_applied": True})
-            with phases("release"):
-                positions = self._open(call, positions, counter, leg)
-            with phases("verify_release"):
-                grip = self._grip(positions)
-            # The look must see the container, and the rest of the table, past the arm.
-            spots = self._spots(capture, target, held_id)
-            with phases("retreat"):
-                positions, early = self._away_and_look(call, positions, retreat, counter, leg, phases, spots,
-                                                       over=(target.x, target.y) if self._mounted else None)
-            with phases("verify"):
-                after = self._look_for(held_id, container_id)
-                inside, seen, container = self._placed(after, target, container_id, held_id)
-            if early and (inside is not True or not self._shows(after, spots)):
-                # Not settled from where the arm stopped: look again from the observe pose.
-                early = False
-                with phases(f"{self._view_phase}_again"):
-                    positions = self._to_view_pose(call, positions, counter, leg, spots)
-                with phases("verify_again"):
-                    after = self._look_for(held_id, container_id)
-                    inside, seen, container = self._placed(after, target, container_id, held_id)
-        except (_Interrupted, _Lost, _ShortOfTarget) as error:
-            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
-        self.session.held_object = None if not grip["held"] else held_id
-        key = "object_in_container" if container_id is not None else "object_at_target"
-        extra["perception_after"] = {key: inside, "object": self._record(seen, after) if after else None,
-                                     "container": self._record(container, after) if after else None,
-                                     "table_seen": self._shows(after, spots), "early_look": early,
-                                     "counts": scene_counts(after, self.config.perception) if after else None}
-        evidence = {"arm": self._state(positions), "arm_before": self._state(before), "grip": grip,
-                    "released": not grip["held"], "object_held": grip["held"], **extra, **phases.evidence(),
-                    "effect_applied": True}
-        if grip["held"]:
-            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(REASON_NOT_RELEASED),
-                              evidence={**evidence, "reason_code": REASON_NOT_RELEASED})
-        if container_id is not None and inside is not True:
-            reason = REASON_PLACEMENT_UNOBSERVED if inside is None else REASON_NOT_IN_CONTAINER
-            return CallResult(call_id, OUTCOME_FAILED, detail=refusal_detail(reason),
-                              evidence={**evidence, "reason_code": reason})
-        return CallResult(call_id, OUTCOME_COMPLETED, evidence=evidence)
-
-    def _placed(self, capture: Capture | None, target: _Target, container_id: str | None, held_id: str | None
-                ) -> tuple[bool | None, Detection | None, Detection | None]:
-        """After the release: whether the camera sees the object inside the container (or at the table target)."""
-        if capture is None:
-            return None, None, None
-        settings = self.config.perception
-        item = find(capture, held_id) if held_id else None
-        if item is None:
-            item = nearest(capture, target.x, target.y, kind="block", radius=settings.match_radius_m * 2)
-        if container_id is None:
-            if item is None:
-                return None, None, None
-            close = math.hypot(item.x - target.x, item.y - target.y) <= settings.match_radius_m
-            return close and on_table(item, settings), item, None
-        container = find(capture, container_id)
-        if item is None or container is None:
-            # Either one unseen: whether it is inside is not known.
-            return None, item, container
-        holder = container_holding(item, capture.detections)
-        if holder is None or holder.id != container_id:
-            return False, item, container
-        if not item.height_known:
-            # Over the container but partly hidden: whether it rests on the floor or on a wall is not known.
-            return None, item, container
-        return resting_inside(item, holder, settings), item, container
 
     # -- teaching ------------------------------------------------------------------
 

@@ -52,6 +52,21 @@ axis, so no turn ever cleared a spot near it.
   - `session.held_label` keeps the held object's label for that look.
   - `capabilities.DROPPED_IN_TRANSIT_DETAIL` is the wording.
 
+**The adapter is split by responsibility** (it was 2,039 lines, and grew
+with this change). `LeRobotArmAdapter` is still one object, but its code now
+lives in:
+
+| Module | Lines | Holds |
+|---|---|---|
+| `lerobot_adapter.py` | 1,025 | the entry point, motion, the gripper, `mark_pose` |
+| `adapter_common.py` | 241 | the shared errors, `_Call`, `_Phases`, `_Target`, limits |
+| `arm_looks.py` | 365 | `_LooksMixin`: the view pose, looks, the look after a failure |
+| `arm_pick.py` | 237 | `_PickMixin` |
+| `arm_place.py` | 428 | `_PlaceMixin` |
+
+Every method moved verbatim by its AST line range, with nothing retyped.
+`ARCHITECTURE.md` lists the modules and the new pick and place outcome rows.
+
 The Cloud side is flytohub/flyto-cloud PR 603:
 - the host reports a failed pick's or place's data;
 - the re-pick is bound to the place's own look;
@@ -69,15 +84,20 @@ The Cloud side is flytohub/flyto-cloud PR 603:
   - ruff clean;
   - 288 passed, 19 skipped;
   - entry points, build, and `flyto-index verify --strict`: pass.
-- **MuJoCo and the e2e Host venv:** 321 passed, 1 skipped.
+- **MuJoCo and the e2e Host venv:** 321 passed, 1 skipped. That held both
+  before and after the split.
 - **End to end (SIMULATION).** Offline Cloud with PR 603, pack at this branch,
   MuJoCo overhead camera, 50 episodes each:
 
-  | Scenario | merged main | this branch | false completions |
-  |---|---|---|---|
-  | grasp_slip (seed 13000) | done 9, failed 26, held 15 | done 40, failed 5, held 5 | 0 |
-  | nominal (seed 10000) | done 50 | done 50 (P50 5.7 s) | 0 |
-  | object_moved (seed 11000) | done 50 | done 50 (P50 9.2 s) | 0 |
+  | Scenario | merged main | this branch (before the split) | after the split | false completions |
+  |---|---|---|---|---|
+  | grasp_slip (seed 13000) | done 9, failed 26, held 15 | done 40, failed 5, held 5 | done 39, failed 6, held 5 | 0 |
+  | nominal (seed 10000) | done 50 | done 50 (P50 5.7 s) | done 50 (P50 5.6 s) | 0 |
+  | object_moved (seed 11000) | done 50 | done 50 (P50 9.2 s) | done 50 (P50 9.0 s) | 0 |
+
+  The slip fires on wall-clock time, so where the block lands differs run
+  to run. The seeds that differ between 40 and 39 trade in both directions,
+  and each failure is a block inside the reach limit beside the base.
 
   Of the 10 grasp_slip runs that did not succeed, 9 lie inside the arm's
   reach limit beside or behind the base (-0.09 to 0.095 m). Four were
