@@ -79,6 +79,23 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
 - Not on hardware: control period, acceleration, convergence thresholds,
   the wrist camera's lens, orientation and look pose are unverified.
 
+2026-10-28 -- open findings of the end-to-end loop, SIMULATION ONLY (branch `lane/e2e-open-pack`):
+
+- A place can be bound to the located container (`x`, `y` +
+  `container_label`, `container_uncertainty_m`, `container_observed_at`, as
+  Cloud's vocabulary sends): located again at place time; one that moved is
+  refused (`container_moved`), nothing released.
+- Eye-in-hand locate: uncertainty from the viewing geometry (824/824
+  objects within it over 400 seeded viewpoints), one object per object,
+  `viewpoint_unsuitable` beyond `perception.max_uncertainty_m`; the place
+  looks straight over its container beside the held block.
+- A grasp that holds nothing ends at the observe pose with a look there; a
+  hold is judged from settled readings; simulated slips drop the block.
+- A replaced simulated world is freed at once; one GL context per process.
+- Open: the fixed jaw can land on the block in a descent (1/50 eye-in-hand);
+  a block that falls under the arm's base is hidden from a fixed overhead
+  camera.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.

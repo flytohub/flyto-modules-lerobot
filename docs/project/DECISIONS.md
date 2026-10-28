@@ -531,3 +531,131 @@ origin, the joint and FK error bounds, the look pose (chosen on renders in
 simulation; teach it on the arm) and the USB path of a mounted camera (only
 the rendered one is implemented; a `usb` camera with a `mount` is not yet
 supported).
+
+## 2026-10-28 -- A pick plans only on a target seen whole; a planar camera at a slant rests a block
+
+The regrasp at (0.12, 0.17) in the end-to-end run stopped short or slipped
+in 11 of 50 episodes (7 `target_not_reached`, 4 `object_slipped`). Reach and
+the inverse solution were not the cause: every pose there solves with more
+than 59 deg of margin on every joint and the tool within 1 mm, and no
+convergence came within 0.6 deg/period of being judged still out of
+tolerance. Ground truth showed a jaw landing on the block in the descent
+(the block pushed 11 mm and tipped). Two causes in the planar (overhead)
+camera, which sees (0.12, 0.17) 18 deg off straight down:
+
+- **The heading was turned by the height correction.** `perception.detect`
+  measured the heading from the centre after it was moved toward the nadir
+  to an axis point that was not moved. A block whose sides show at a slant
+  looks larger than its footprint, was judged raised (z 3-13 mm on the
+  table) and its heading came out up to 45 deg off, so the jaws descended
+  onto its corners. Fix: the heading is taken before the correction (a
+  scaling about the nadir never turns a direction).
+- **A blob the arm cuts was reported as a whole block.** After a missed
+  grasp the arm stays where it closed; the look again sees the moved block
+  past it, cut, with its centre up to 14 mm off and its heading 36 deg off,
+  declaring 6 mm and 0.2 rad. The visible sides made up for the lost area,
+  so the size check passed it. Fix: a block seen beyond `STEEP_WITHIN_DEG`
+  of straight down rests on the table and is placed by its top's plane
+  (apparent size tells no height there, as decided for the camera on the
+  arm), and since an unoccluded block shows at least its whole top face, a
+  blob smaller than that face (less half a pixel along its outline) is cut:
+  `Detection.seen_in_part`, height unknown, uncertainty widened by its
+  half-diagonal and a quarter turn. Containers keep the size rule (an open
+  bin is not a solid box; its precision at a slant is the O4 lane's).
+
+A pick planned on a target its look shows only in part is refused, typed
+`target_partly_seen`, before anything is sent: such a target is outside what
+the pick can reliably grasp. A planning look reuses a young frame that saw
+the target whole when there is one. Moving out of the camera's view after a
+missed grasp, so a look again sees the table, is the pick's after-failure
+state (the O3 lane), not decided here.
+
+## 2026-10-28 -- Open findings of the end-to-end loop: bound place, honest locate, honest slip, no leak
+
+SIMULATION ONLY. The end-to-end run through Cloud's host (flyto-cloud
+`docs/performance/2026-10-28-e2e-closed-loop.md`) left O2-O5, O8 and
+`wrist_nominal` at 5/20 open. Each cause, and what was decided:
+
+- **O2 -- a place sent a position cannot tell "into the container that was
+  here" from "onto the table here".** The place takes what Cloud bound it
+  to beside the record's position, in Cloud's vocabulary
+  (`manipulation_vocabulary.CONTAINER_REFERENCE`, Cloud lane
+  `lane/e2e-open-cloud` 8f1072839): `container_label`,
+  `container_uncertainty_m`, `container_observed_at` with `x`, `y` (flat:
+  Cloud's argument engine refuses a nested object, and with it the arm's
+  adoption; a core step gives one `container_ref` object, renamed by the
+  module). At place time the container is located again by label, nearest
+  the position; farther than both looks' uncertainty together it has
+  `container_moved`, and nothing is released. Cloud's vocabulary describes
+  the larger of the two as the bound; the sum is kept here because each look
+  is off by at most its own uncertainty, so two honest looks at a container
+  that did not move differ by up to the sum (with the larger alone, two
+  4 mm looks of the in-process bin were called a move). With a fixed camera
+  the look moves nothing, so the outcome is `refused`. A camera on the arm
+  has to be moved over the container to see it whole, so the outcome is
+  `failed` with `effect_applied: true`, `released: false`,
+  `object_held: true`: "refused" claims nothing was commanded, which would
+  not be true. A container not seen at all is `container_not_found`, the
+  same split. Without the bound container a place keeps today's behaviour
+  (a position is whatever container's footprint holds it).
+- **O4 -- eye-in-hand locate declared 6 mm for a 3.4 cm reading and saw one
+  bin twice.** Causes: the declared uncertainty was a constant plus the
+  chain's error, never the viewing geometry; an object only partly in view
+  (the held block hid most of the bin from the look pose) was placed by
+  what was visible; pieces of one bin were merged only when their centres
+  were close; and a block seen through open jaws where the tool point
+  projects was taken as held. Fixes: uncertainty is the sum of what the
+  geometry lets each error source move a placement (`located_within`, see
+  ARCHITECTURE); a partly seen object adds half its footprint's diagonal,
+  unless its seen edges and known size tell its centre with the rest out of
+  frame or behind what the jaws hold; pieces that fit in one footprint are
+  one object; nothing is between the jaws while the gripper reads open. A
+  locate's viewpoint is reported on every capture and refused
+  (`viewpoint_unsuitable`, nothing moves) when a whole object at the image's
+  centre could not be placed within `perception.max_uncertainty_m` (0.04 m
+  in the eye-in-hand configs, an estimate). The locate stays read-only: a
+  look that must move is a movement capability, and pick and place already
+  move to look. Measured: 824 of 824 located objects within their declared
+  uncertainty over 400 seeded scenes and viewpoints (before: see the
+  handoff).
+- **wrist_nominal 5/20 -- the dominant causes were O4's.** The place was
+  sent the bin's position from the look taken while holding the block,
+  which hid most of the bin (3.3-4.3 cm off): 11 blocks landed on the bin's
+  wall; and the verify look saw the bin's rim and floor as two bins (4
+  episodes). The place now looks again straight over the bin, beside what
+  the jaws hold, and places into what it sees; pieces of one bin are one.
+- **O3 -- grasp_slip held 50/50.** Causes: (a) the pick judged the hold
+  from one reading after its look -- jaws swinging closed after a slip read
+  the block's width and full effort -- and a failed grasp left the arm
+  parked over the table, hiding where the block went from the read-only
+  look again; the in-process slip also left the squeeze effort on the
+  reading it fired in. (b) The MuJoCo slip cut the jaw's force range to
+  +-0.02, a torque on the hinge jaw that still pressed each pad with about
+  0.2 N: friction held the block wedged (35/50) while the effort reading
+  said it slipped. Fixes: the hold is read until `gripper.hold_samples`
+  still readings agree (a reseated block is not a slip); a grasp that holds
+  nothing ends with the arm at the observe (look) pose and a look from
+  there (`perception_after.object`, `objects`, `after_failure`); a simulated
+  slip makes the surfaces touching the block frictionless until it leaves
+  them, so it falls, and the in-process jaws press on nothing from the
+  instant it is out. Ground truth and the gripper now agree in 50/50 slips
+  on each backend. A block that falls under the arm's base is still hidden
+  from a fixed overhead camera (5 of 30 slips on MuJoCo); the failure then
+  says it is not seen.
+- **O5 -- the regrasp at (0.12, 0.17) stopped short.** The overhead
+  camera's heading and a block the arm cut (entry above). Separately found:
+  in 1 of 50 eye-in-hand nominal episodes (seed 10030, before and after)
+  the descent lands the fixed jaw on the block: the tool point is 24 mm
+  from the fixed jaw's face, 9 mm clear of a 30 mm block, and the servos'
+  lag swings the tool 6-7 mm sideways during the descent. Not fixed here:
+  descending with the block centred between the open jaws (and letting the
+  moving jaw push it home) changes every grasp and needs the open jaws'
+  geometry from the robot description; recorded for the next lane.
+- **O8 -- host RSS grew 0.5-0.8 MB per episode.** A replaced world and its
+  arm referenced each other, so its native MuJoCo model, data and renderers
+  waited for a full cyclic collection; and every world made its own GL
+  context, of which the platform keeps about 0.2 MB each even after it is
+  freed. The world holds its arm by weak reference; one GL thread and one
+  context per frame size serve the process, each world owning only its
+  drawing state (frames pixel-identical); a long-lived camera keeps no
+  per-frame history unless a measurement asks for it.

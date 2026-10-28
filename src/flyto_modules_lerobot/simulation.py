@@ -49,6 +49,7 @@ import math
 import random
 import threading
 import time
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -400,7 +401,32 @@ class _Faults:
     log: list[dict[str, Any]] = field(default_factory=list)
 
 
-class SimWorld:
+class OneArm:
+    """A world's one arm (the ``Robot`` the driver connects), held by whoever drives it, not by the world.
+
+    The arm refers to its world; were the world also to hold its arm, the two
+    would form a cycle, and a replaced world -- with its physics model, data
+    and renderers, native memory the cyclic collector never counts -- would
+    outlive its last user until a full collection happened to run. The world
+    keeps only a weak reference: while anything drives the arm it is the same
+    arm, and once nothing does both are freed by reference counting.
+    """
+
+    _arm: weakref.ReferenceType[SimulatedArm] | None = None
+    _arm_lock = threading.Lock()
+
+    @property
+    def robot(self) -> SimulatedArm:
+        """This world's arm: the one in use, or a new, unconnected one when nothing holds it."""
+        with OneArm._arm_lock:
+            arm = self._arm() if self._arm is not None else None
+            if arm is None:
+                arm = SimulatedArm(self)
+                self._arm = weakref.ref(arm)
+            return arm
+
+
+class SimWorld(OneArm):
     """The simulated arm, its gripper and the table scene; deterministic for its seed."""
 
     def __init__(self, config: Any, *, clock: Callable[[], float] | None = None,
@@ -443,7 +469,6 @@ class SimWorld:
         self._faults = _Faults()
         for fault in sim.faults:
             self.inject(fault)
-        self.robot = SimulatedArm(self)
 
     # -- time and faults ----------------------------------------------------------------
 
@@ -527,13 +552,18 @@ class SimWorld:
             item.inside, item.z = self._landing(item.x, item.y)
 
     def _slip_out(self) -> None:
-        """The held block squeezes out sideways from between the jaws and drops."""
+        """The held block squeezes out sideways from between the jaws and drops.
+
+        From that instant the jaws press on nothing: the effort a reading
+        shows is the free closing effort, never the squeeze it had.
+        """
         item = self.objects[self.held] if self.held else None
         if item is not None and self.chain is not None:
             jaw = self.tip().jaw
             push = 2.0 * self.sim.gripper.reach_m
             item.x, item.y = item.x + jaw[0] * push, item.y + jaw[1] * push
         self._drop()
+        self.effort = self.sim.gripper.free_effort
 
     def _closing(self) -> float:
         gripper = self.config.gripper
@@ -744,6 +774,7 @@ __all__ = [
     "SIM_PORT_PREFIX",
     "SIM_ROBOT_TYPE",
     "FaultSpec",
+    "OneArm",
     "SimObject",
     "SimObjectSpec",
     "SimWorld",

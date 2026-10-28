@@ -129,8 +129,14 @@ REASON_SLIPPED = "object_slipped"
 REASON_NOT_RELEASED = "object_not_released"
 #: The camera does not see the object asked for; nothing was sent.
 REASON_OBJECT_NOT_FOUND = "object_not_found"
+#: The look a pick plans on shows its target only in part (the arm covers it); nothing was sent.
+REASON_TARGET_PARTLY_SEEN = "target_partly_seen"
 #: The camera does not see the container asked for; nothing was sent.
 REASON_CONTAINER_NOT_FOUND = "container_not_found"
+#: The container a place is bound to is not where it was bound (beyond both looks' uncertainty together).
+REASON_CONTAINER_MOVED = "container_moved"
+#: A camera on the arm, where the arm is, cannot see the table well enough to locate anything; nothing moved.
+REASON_VIEWPOINT_UNSUITABLE = "viewpoint_unsuitable"
 #: The kinematic chain has no solution within the joint limits for a pose of the plan; nothing was sent.
 REASON_POSE_UNREACHABLE = "pose_unreachable"
 #: The gripper does not read as holding anything, so there is nothing to place; nothing was sent.
@@ -181,7 +187,12 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
         REASON_SLIPPED: "夾爪碰到物品後又繼續閉合：物品已滑落。",
         REASON_NOT_RELEASED: "夾爪張開後仍判定為夾著物品，放開未被確認。",
         REASON_OBJECT_NOT_FOUND: "攝影機沒有看到指定的物品，沒有送出任何動作指令。",
+        REASON_TARGET_PARTLY_SEEN: (
+            "攝影機只看到目標的一部分（被手臂遮住），無法確定它的位置與方向，沒有送出任何動作指令。"),
         REASON_CONTAINER_NOT_FOUND: "攝影機沒有看到指定的容器，沒有送出任何動作指令。",
+        REASON_CONTAINER_MOVED: (
+            "容器已經不在先前看到的位置（超出兩次觀測不確定度的總和），沒有放下物品，物品仍夾在夾爪中。"),
+        REASON_VIEWPOINT_UNSUITABLE: "手臂上的攝影機從目前位置看不清楚桌面（不在畫面中或解析度不足），沒有移動手臂。",
         REASON_POSE_UNREACHABLE: "手臂在關節範圍內到不了這個位置，沒有送出任何動作指令。",
         REASON_NOTHING_HELD: "夾爪目前沒有夾著物品，沒有可放置的東西，沒有送出任何動作指令。",
         REASON_NOT_IN_CONTAINER: "放開後攝影機沒有看到物品在容器內。",
@@ -217,7 +228,16 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
         REASON_SLIPPED: "The jaws met an object and then crept on toward closed; it slipped out",
         REASON_NOT_RELEASED: "The gripper still reads as holding after it was opened",
         REASON_OBJECT_NOT_FOUND: "The camera does not see the object; nothing was sent",
+        REASON_TARGET_PARTLY_SEEN: (
+            "The camera sees the target only in part (the arm covers it), so neither its position nor its "
+            "heading is known; nothing was sent"),
         REASON_CONTAINER_NOT_FOUND: "The camera does not see the container; nothing was sent",
+        REASON_CONTAINER_MOVED: (
+            "The container is not where the place was bound to it, beyond both looks' uncertainty together; "
+            "nothing was released"),
+        REASON_VIEWPOINT_UNSUITABLE: (
+            "The camera on the arm cannot see the table from where the arm is at the required resolution; "
+            "nothing moved"),
         REASON_POSE_UNREACHABLE: "No joint solution within the limits reaches a pose of the plan; nothing was sent",
         REASON_NOTHING_HELD: "The gripper holds nothing to place; nothing was sent",
         REASON_NOT_IN_CONTAINER: "After the release the camera does not see the object inside the container",
@@ -336,8 +356,10 @@ EVIDENCE_LEFT_TABLE = _held_change("perception.object_left_table", OBSERVED_ON_T
 EVIDENCE_INTO_CONTAINER = _held_change("perception.object_in_container", OBSERVED_IN_CONTAINERS, 1, "table_objects",
                                        "One more object inside a container", "容器內多了一個物品")
 
-#: What a pose may be called: the arm config's own name rule (``arm_config.valid_name``).
-POSE_NAME_PATTERN = "^[A-Za-z][A-Za-z0-9_]{0,63}$"
+#: How long a pose name may be. The declared schema states only what Cloud's argument
+#: engine enforces (its lossless admission refuses any other keyword, and with it the
+#: whole arm's adoption); the full name rule (``arm_config.valid_name``) is the
+#: adapter's own refusal, stricter than the declaration, never looser.
 POSE_NAME_MAX_LENGTH = 64
 #: What ``manipulation.mark_pose`` changes: a named pose in the arm's config file.
 POSES_WRITTEN = "poses.written"
@@ -379,6 +401,9 @@ class CapabilitySpec:
     input_schema: Mapping[str, Any] = NO_ARGUMENTS
     # Core parameters whose entries travel as one argument each (``joints``, ``pose``).
     flattened: tuple[str, ...] = ()
+    # Core parameters whose entries travel as one argument each, renamed (``container_ref``'s ``label`` as
+    # ``container_label``, its ``x`` as ``x``, ...): Cloud's argument engine takes no nested object.
+    renamed: Mapping[str, Mapping[str, str]] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def safety_class(self) -> str:
@@ -605,8 +630,9 @@ MARK_POSE = CapabilitySpec(
         {
             "type": "object",
             "properties": {
-                "pose": {"type": "string", "maxLength": POSE_NAME_MAX_LENGTH, "pattern": POSE_NAME_PATTERN,
-                         "description": "The name to record the arm's current position under"},
+                "pose": {"type": "string", "maxLength": POSE_NAME_MAX_LENGTH, "minLength": 1,
+                         "description": "The name to record the arm's current position under: a letter, "
+                                        "then letters, digits or underscores"},
                 "replace": {"type": "boolean", "description": "Overwrite a pose of this name that is already taught"},
             },
             "required": ["pose"],
@@ -705,6 +731,27 @@ PICK = CapabilitySpec(
     flattened=("pose",),
 )
 
+#: What a place at a position may be bound to: the located container's record Cloud bound it to (Cloud's
+#: ``manipulation_vocabulary.CONTAINER_REFERENCE``). The position is the record's (``x``, ``y``); beside it go
+#: the record's label, uncertainty and observation time. A core step gives them as one ``container_ref``
+#: object (each of its fields renamed to its argument). At place time the container is located again by its
+#: label; seen farther from (``x``, ``y``) than the bound and the new uncertainty together, it has moved.
+CONTAINER_REF = "container_ref"
+CONTAINER_REF_ARGUMENTS: Mapping[str, str] = MappingProxyType({
+    "label": "container_label", "x": "x", "y": "y", "uncertainty_m": "container_uncertainty_m",
+    "observed_at": "container_observed_at"})
+CONTAINER_REF_REQUIRED: tuple[str, ...] = ("label", "x", "y", "uncertainty_m")
+MAX_LABEL_LENGTH = 128
+MAX_OBSERVED_AT_LENGTH = 40
+_REF_ARGUMENTS = {
+    "container_label": {"type": "string", "maxLength": MAX_LABEL_LENGTH, "minLength": 1,
+                        "description": "The bound container's recorded label (with x, y)"},
+    "container_uncertainty_m": {"type": "number", "unit": "m", "minimum": 0.0, "maximum": 10.0,
+                                "description": "The bound record's xy uncertainty (with x, y)"},
+    "container_observed_at": {"type": "string", "maxLength": MAX_OBSERVED_AT_LENGTH,
+                              "description": "When the bound observation was made, ISO 8601 (with x, y)"},
+}
+
 PLACE = CapabilitySpec(
     capability_id="manipulation.place",
     module_id="manipulation.place",
@@ -725,6 +772,10 @@ PLACE = CapabilitySpec(
     params_schema=MappingProxyType({
         "container_id": {"type": "string", "label": "Container", "description": "A located container's id",
                          "required": False},
+        CONTAINER_REF: {"type": "object", "label": "Bound container",
+                        "description": ("The located container's record the place is bound to -- label, x, y, "
+                                        "uncertainty_m, observed_at"),
+                        "required": False},
         "pose": {"type": "object", "label": "Table position",
                  "description": "x, y in the table frame, metres", "required": False},
     }),
@@ -734,19 +785,21 @@ PLACE = CapabilitySpec(
         ("arm", "arm_before", "released", "object_held", "grip", "target", "phases", "latency_ms", "effect_applied",
          "source"),
         container_id={"type": ["string", "null"]}, released={"const": True}, object_held={"const": False},
+        container_check={"type": ["object", "null"]},
         grip=_GRIP, **_PLANNED, **_PERCEIVED, **_MOVED,
     ),
     timeout_ms=90_000,
     required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
-    exactly_one_of=("container_id", "pose"),
+    exactly_one_of=("container_id", "pose", CONTAINER_REF),
     input_schema=MappingProxyType({
         "type": "object",
         "properties": {"container_id": _ID_TEXT, "x": {"type": "number", "unit": "m"},
-                       "y": {"type": "number", "unit": "m"}},
+                       "y": {"type": "number", "unit": "m"}, **_REF_ARGUMENTS},
         "required": [],
         "additionalProperties": False,
     }),
     flattened=("pose",),
+    renamed=MappingProxyType({CONTAINER_REF: CONTAINER_REF_ARGUMENTS}),
 )
 
 SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS,
@@ -791,6 +844,9 @@ def contract_of(capability_id: str) -> dict[str, Any] | None:
 __all__ = [
     "ADAPTER_ID",
     "CAPABILITY_IDS",
+    "CONTAINER_REF",
+    "CONTAINER_REF_ARGUMENTS",
+    "CONTAINER_REF_REQUIRED",
     "CONTRACT_SCHEMA",
     "EVIDENCE_HELD",
     "EVIDENCE_INTO_CONTAINER",

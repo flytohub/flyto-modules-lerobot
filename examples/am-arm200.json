@@ -331,6 +331,7 @@
     "max_captures": 3,
     "observe_pose": "look",
     "verify_height_m": 0.25,
+    "max_uncertainty_m": 0.04,
     "reuse_within_s": 3.0
   }
 }

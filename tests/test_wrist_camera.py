@@ -89,7 +89,7 @@ def red_block_image(view: MountedView, centre: tuple[float, float], half: float)
     return image
 
 
-def test_an_object_seen_from_the_arm_lands_on_the_table_with_the_chains_error_in_its_uncertainty():
+def test_an_object_seen_from_the_arm_lands_on_the_table_with_the_viewing_geometry_in_its_uncertainty():
     red = ColourClass("red", "block", "red block", (340.0, 20.0), 0.5, 0.4, 40, (0.03, 0.03, 0.03))
     view = straight_down()
     image = red_block_image(view, (0.05, 0.02), 0.015)
@@ -100,12 +100,17 @@ def test_an_object_seen_from_the_arm_lands_on_the_table_with_the_chains_error_in
     item, = found
     assert in_hand == [] and item.height_known is True
     assert (item.x, item.y, item.z) == pytest.approx((0.05, 0.02, 0.0), abs=0.002)
-    assert item.xy_m == pytest.approx(0.002)
+    # The camera's own, one pixel's footprint along the ray, and half the side the slant shows.
+    reach = math.dist((0.0, 0.0, 0.5), (0.05, 0.02, 0.03))
+    cos = 0.47 / reach
+    tan = math.sqrt(1.0 - cos * cos) / cos
+    pixel, side = reach / (view.focal * cos), 0.03 * tan / 2.0
+    assert item.xy_m == pytest.approx(0.002 + pixel + side, rel=0.05)
     widened, _ = detect_mounted(image, [red], 1, view, table_z=0.0, tool=None, xy_m=0.002, yaw_rad=0.2,
                                 mount=loose, joints=6)
-    reach = math.dist((0.0, 0.0, 0.5), (0.05, 0.02, 0.03))
     # The range comes from the block's apparent size here (seen from straight above): within a few percent.
-    assert widened[0].xy_m == pytest.approx(0.002 + reach * math.sqrt(6) * math.radians(1.0) + 0.01, rel=0.05)
+    chain = 0.01 + reach * math.sqrt(6) * math.radians(1.0) / cos
+    assert widened[0].xy_m == pytest.approx(0.002 + pixel + side + chain, rel=0.05)
 
 
 def test_a_block_close_to_the_lens_where_the_tool_point_projects_is_in_the_jaws():

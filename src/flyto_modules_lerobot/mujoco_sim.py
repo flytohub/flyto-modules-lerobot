@@ -31,8 +31,8 @@ injection; this one adds real contact physics and a rendered camera:
   offscreen; ``perception.detect`` -- the same colour-blob and homography
   pipeline as a USB camera -- locates objects in it. It never reads where the
   objects are.
-* Faults: a block or a container moved, a grasp slip (the finger force
-  collapses while holding), a motor fault, read latency with jitter.
+* Faults: a block or a container moved, a grasp slip (the jaws' grip on
+  the held block gives way and it falls out), a motor fault, read latency with jitter.
 
 The ``mujoco`` package is the ``mujoco`` extra; nothing imports it until a
 ``mujoco`` arm config is served.
@@ -41,6 +41,7 @@ The ``mujoco`` package is the ``mujoco`` extra; nothing imports it until a
 from __future__ import annotations
 
 import importlib
+import queue
 import random
 import threading
 import time
@@ -48,7 +49,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .perception import MOUNTED_CAMERA
-from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, SimulatedArm, SimulationError, parse_fault
+from .simulation import DEFAULT_MOTOR_FAULT, FaultSpec, OneArm, SimulatedArm, SimulationError, parse_fault
 from .urdf_model import matrix_quaternion, rpy_matrix
 
 #: The robot type an arm config names to be served by MuJoCo.
@@ -296,7 +297,129 @@ def build_mjcf(config: Any) -> str:
     )
 
 
-class MujocoWorld:
+class GLThread:
+    """The one thread that makes, uses and frees every GL context and drawing of the process's worlds.
+
+    A GL context belongs to the thread that made it current. Callers render
+    from whatever thread they run on -- the execution host's worker threads,
+    the live view's request threads -- so the contexts live here and every
+    caller hands its frame to this thread and waits for it. Started on the
+    first frame; a process that never renders starts none.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._jobs: queue.Queue[Any] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def _serve(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            work, done, answer = job
+            try:
+                answer["value"] = work()
+            except BaseException as error:  # raised again on the caller's thread
+                answer["error"] = error
+            # The thread outlives every world: holding the last job's work would keep its world alive.
+            job = work = answer = None
+            done.set()
+
+    def call(self, work: Callable[[], Any]) -> Any:
+        """Run ``work`` on the GL thread and return what it returned (or raise what it raised)."""
+        if self._thread is not None and threading.current_thread() is self._thread:
+            return work()
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._serve, name=self.name, daemon=True)
+                self._thread.start()
+        done, answer = threading.Event(), {}
+        self._jobs.put((work, done, answer))
+        done.wait()
+        if "error" in answer:
+            raise answer["error"]
+        return answer.get("value")
+
+    def stop(self) -> None:
+        """End the thread once the work already handed to it is done."""
+        with self._start_lock:
+            thread, self._thread = self._thread, None
+        if thread is not None:
+            self._jobs.put(None)
+            thread.join()
+
+
+#: The process's one GL thread (:class:`GLThread`): every world's frames are drawn on it.
+GL = GLThread("flyto-mujoco-gl")
+#: The process's GL contexts, one per frame size, made on :data:`GL` on first use and kept for the life of
+#: the process. The platform's GL keeps memory for every context ever made, even after it is freed (about
+#: 0.2 MB each, measured), so a world replaced per episode must not make its own; it draws into these.
+_CONTEXTS: dict[tuple[int, int], Any] = {}
+
+
+def _context(width: int, height: int) -> Any:
+    """On :data:`GL`: this frame size's context, made current."""
+    context = _CONTEXTS.get((width, height))
+    if context is None:
+        context = _CONTEXTS[(width, height)] = importlib.import_module("mujoco.gl_context").GLContext(width, height)
+    context.make_current()
+    return context
+
+
+class FrameDrawing:
+    """One world's drawing at one frame size, in the process's context of that size (on :data:`GL` only).
+
+    What is the world's own -- its scene and its model's GL resources (meshes,
+    textures, the offscreen framebuffer) -- is made here and freed by
+    :meth:`close`; the context itself is the process's.
+    """
+
+    def __init__(self, mj: Any, model: Any, width: int, height: int) -> None:
+        """Make the scene and the model's GL resources in this size's context."""
+        if width > model.vis.global_.offwidth or height > model.vis.global_.offheight:
+            raise SimulationError(f"a {width}x{height} frame is larger than the model's offscreen framebuffer")
+        self.mj, self.model, self.width, self.height = mj, model, width, height
+        _context(width, height)
+        self.scene = mj.MjvScene(model=model, maxgeom=10000)
+        self.option = mj.MjvOption()
+        self.rect = mj.MjrRect(0, 0, width, height)
+        self.gl = mj.MjrContext(model, mj.mjtFontScale.mjFONTSCALE_150.value)
+
+    def _camera(self, camera: Any) -> Any:
+        if isinstance(camera, self.mj.MjvCamera):
+            return camera
+        named = self.mj.MjvCamera()
+        named.type = self.mj.mjtCamera.mjCAMERA_FIXED
+        named.fixedcamid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_CAMERA.value, str(camera))
+        if named.fixedcamid < 0:
+            raise SimulationError(f"the model has no camera {camera!r}")
+        return named
+
+    def draw(self, data: Any, camera: Any) -> Any:
+        """The scene as ``data`` has it, from ``camera`` (a name or a free camera): ``height x width x 3`` uint8."""
+        mj = self.mj
+        _context(self.width, self.height)
+        mj.mjr_setBuffer(mj.mjtFramebuffer.mjFB_OFFSCREEN.value, self.gl)
+        mj.mjv_updateScene(self.model, data, self.option, None, self._camera(camera), mj.mjtCatBit.mjCAT_ALL.value,
+                           self.scene)
+        mj.mjr_render(self.rect, self.scene, self.gl)
+        pixels = _numpy().empty((self.height, self.width, 3), dtype="uint8")
+        mj.mjr_readPixels(pixels, None, self.rect, self.gl)
+        return pixels[::-1].copy()  # GL's first row is the bottom one
+
+    def close(self) -> None:
+        """Free the model's GL resources, in the context they were made in."""
+        _context(self.width, self.height)
+        self.gl.free()
+
+
+def _numpy() -> Any:
+    return importlib.import_module("numpy")
+
+
+class MujocoWorld(OneArm):
     """The arm config's world on MuJoCo; exposes what ``simulation.SimulatedArm`` drives."""
 
     def __init__(self, config: Any, *, clock: Callable[[], float] | None = None,
@@ -345,14 +468,18 @@ class MujocoWorld:
         self.read_ms, self.jitter_ms = self.sim.read_ms, self.sim.jitter_ms
         self._pending = [fault for fault in self.sim.faults]
         self._slips: list[list[Any]] = []
+        # Arm geoms a slip took the grip from (their own friction, restored once the object has left them).
+        self._slipping: dict[int, Any] = {}
+        self._slipping_objects: set[int] = set()
         self.fault_log: list[dict[str, Any]] = []
         self.positions: dict[str, float] = {}
         self.effort = 0.0
         self.started_at = self.clock()
         self._stepped_at = self.started_at
         self._read()
-        self._renderer: Any = None
-        self.robot = SimulatedArm(self)
+        # This world's drawings by frame size, made, used and freed on the process's GL thread only.
+        self._drawings: dict[tuple[int, int], FrameDrawing] = {}
+        self._closed = False
 
     # -- units ---------------------------------------------------------------------------
 
@@ -472,36 +599,91 @@ class MujocoWorld:
         squeezing = self.effort >= 50.0
         for slip in list(self._slips):
             spec, since = slip
-            if not squeezing or now < spec.at_s:
+            # Held is carried: squeezed in the jaws and off everything else. A block still resting on the
+            # table cannot slip out of a grip -- the table carries it, and there is nowhere for it to fall.
+            if not squeezing or now < spec.at_s or not self._carried(spec.object_id):
                 slip[1] = None
                 continue
             slip[1] = now if since is None else since
             if now - slip[1] >= spec.after_held_s:
-                # The grip collapses: the fingers keep closing with almost no force, and the block falls.
                 self._slips.remove(slip)
                 self.fault_log.append({"kind": "grasp_slip", "at_s": round(now, 4), "object_id": spec.object_id})
-                for actuator in self._finger_servos:
-                    self.model.actuator_forcerange[actuator] = (-0.02, 0.02)
+                self._slip_out(spec.object_id)
+        self._regrip()
+
+    def _gripping(self, object_id: str | None) -> list[tuple[int, int]]:
+        """``(arm geom, object geom)`` of every contact between the arm and a held object (or the one named)."""
+        model, data = self.model, self.data
+        arm = model.body("base").id
+        pairs = []
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            for mine, theirs in ((contact.geom1, contact.geom2), (contact.geom2, contact.geom1)):
+                body = model.geom_bodyid[theirs]
+                if model.body_rootid[model.geom_bodyid[mine]] != arm or model.body_jntnum[body] == 0:
+                    continue
+                if not object_id or model.body(body).name == object_id:
+                    pairs.append((int(mine), int(theirs)))
+        return pairs
+
+    def _carried(self, object_id: str | None) -> bool:
+        """Whether the arm alone carries an object (or the one named): touched by the arm, by nothing else."""
+        model, data = self.model, self.data
+        arm = model.body("base").id
+        gripped = {int(model.geom_bodyid[theirs]) for _mine, theirs in self._gripping(object_id)}
+        for index in range(data.ncon):
+            contact = data.contact[index]
+            bodies = (int(model.geom_bodyid[contact.geom1]), int(model.geom_bodyid[contact.geom2]))
+            for body, other in (bodies, bodies[::-1]):
+                if body in gripped and model.body_rootid[other] != arm and other != body:
+                    gripped.discard(body)
+        return bool(gripped)
+
+    def _slip_out(self, object_id: str | None) -> None:
+        """The grip gives way: the surfaces holding the object lose their grip on it, so friction no longer
+        carries its weight. It slides out and falls under gravity while the jaw servo, still commanded
+        closed with its full torque, closes on after it -- the reading a real slip gives. Only those
+        surfaces, and only until the object has left them: a later grasp grips again."""
+        for mine, theirs in self._gripping(object_id):
+            if mine not in self._slipping:
+                self._slipping[mine] = (self.model.geom_friction[mine].copy(), int(self.model.geom_priority[mine]))
+            self._slipping_objects.add(int(self.model.geom_bodyid[theirs]))
+            # A contact takes the friction of its higher-priority geom (else the larger of the two).
+            self.model.geom_friction[mine] = 0.0
+            self.model.geom_priority[mine] = int(self.model.geom_priority[theirs]) + 1
+
+    def _regrip(self) -> None:
+        """Give the slipped surfaces their friction back once no object they let go of still touches them."""
+        if not self._slipping:
+            return
+        touching = {mine for mine, theirs in self._gripping(None)
+                    if self.model.geom_bodyid[theirs] in self._slipping_objects}
+        if touching & set(self._slipping):
+            return
+        for geom, (friction, priority) in self._slipping.items():
+            self.model.geom_friction[geom] = friction
+            self.model.geom_priority[geom] = priority
+        self._slipping.clear()
+        self._slipping_objects.clear()
 
     # -- the rendered camera ------------------------------------------------------------------
 
-    def render(self, width: int, height: int, camera: str = "overhead") -> Any:
-        """One RGB frame from a named camera, the overhead one by default (``height x width x 3`` uint8)."""
+    def render(self, width: int, height: int, camera: Any = "overhead") -> Any:
+        """One RGB frame (``height x width x 3`` uint8) from a named camera (the overhead one by default) or a
+        free one (:meth:`free_camera`), drawn on the process's GL thread whichever thread asks."""
         self.step()
-        with self.lock:
-            if self._renderer is None or (self._renderer.width, self._renderer.height) != (width, height):
-                if self._renderer is not None:
-                    self._renderer.close()
-                self._renderer = self.mj.Renderer(self.model, height, width)
-            self._renderer.update_scene(self.data, camera=camera)
-            return self._renderer.render().copy()
+        return GL.call(lambda: self._draw(width, height, camera))
 
-    def render_with(self, renderer: Any, camera: Any) -> Any:
-        """One RGB frame through a caller's renderer (another thread's GL context): a named camera or a free one."""
-        self.step()
+    def _draw(self, width: int, height: int, camera: Any) -> Any:
+        """On the GL thread: this size's drawing, the scene as it is now, one frame."""
+        if self._closed:
+            # A drawing made now would never be freed.
+            raise SimulationError("this simulated world was closed; it draws no more frames")
+        drawing = self._drawings.get((width, height))
+        if drawing is None:
+            drawing = self._drawings[(width, height)] = FrameDrawing(self.mj, self.model, width, height)
         with self.lock:
-            renderer.update_scene(self.data, camera=camera)
-            return renderer.render().copy()
+            return drawing.draw(self.data, camera)
 
     def free_camera(self, view: Mapping[str, float]) -> Any:
         """A free scene camera looking at ``lookat`` from ``azimuth`` / ``elevation`` (degrees), ``distance`` away."""
@@ -524,10 +706,14 @@ class MujocoWorld:
             viewer.sync()
 
     def close(self) -> None:
-        """Release the renderer's GL context."""
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+        """Free this world's drawings on the GL thread; the process's contexts and thread stay for the next."""
+        def release() -> None:
+            self._closed = True
+            drawings, self._drawings = list(self._drawings.values()), {}
+            for drawing in drawings:
+                drawing.close()
+
+        GL.call(release)
 
 
 # -- one world per simulated port in this process -------------------------------------------------
@@ -570,5 +756,5 @@ def mujoco_robot(config: Any) -> SimulatedArm:
     return world_for(config).robot
 
 
-__all__ = ["COLOURS", "MUJOCO_ROBOT_TYPE", "MujocoWorld", "build_mjcf", "install_world", "mujoco_robot",
-           "reset_worlds", "world_for"]
+__all__ = ["COLOURS", "GL", "MUJOCO_ROBOT_TYPE", "FrameDrawing", "GLThread", "MujocoWorld", "build_mjcf",
+           "install_world", "mujoco_robot", "reset_worlds", "world_for"]

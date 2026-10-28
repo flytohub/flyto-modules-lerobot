@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Place bound to a located container, in Cloud's vocabulary: `x`, `y` with
+  `container_label`, `container_uncertainty_m`, `container_observed_at` (a
+  core step's `container_ref`); the container is located again at place
+  time and a moved one is refused (`container_moved`), nothing released;
+  `container_check` in the result. A camera on the arm looks straight over
+  the container, beside what the jaws hold, before a place.
+- Eye-in-hand locate: uncertainty from the viewing geometry
+  (`perception.located_within`), partly seen objects widened or placed from
+  their seen edges, pieces of one object merged, nothing in the jaws while
+  they read open, `capture.viewpoint`, and a locate refused
+  `viewpoint_unsuitable` beyond `perception.max_uncertainty_m`.
+- Slips: the hold is read until `hold_samples` still readings agree; a
+  grasp that holds nothing ends at the observe pose with a look there
+  (`perception_after.after_failure`); the MuJoCo slip drops the block, the
+  in-process slip drops the squeeze effort at once.
+- A fixed camera's uncertainty includes a partly seen block's footprint and
+  the move a height read from apparent size makes; a container's apparent
+  size is its outline's.
+- Simulation memory: a replaced world is freed at once (no cycle through its
+  arm); one GL context per frame size for the process.
+- `scripts/benchmark_sim.py`: held = within 3 cm of the tool point in 3D.
+
+- Planar camera: the heading is taken before the height correction (it was
+  measured from a centre moved toward the nadir to an axis point that was
+  not, turning it by up to 45 deg); a block beyond 15 deg of straight down
+  rests on the table, and one smaller than its top face is `seen_in_part`
+  (height unknown, position uncertain by its half-diagonal, heading by a
+  quarter turn). A pick planned on a target seen only in part is refused
+  before anything is sent (`target_partly_seen`).
 - Motion: every move is one time-optimal joint trajectory within each
   servo's no-load speed and acceleration (`trajectory.py`; servo classes
   gain `max_acceleration_rad_s2`), streamed one set point per control period

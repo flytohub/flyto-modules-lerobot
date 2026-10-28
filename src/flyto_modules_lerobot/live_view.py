@@ -17,8 +17,9 @@ nothing more -- no second streaming system:
   computer's loopback port ``FLYTO_LEROBOT_LIVE_PORT``.
 * :class:`LiveView` -- a loopback HTTP server answering each poll with one
   freshly rendered frame, JPEG-encoded with ``SIMULATION`` drawn into the
-  picture and ``"source": "simulation"`` in the answer. It renders through its
-  own GL context on its own thread and only reads the world.
+  picture and ``"source": "simulation"`` in the answer. Its frames are drawn
+  on the process's one GL thread (``mujoco_sim.GL``), as every other
+  frame is, and it only reads the world.
 
 Off unless ``FLYTO_LEROBOT_LIVE_PORT`` is set and the arm config's camera is
 a rendered one. Pillow (the ``mujoco`` extra) encodes the JPEG.
@@ -102,18 +103,14 @@ class LiveView:
         self.world = world
         self.width, self.height = width, height
         self.scene = dict(scene or {})
-        self._local = threading.local()
         self.server: ThreadingHTTPServer | None = None
 
     def frame(self, channel_id: str) -> dict[str, Any]:
         """One poll's answer: a fresh labelled JPEG of that view."""
         view = _BY_ID[channel_id]
-        renderer = getattr(self._local, "renderer", None)
-        if renderer is None:
-            renderer = self.world.mj.Renderer(self.world.model, self.height, self.width)
-            self._local.renderer = renderer
         camera = view.camera if view.camera is not None else self.world.free_camera(self.scene)
-        data = labelled_jpeg(self.world.render_with(renderer, camera))
+        # Drawn on the world's GL thread: a request thread never holds a GL context.
+        data = labelled_jpeg(self.world.render(self.width, self.height, camera))
         return {"format": "jpeg", "data": base64.b64encode(data).decode("ascii"), "bytes": len(data),
                 "source": "simulation", "label": FRAME_LABEL,
                 "at": datetime.now(UTC).isoformat(timespec="milliseconds")}

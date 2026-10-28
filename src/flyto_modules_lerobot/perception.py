@@ -50,7 +50,8 @@ from itertools import pairwise
 from typing import Any, Protocol
 
 PERCEPTION_KEYS = frozenset({"frame", "camera", "on_table_tolerance_m", "match_radius_m", "max_captures",
-                             "observe_pose", "arm_clearance_m", "reuse_within_s", "verify_height_m"})
+                             "observe_pose", "arm_clearance_m", "reuse_within_s", "verify_height_m",
+                             "max_uncertainty_m"})
 _FRAME_KEYS = frozenset({"id", "description", "table_z_m"})
 _SIMULATED_KEYS = frozenset({"kind", "id", "xy_sigma_m", "yaw_sigma_rad", "miss_rate", "occlusion_radius_m",
                              "latency_ms", "jitter_ms"})
@@ -93,6 +94,9 @@ class Detection:
     # False when the camera could not tell the height (the object looked smaller than its own
     # footprint: something covers it). Such an object is never counted as resting on the table.
     height_known: bool = True
+    # True when the camera saw only part of it (its outline is cut by the arm or another object): its
+    # centre and heading are the visible part's, and its uncertainty says so. Nothing is planned on it.
+    seen_in_part: bool = False
 
     def footprint_contains(self, x: float, y: float) -> bool:
         """Whether a point lies over this object's footprint (its yaw), when its size is known."""
@@ -158,6 +162,9 @@ class PerceptionConfig:
     # A camera on the arm verifies a placement looking straight down from this high over the target (metres);
     # None: from the observe pose.
     verify_height_m: float | None = None
+    # The resolution a look at the table must have to be used (metres): a camera on the arm whose view cannot
+    # place a whole object at its image's centre within this is refused; None: not checked.
+    max_uncertainty_m: float | None = None
 
 
 def _now() -> str:
@@ -196,11 +203,16 @@ def on_table(item: Detection, settings: PerceptionConfig) -> bool:
     return item.height_known and abs(item.z - settings.frame.table_z_m) <= settings.on_table_tolerance_m
 
 
+def container_under(detections: Sequence[Detection], x: float, y: float, *, other_than: str | None = None
+                    ) -> Detection | None:
+    """The container whose footprint the table point ``(x, y)`` lies in, if any."""
+    return next((other for other in detections
+                 if other.kind == "container" and other.id != other_than and other.footprint_contains(x, y)), None)
+
+
 def container_holding(item: Detection, detections: Sequence[Detection]) -> Detection | None:
     """The container whose footprint a block's centre lies over, if any."""
-    return next((other for other in detections
-                 if other.kind == "container" and other.id != item.id and other.footprint_contains(item.x, item.y)),
-                None)
+    return container_under(detections, item.x, item.y, other_than=item.id)
 
 
 def resting_inside(item: Detection, holder: Detection, settings: PerceptionConfig) -> bool:
@@ -787,38 +799,74 @@ def _pixel_area_m2(homography: Homography, u: float, v: float) -> float:
     return abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0))
 
 
+def _perimeter_px(outline: Sequence[tuple[float, float]]) -> float:
+    return sum(math.dist(a, b) for a, b in zip(outline, (*outline[1:], *outline[:1]), strict=True))
+
+
 def detect(frame: Frame, settings: UsbCameraSettings, homography: Homography) -> list[Detection]:
     """Colour blobs on the table plane; with a known camera height, lifted objects are placed in 3D.
 
     Without ``camera_height_m`` every object is reported on the table plane
-    (``z`` 0, relative to the table). With it, an object whose top face looks
-    ``k`` times wider than its footprint would on the table is at
+    (``z`` 0, relative to the table). With it, a container, or a block seen
+    within :data:`STEEP_WITHIN_DEG` of straight down, whose top face looks ``k``
+    times wider than its footprint would on the table is at
     ``z_top = H (1 - 1/k)``, and its centre is moved toward the point under
-    the camera by the same perspective factor. An object that looks smaller
-    than its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly
-    covered: its height is reported unknown.
+    the camera by the same perspective factor; one that looks smaller than
+    its footprint (``k`` under :data:`OCCLUDED_BELOW`) is partly covered.
+
+    A block seen at a slant shows its side faces beside its top, and how
+    much of them the colour takes in varies with the light: apparent size
+    cannot tell its height there (as for a camera on the arm). It is taken to
+    rest on the table and placed by the plane of its top. Unoccluded, a
+    block seen from above shows at least its whole top face; a blob smaller
+    than that face by more than half a pixel along its outline is cut by the
+    arm or another object: it is ``seen_in_part``,
+    its height unknown, its position uncertain by its footprint's
+    half-diagonal and its heading by a quarter turn. The heading is taken
+    before any height correction: placing an object toward the nadir scales
+    its position about that point, which never turns it.
+    A height read from apparent size moves the centre toward the nadir beyond
+    where a resting object's top would put it; a tilted object shows more of
+    itself and reads as raised, so that move is added to its uncertainty.
     """
     classes = {colour.name: colour for colour in settings.classes}
     detections = []
     counts: dict[str, int] = {}
+    height_m, nadir = settings.camera_height_m, settings.nadir
     for blob in find_blobs(frame, settings.classes, stride=settings.stride):
         colour = classes[blob.colour]
         x, y = homography.apply(blob.u, blob.v)
         ax, ay = homography.apply(blob.u + 10.0 * math.cos(blob.angle), blob.v + 10.0 * math.sin(blob.angle))
-        z, height_known = 0.0, True
-        if settings.camera_height_m and settings.nadir is not None and colour.size[0] * colour.size[1] > 0:
-            footprint_px = colour.size[0] * colour.size[1] / max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
-            k = math.sqrt(max(blob.area_px / footprint_px, 1e-6))
-            height_known = k >= OCCLUDED_BELOW
-            top = settings.camera_height_m * (1.0 - 1.0 / max(k, 1.0))
-            scale = (settings.camera_height_m - max(top, 0.0)) / settings.camera_height_m
-            x = settings.nadir[0] + (x - settings.nadir[0]) * scale
-            y = settings.nadir[1] + (y - settings.nadir[1]) * scale
-            z = max(0.0, top - colour.size[2])
+        yaw = math.atan2(ay - y, ax - x)
+        z, height_known, cut, raised = 0.0, True, False, 0.0
+        footprint = colour.size[0] * colour.size[1]
+        if height_m and nadir is not None and footprint > 0:
+            pixel_m2 = max(_pixel_area_m2(homography, blob.u, blob.v), 1e-12)
+            slant = math.degrees(math.atan2(math.hypot(x - nadir[0], y - nadir[1]), height_m))
+            if slant <= STEEP_WITHIN_DEG or colour.kind != "block":
+                # A container's walls, shadow and what lies in it break up its colour, never its outline.
+                shown = _polygon_area(blob.outline) if colour.kind == "container" else blob.area_px
+                k = math.sqrt(max(shown / (footprint / pixel_m2), 1e-6))
+                height_known = k >= OCCLUDED_BELOW
+                cut = not height_known
+                top = height_m * (1.0 - 1.0 / max(k, 1.0))
+                z = max(0.0, top - colour.size[2])
+                raised = abs(top - colour.size[2]) * math.hypot(x - nadir[0], y - nadir[1]) / height_m
+            else:
+                top = colour.size[2]
+                face_px = footprint / (pixel_m2 * ((height_m - top) / height_m) ** 2)
+                cut = blob.area_px < face_px - 0.5 * settings.stride * _perimeter_px(blob.outline)
+                height_known = not cut
+            scale = (height_m - max(top, 0.0)) / height_m
+            x = nadir[0] + (x - nadir[0]) * scale
+            y = nadir[1] + (y - nadir[1]) * scale
+        xy_m, yaw_rad = settings.xy_m + raised, settings.yaw_rad
+        if cut:
+            xy_m += math.hypot(colour.size[0], colour.size[1]) / 2.0
+            yaw_rad = max(yaw_rad, math.pi / 4.0)
         counts[colour.name] = counts.get(colour.name, 0) + 1
         detections.append(Detection(f"{colour.name}-{counts[colour.name]}", colour.kind, colour.label, x, y, z,
-                                    math.atan2(ay - y, ax - x), colour.size, settings.xy_m, settings.yaw_rad,
-                                    height_known=height_known))
+                                    yaw, colour.size, xy_m, yaw_rad, height_known=height_known, seen_in_part=cut))
     return detections
 
 
@@ -856,7 +904,8 @@ class UsbCamera:
     """Colour blobs from a fixed overhead camera, mapped to the table by a 4-point homography."""
 
     def __init__(self, settings: UsbCameraSettings, frames: Callable[[], Frame] | None = None,
-                 clock: Callable[[], float] | None = None, chain: Any = None, table_z: float = 0.0) -> None:
+                 clock: Callable[[], float] | None = None, chain: Any = None, table_z: float = 0.0,
+                 jaws_open: Callable[[Mapping[str, float]], bool] | None = None) -> None:
         """``frames`` gives one frame per call; OpenCV's capture of the configured device by default.
 
         A camera on the arm needs the arm's chain; a fixed one is calibrated by its homography.
@@ -866,6 +915,7 @@ class UsbCamera:
         self.settings = settings
         self.chain = chain
         self.table_z = table_z
+        self.jaws_open = jaws_open
         self._frames = frames
         self._clock = clock or time.monotonic
         if settings.mount is not None:
@@ -885,6 +935,7 @@ class UsbCamera:
             return self._capture_mounted(joints)
         started = self._clock()
         frame = self._frame()
+        coverage = self._coverage(frame)
         detections = detect(frame, self.settings, self.homography)
         camera = {"camera_id": self.settings.id, "kind": "usb", "width": frame.width, "height": frame.height,
                   "latency_ms": round((self._clock() - started) * 1000.0, 3),
@@ -892,7 +943,7 @@ class UsbCamera:
                   "calibration": {"method": "homography", "points": len(self.settings.image_points),
                                   "residual_m": round(self.residual_m, 5)},
                   "seen": len(detections), "hardware_tested": False}
-        return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera, self._coverage(frame))
+        return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera, coverage)
 
     def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
         """The camera on the arm: place blobs by the arm's chain at the joints read for this capture."""
@@ -904,13 +955,16 @@ class UsbCamera:
         view = mounted_view(self.chain, mount, joints, fovy_deg=settings.fovy_deg, width=frame.width,
                             height=frame.height)
         detections, in_hand = detect_mounted(frame, settings.classes, settings.stride, view, table_z=self.table_z,
-                                             tool=self.chain.forward(joints).position, xy_m=settings.xy_m,
-                                             yaw_rad=settings.yaw_rad, mount=mount, joints=len(self.chain.links))
+                                             tool=_tool_between_jaws(self.chain, self.jaws_open, joints),
+                                             xy_m=settings.xy_m, yaw_rad=settings.yaw_rad, mount=mount,
+                                             joints=len(self.chain.links))
         camera = {"camera_id": settings.id, "kind": "usb", "mount": mount.link, "width": frame.width,
                   "height": frame.height, "latency_ms": round((self._clock() - started) * 1000.0, 3),
                   "height_observed": True, "calibration": {"method": "forward_kinematics", "link": mount.link},
                   "joints_at_capture": {name: round(float(value), 3) for name, value in joints.items()},
-                  "in_hand": in_hand, "seen": len(detections), "hardware_tested": False}
+                  "in_hand": in_hand, "seen": len(detections), "hardware_tested": False,
+                  "viewpoint": viewpoint(view, table_z=self.table_z, stride=settings.stride, xy_m=settings.xy_m,
+                                         mount=mount, joints=len(self.chain.links), classes=settings.classes)}
         return Capture(tuple(detections), _now(), HARDWARE_SOURCE, camera)
 
     def _coverage(self, frame: Frame) -> Callable[[Spot], float | None]:
@@ -1173,10 +1227,221 @@ def _box_area(size: Sequence[float], ray: Sequence[float], yaw: float) -> float:
 
 #: Apparent size tells an object's height only when it is seen within this angle of straight down (degrees).
 STEEP_WITHIN_DEG = 15.0
+#: Below this cosine of the viewing angle a ray grazes the table: what it meets cannot be placed (about 87 deg).
+_GRAZING_COS = 0.05
+
+
+def _polygon_area(points: Sequence[tuple[float, float]]) -> float:
+    """The area of a simple polygon (shoelace)."""
+    return abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(points, [*points[1:], *points[:1]], strict=True))) / 2.0
+
+
+def _to_polygon(point: tuple[float, float], polygon: Sequence[tuple[float, float]]) -> float:
+    """How far a point lies from a convex polygon (0 inside it)."""
+    if len(polygon) >= 3 and all(
+            (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]) >= 0.0
+            for a, b in zip(polygon, [*polygon[1:], *polygon[:1]], strict=True)):
+        return 0.0
+    if len(polygon) == 1:
+        return math.dist(point, polygon[0])
+    return min(_to_segment(point[0], point[1], a, b) for a, b in zip(polygon, [*polygon[1:], *polygon[:1]],
+                                                                       strict=True))
+
+
+def _rectangle(points: Sequence[tuple[float, float]]) -> tuple[float, float, float, float, float]:
+    """The smallest rectangle around points: ``(centre x, centre y, heading, length along it, length across)``."""
+    hull = _hull(list(points))
+    if len(hull) < 3:
+        xs, ys = [x for x, _y in points] or [0.0], [y for _x, y in points] or [0.0]
+        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0, 0.0, max(xs) - min(xs), max(ys) - min(ys)
+    heading = _min_area_heading([x for x, _y in hull], [y for _x, y in hull])
+    c, s = math.cos(heading), math.sin(heading)
+    along = [x * c + y * s for x, y in hull]
+    across = [y * c - x * s for x, y in hull]
+    mid_along, mid_across = (min(along) + max(along)) / 2.0, (min(across) + max(across)) / 2.0
+    return (mid_along * c - mid_across * s, mid_along * s + mid_across * c, heading, max(along) - min(along),
+            max(across) - min(across))
+
+
+def _plane_of(colour: ColourClass, table_z: float) -> float:
+    """The plane a blob of this colour is cast onto: a block's top, a container's half height."""
+    return table_z + colour.size[2] if colour.kind == "block" else table_z + colour.size[2] / 2.0
+
+
+def _cast(blob: Blob, view: MountedView, plane_z: float) -> list[tuple[float, float]]:
+    """A blob's outline cast onto a horizontal plane (the points whose rays meet it)."""
+    return [(hit[0], hit[1]) for u, v in blob.outline if (hit := view.onto(u, v, plane_z)) is not None]
+
+
+def _slant(view: MountedView, u: float, v: float) -> tuple[float, float]:
+    """``(cos, tan)`` of the angle a pixel's ray makes with straight down."""
+    cos = max(abs(view.ray(u, v)[2]), _GRAZING_COS)
+    return cos, math.sqrt(max(1.0 - cos * cos, 0.0)) / cos
+
+
+def _one_object(blobs: Sequence[Blob], colour: ColourClass, view: MountedView, *, table_z: float,
+                stride: int) -> bool:
+    """Whether blobs of one colour are pieces of one object: together they fit within its footprint.
+
+    Cast onto the object's plane, the pieces' outlines span no more than its
+    footprint, give or take what its height lets each outline point lie off
+    that plane (the height times the tangent of that point's ray, the
+    steepest of them) and two pixels' footprint. Two whole objects never fit
+    in one's footprint, so they stay two.
+    """
+    plane = _plane_of(colour, table_z)
+    points = [point for blob in blobs for point in _cast(blob, view, plane)]
+    if len(points) < 3:
+        return False
+    outline = [point for blob in blobs for point in blob.outline]
+    slants = [_slant(view, u, v) for u, v in outline]
+    tan = max(tan for _cos, tan in slants)
+    cos = min(cos for cos, _tan in slants)
+    reach = max(math.dist(view.position, (x, y, plane)) for x, y in points)
+    slack = colour.size[2] * tan + 2.0 * stride * reach / (view.focal * cos)
+    _x, _y, _heading, along, across = _rectangle(points)
+    long_side, short_side = max(colour.size[0], colour.size[1]), min(colour.size[0], colour.size[1])
+    return max(along, across) <= long_side + slack and min(along, across) <= short_side + slack
+
+
+def _joined(blobs: Sequence[Blob]) -> Blob:
+    """Pieces of one object as one blob: their pixels and their outlines together."""
+    if len(blobs) == 1:
+        return blobs[0]
+    area = sum(blob.area_px for blob in blobs)
+    return Blob(blobs[0].colour, sum(blob.u * blob.area_px for blob in blobs) / area,
+                sum(blob.v * blob.area_px for blob in blobs) / area, area, blobs[0].angle,
+                tuple(_hull([point for blob in blobs for point in blob.outline])))
+
+
+def _objects(blobs: Sequence[Blob], colour: ColourClass, view: MountedView, *, table_z: float,
+             stride: int) -> list[Blob]:
+    """A colour's blobs grouped into objects: pieces that fit in one footprint are one object."""
+    groups: list[list[Blob]] = []
+    for blob in blobs:
+        home = next((group for group in groups
+                     if _one_object([*group, blob], colour, view, table_z=table_z, stride=stride)), None)
+        if home is None:
+            groups.append([blob])
+        else:
+            home.append(blob)
+    # A piece added later may let two earlier groups fit as one: join until nothing changes.
+    joined = True
+    while joined and len(groups) > 1:
+        joined = False
+        for first in range(len(groups)):
+            other = next((index for index in range(first + 1, len(groups))
+                          if _one_object([*groups[first], *groups[index]], colour, view, table_z=table_z,
+                                         stride=stride)), None)
+            if other is not None:
+                groups[first].extend(groups.pop(other))
+                joined = True
+                break
+    return [_joined(group) for group in groups]
+
+
+def _cut(blob: Blob, view: MountedView, *, stride: int, covers: Sequence[Sequence[tuple[float, float]]]) -> list[bool]:
+    """For each outline point: whether the object may go on past it unseen -- at the image's edge, or against
+    something nearer the lens that covers it (what the jaws hold)."""
+    edge = 2 * stride
+    return [u <= edge or v <= edge or u >= view.width - 1 - edge or v >= view.height - 1 - edge
+            or any(_to_polygon((u, v), cover) <= edge for cover in covers) for u, v in blob.outline]
+
+
+def _partly_seen(blob: Blob, colour: ColourClass, view: MountedView, *, table_z: float, cuts: Sequence[bool]) -> bool:
+    """Whether only part of an object is in this frame, so its centre is not where its outline's is.
+
+    Its outline is cut (:func:`_cut`), or encloses less than its top face
+    would show from here.
+    """
+    if any(cuts):
+        return True
+    plane = _plane_of(colour, table_z)
+    hit = view.onto(blob.u, blob.v, plane)
+    if hit is None:
+        return True
+    cos, _tan = _slant(view, blob.u, blob.v)
+    face_px = colour.size[0] * colour.size[1] * cos * (view.focal / hit[2]) ** 2
+    return _polygon_area(blob.outline) < OCCLUDED_BELOW ** 2 * face_px
+
+
+def _from_its_edges(points: Sequence[tuple[float, float, bool]], size: Sequence[float],
+                    tolerance: float) -> tuple[float, float] | None:
+    """A rectangular object's centre from the edges of it that are seen, given its size; None when unknown.
+
+    ``points`` are its outline cast onto its plane, each marked when cut.
+    Along each side direction of the smallest rectangle around them, an end
+    no cut point reaches (within ``tolerance``) is the object's own edge: two
+    such ends give the centre between them, one gives it half the object's
+    side in from that edge. Both ends cut leave it unknown.
+    """
+    flat = [(x, y) for x, y, _cut in points]
+    heading = _min_area_heading([x for x, _y in flat], [y for _x, y in flat])
+    axes = ((math.cos(heading), math.sin(heading)), (-math.sin(heading), math.cos(heading)))
+    spans = [[x * axis[0] + y * axis[1] for x, y in flat] for axis in axes]
+    # The longer side lies along the longer span.
+    long_side, short_side = max(size[0], size[1]), min(size[0], size[1])
+    sides = ((long_side, short_side) if max(spans[0]) - min(spans[0]) >= max(spans[1]) - min(spans[1])
+             else (short_side, long_side))
+    middles = []
+    for axis_index, values in enumerate(spans):
+        low, high = min(values), max(values)
+        cut_low = any(cut and value <= low + tolerance for value, (_x, _y, cut) in zip(values, points, strict=True))
+        cut_high = any(cut and value >= high - tolerance for value, (_x, _y, cut) in zip(values, points, strict=True))
+        side = sides[axis_index]
+        if cut_low and cut_high:
+            return None
+        middles.append(high - side / 2.0 if cut_low else low + side / 2.0 if cut_high else (low + high) / 2.0)
+    (ax, ay), (bx, by) = axes
+    return middles[0] * ax + middles[1] * bx, middles[0] * ay + middles[1] * by
+
+
+def _hidden_where_unseen(centre: tuple[float, float], heading: float, size: Sequence[float], plane: float,
+                         view: MountedView, outline: Sequence[tuple[float, float]],
+                         covers: Sequence[Sequence[tuple[float, float]]], edge: float) -> bool:
+    """Whether an object so placed would show only what is seen: each of its footprint's corners and side
+    midpoints projects onto what is seen of it, out of the frame, or onto something that covers it."""
+    c, s = math.cos(heading), math.sin(heading)
+    for along, across in ((a, b) for a in (-0.5, 0.0, 0.5) for b in (-0.5, 0.0, 0.5) if a or b):
+        dx, dy = along * size[0], across * size[1]
+        point = view.project((centre[0] + dx * c - dy * s, centre[1] + dx * s + dy * c, plane))
+        if point is None:
+            continue
+        u, v = point[0], point[1]
+        if u < 0 or v < 0 or u > view.width - 1 or v > view.height - 1:
+            continue
+        if _to_polygon((u, v), outline) <= edge or any(_to_polygon((u, v), cover) <= edge for cover in covers):
+            continue
+        return False
+    return True
+
+
+def located_within(view: MountedView, u: float, v: float, reach: float, *, size: Sequence[float], stride: int,
+                   xy_m: float, spread: float, fk_error_m: float, partial: bool) -> float:
+    """How far from the truth an object seen at pixel ``(u, v)``, ``reach`` metres away, may be placed.
+
+    The sum of what the viewing geometry lets each source of error move it on
+    the table: the camera's own segmentation (``xy_m``); one sampled pixel's
+    footprint, stretched by the slant (``reach * stride / (focal * cos)``);
+    the chain's error -- the lens up to ``fk_error_m`` off, and the ray up to
+    ``spread`` radians off, which moves where it meets the table by
+    ``reach * spread / cos``; the side a slant shows beside the top, cast onto
+    the top's plane as a band ``height * tan`` wide, which moves the centre of
+    what is seen by up to half that band; and, when only part of it is seen,
+    anywhere its footprint allows (half its diagonal).
+    """
+    cos, tan = _slant(view, u, v)
+    pixel = reach * stride / (view.focal * cos)
+    chain = fk_error_m + reach * spread / cos
+    sides = size[2] * tan / 2.0
+    hidden = math.hypot(size[0], size[1]) / 2.0 if partial else 0.0
+    return xy_m + pixel + chain + sides + hidden
 
 
 def _placed_from_arm(blob: Blob, colour: ColourClass, view: MountedView, *, table_z: float, xy_m: float,
-                     yaw_rad: float, spread: float, fk_error_m: float, name: str) -> Detection:
+                     yaw_rad: float, spread: float, fk_error_m: float, name: str, stride: int = 1,
+                     partial: bool = False, cuts: Sequence[bool] = (),
+                     covers: Sequence[Sequence[tuple[float, float]]] = ()) -> Detection:
     """An object the camera on the arm sees off the jaws: where it is, how it is turned, whether it rests.
 
     The heading is taken in the table plane (the blob's outline cast onto the
@@ -1189,12 +1454,20 @@ def _placed_from_arm(blob: Blob, colour: ColourClass, view: MountedView, *, tabl
     the plane gives the position. Nearer than that, the object is raised (on
     a rim, another object) and is placed at that distance, off the table.
     Further than that cannot be (it would be under the table): part of it is
-    out of view or covered, and its height is reported unknown.
+    out of view or covered, and its height is reported unknown. A container
+    is placed at the centre of its outline's smallest rectangle on its half
+    height plane: its walls and what lies inside break up its colour, never
+    its outline. Partly in view (``partial``), its centre is found from the
+    edges of it that are seen and its known size (:func:`_from_its_edges`)
+    when they tell it and so placed it would hide nothing the frame shows
+    (:func:`_hidden_where_unseen`); otherwise it is known only within its
+    footprint. Its
+    uncertainty is :func:`located_within`; an object only partly in view
+    whose centre is not told by its edges never has its height known.
     """
     size = colour.size
-    top = table_z + size[2] if colour.kind == "block" else table_z + size[2] / 2.0
-    corners = [view.onto(u, v, top) for u, v in blob.outline]
-    flat = [(x, y) for x, y, _reach in (corner for corner in corners if corner is not None)]
+    top = _plane_of(colour, table_z)
+    flat = _cast(blob, view, top)
     yaw = _min_area_heading([x for x, _y in flat], [y for _x, y in flat]) if len(flat) >= 3 else 0.0
     ray = view.ray(blob.u, blob.v)
     resting = view.onto(blob.u, blob.v, table_z + size[2] / 2.0)
@@ -1202,30 +1475,44 @@ def _placed_from_arm(blob: Blob, colour: ColourClass, view: MountedView, *, tabl
     reach = view.focal * math.sqrt(shown / max(blob.area_px, 1.0))
     centre = tuple(view.position[i] + reach * ray[i] for i in range(3))
     tolerance = size[2] / 2.0
-    uncertainty = xy_m + reach * spread + fk_error_m
-    if resting is not None and abs(ray[2]) < math.cos(math.radians(STEEP_WITHIN_DEG)):
+
+    def within(range_m: float) -> float:
+        return located_within(view, blob.u, blob.v, range_m, size=size, stride=stride, xy_m=xy_m, spread=spread,
+                              fk_error_m=fk_error_m, partial=partial)
+
+    if colour.kind == "container" and resting is not None and len(flat) >= 3:
+        x, y, _heading, _along, _across = _rectangle(flat)
+        if partial and any(cuts):
+            marked = [(hit[0], hit[1], cut) for (u, v), cut in zip(blob.outline, cuts, strict=True)
+                      if (hit := view.onto(u, v, top)) is not None]
+            cos, _tan = _slant(view, blob.u, blob.v)
+            centre_xy = _from_its_edges(marked, size, 2.0 * stride * resting[2] / (view.focal * cos))
+            if centre_xy is not None and _hidden_where_unseen(centre_xy, yaw, size, top, view, blob.outline, covers,
+                                                              2.0 * stride):
+                x, y = centre_xy
+                partial = False
+        return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, within(resting[2]), yaw_rad,
+                         height_known=not partial)
+    if resting is not None and (partial or abs(ray[2]) < math.cos(math.radians(STEEP_WITHIN_DEG))):
         # Seen at a slant the sides show as much as the top, and how much of them the colour takes in varies
         # with the light: apparent size cannot tell height. The object is taken to rest on the table, as a
         # planar camera takes it; looking straight down tells (``verify_height_m``).
         # The colour takes in the lit top more than the shaded sides: the top's plane places it best.
-        x, y, reach = view.onto(blob.u, blob.v, top) or resting
-        expected = shown * (view.focal / reach) ** 2
-        return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, xy_m + reach * spread
-                         + fk_error_m, yaw_rad,
-                         height_known=math.sqrt(blob.area_px / max(expected, 1e-9)) >= OCCLUDED_BELOW)
+        x, y, plane_reach = view.onto(blob.u, blob.v, top) or resting
+        expected = shown * (view.focal / plane_reach) ** 2
+        return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, within(plane_reach), yaw_rad,
+                         height_known=not partial and math.sqrt(blob.area_px / max(expected, 1e-9)) >= OCCLUDED_BELOW)
     if resting is None:
         return Detection(name, colour.kind, colour.label, centre[0], centre[1], centre[2] - size[2] / 2.0, yaw,
-                         size, uncertainty, yaw_rad, height_known=False)
+                         size, within(reach), yaw_rad, height_known=False)
     bottom = centre[2] - size[2] / 2.0
     if bottom > table_z + tolerance:
-        return Detection(name, colour.kind, colour.label, centre[0], centre[1], bottom, yaw, size, uncertainty,
+        return Detection(name, colour.kind, colour.label, centre[0], centre[1], bottom, yaw, size, within(reach),
                          yaw_rad, height_known=True)
-    if colour.kind == "block":
-        hit = view.onto(blob.u, blob.v, top)
-        x, y = (hit[0], hit[1]) if hit is not None else (resting[0], resting[1])
-    else:
-        x, y = resting[0], resting[1]
-    return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size, uncertainty, yaw_rad,
+    hit = view.onto(blob.u, blob.v, top)
+    x, y = (hit[0], hit[1]) if hit is not None else (resting[0], resting[1])
+    return Detection(name, colour.kind, colour.label, x, y, table_z, yaw, size,
+                     within(hit[2] if hit is not None else resting[2]), yaw_rad,
                      height_known=bottom >= table_z - tolerance)
 
 
@@ -1240,6 +1527,29 @@ def mounted_view(chain: Any, mount: CameraMount, joints: Mapping[str, float], *,
     return MountedView(tuple(position), forward, up, _cross(forward, up), focal, width, height)  # type: ignore[arg-type]
 
 
+def viewpoint(view: MountedView, *, table_z: float, stride: int, xy_m: float, mount: CameraMount, joints: int,
+              classes: Sequence[ColourClass]) -> dict[str, Any]:
+    """What this camera position can tell about the table: where its centre ray meets it, and how well.
+
+    ``within_m`` is :func:`located_within` for the tallest of the colour
+    classes' objects seen whole at the image's centre (the side a slant shows
+    grows with height); None when the centre ray does not meet the table (the
+    camera looks away from it, or grazes it).
+    """
+    size = max((colour.size for colour in classes), key=lambda dims: dims[2], default=(0.0, 0.0, 0.0))
+    spread = math.sqrt(max(joints, 1)) * math.radians(mount.joint_error_deg)
+    u, v = view.width / 2.0, view.height / 2.0
+    hit = view.onto(u, v, table_z)
+    if hit is None or abs(view.ray(u, v)[2]) < _GRAZING_COS:
+        return {"table_in_view": False, "within_m": None}
+    cos, _tan = _slant(view, u, v)
+    return {"table_in_view": True, "centre": [round(hit[0], 4), round(hit[1], 4)], "range_m": round(hit[2], 4),
+            "slant_deg": round(math.degrees(math.acos(min(cos, 1.0))), 2),
+            "pixel_m": round(hit[2] * stride / (view.focal * cos), 5),
+            "within_m": round(located_within(view, u, v, hit[2], size=size, stride=stride, xy_m=xy_m, spread=spread,
+                                             fk_error_m=mount.fk_error_m, partial=False), 4)}
+
+
 def detect_mounted(frame: Frame, classes: Sequence[ColourClass], stride: int, view: MountedView, *, table_z: float,
                    tool: Sequence[float] | None, xy_m: float, yaw_rad: float, mount: CameraMount,
                    joints: int) -> tuple[list[Detection], list[str]]:
@@ -1247,13 +1557,15 @@ def detect_mounted(frame: Frame, classes: Sequence[ColourClass], stride: int, vi
 
     A blob centred where the tool point projects and as large as an object
     that close to the lens looks is between the jaws: it is placed at the
-    tool point (forward kinematics), off the table. Any other blob is placed
-    where its pixel's ray meets the plane of the object's top (a block) or
-    half height (a container), resting on the table; when it looks smaller
-    than its top face would from there, part of it is out of view or covered,
-    and its height is reported unknown. Each position's uncertainty is the
-    camera's own plus how far the ray may be off: ``range * sqrt(joints) *
-    joint_error`` and ``fk_error_m``.
+    tool point (forward kinematics), off the table. The other blobs of a
+    colour are grouped into objects -- pieces that fit within one object's
+    footprint are one object (walls, shadow or a block inside cut a
+    container's colour into pieces) -- and each is placed where its pixel's
+    ray meets the plane of the object's top (a block) or half height (a
+    container), resting on the table (:func:`_placed_from_arm`). One cut off
+    by the image's edge or by what the jaws hold is only partly seen
+    (:func:`_partly_seen`). Each position's uncertainty is
+    :func:`located_within`, with ``spread = sqrt(joints) * joint_error``.
     """
     by_name = {colour.name: colour for colour in classes}
     hand = view.project(tool) if tool is not None else None
@@ -1261,42 +1573,52 @@ def detect_mounted(frame: Frame, classes: Sequence[ColourClass], stride: int, vi
     in_hand: list[str] = []
     counts: dict[str, int] = {}
     angular = math.sqrt(max(joints, 1)) * math.radians(mount.joint_error_deg)
+    rest: dict[str, list[Blob]] = {}
+    held: list[Blob] = []
     for blob in find_blobs(frame, classes, stride=stride):
         colour = by_name[blob.colour]
-        counts[colour.name] = counts.get(colour.name, 0) + 1
-        name = f"{colour.name}-{counts[colour.name]}"
         size = colour.size
         if hand is not None and tool is not None and colour.kind == "block":
             # In the jaws: centred where the tool point projects, and as large as an object that close looks.
             reach_px = view.focal * math.hypot(size[0], size[1]) / max(hand[2], 1e-3)
             close = (view.focal / max(hand[2], 1e-3)) ** 2 * size[0] * size[1]
             if math.hypot(blob.u - hand[0], blob.v - hand[1]) <= reach_px / 2.0 and blob.area_px >= 0.3 * close:
-                in_hand.append(name)
-                detections.append(Detection(name, colour.kind, colour.label, tool[0], tool[1],
-                                            tool[2] - size[2] / 2.0, 0.0, size, mount.fk_error_m + xy_m, math.pi,
-                                            height_known=True))
+                held.append(blob)
                 continue
-        detections.append(_placed_from_arm(blob, colour, view, table_z=table_z, xy_m=xy_m, yaw_rad=yaw_rad,
-                                           spread=angular, fk_error_m=mount.fk_error_m, name=name))
-    return _merged_containers(detections), in_hand
+        rest.setdefault(blob.colour, []).append(blob)
+    for blob in held:
+        colour = by_name[blob.colour]
+        counts[colour.name] = counts.get(colour.name, 0) + 1
+        name = f"{colour.name}-{counts[colour.name]}"
+        in_hand.append(name)
+        detections.append(Detection(name, colour.kind, colour.label, tool[0], tool[1], tool[2] - colour.size[2] / 2.0,
+                                    0.0, colour.size, mount.fk_error_m + xy_m, math.pi, height_known=True))
+    covers = [blob.outline for blob in held]
+    for colour_name, blobs in rest.items():
+        colour = by_name[colour_name]
+        for blob in sorted(_objects(blobs, colour, view, table_z=table_z, stride=stride),
+                           key=lambda item: (item.v, item.u)):
+            counts[colour.name] = counts.get(colour.name, 0) + 1
+            cuts = _cut(blob, view, stride=stride, covers=covers)
+            partial = _partly_seen(blob, colour, view, table_z=table_z, cuts=cuts)
+            detections.append(_placed_from_arm(blob, colour, view, table_z=table_z, xy_m=xy_m, yaw_rad=yaw_rad,
+                                               spread=angular, fk_error_m=mount.fk_error_m,
+                                               name=f"{colour.name}-{counts[colour.name]}", stride=stride,
+                                               partial=partial, cuts=cuts, covers=covers))
+    return detections, in_hand
 
 
-def _merged_containers(detections: list[Detection]) -> list[Detection]:
-    """One container seen as several pieces (an object inside cuts its floor in two) is one container."""
-    merged: list[Detection] = []
-    for item in detections:
-        twin = next((other for other in merged if other.kind == "container" == item.kind
-                     and other.label == item.label and other.size is not None
-                     and math.hypot(other.x - item.x, other.y - item.y) <= min(other.size[0], other.size[1]) / 2.0),
-                    None)
-        if twin is None:
-            merged.append(item)
-            continue
-        merged[merged.index(twin)] = Detection(twin.id, twin.kind, twin.label, (twin.x + item.x) / 2.0,
-                                               (twin.y + item.y) / 2.0, twin.z, twin.yaw, twin.size,
-                                               max(twin.xy_m, item.xy_m), twin.yaw_rad,
-                                               height_known=twin.height_known or item.height_known)
-    return merged
+def _tool_between_jaws(chain: Any, jaws_open: Callable[[Mapping[str, float]], bool] | None,
+                       joints: Mapping[str, float]) -> tuple[float, float, float] | None:
+    """The tool point an object between the jaws sits at; None while the jaws read open (nothing can be there).
+
+    A block on the table seen through open jaws projects where the tool point
+    does, and nearby it looks as large as one held: only the gripper's own
+    reading tells the two apart.
+    """
+    if jaws_open is not None and jaws_open(joints):
+        return None
+    return chain.forward(joints).position
 
 
 class RenderedCamera:
@@ -1308,14 +1630,19 @@ class RenderedCamera:
     frame is segmented (:func:`detect`). Nothing reads where the objects are.
     """
 
-    def __init__(self, settings: RenderedCameraSettings, world: Any, table_z: float, chain: Any = None) -> None:
+    def __init__(self, settings: RenderedCameraSettings, world: Any, table_z: float, chain: Any = None,
+                 jaws_open: Callable[[Mapping[str, float]], bool] | None = None) -> None:
         """Bind to a MuJoCo world and calibrate (a fixed camera); a camera on the arm needs the arm's chain."""
         self.settings = settings
+        self.jaws_open = jaws_open
         self.world = world
         self.rng: random.Random = world.camera_rng
         self.table_z = table_z
         self.chain = chain
-        self.timings: list[dict[str, float]] = []
+        # Every frame's render and detection time, for a measurement that asks for them by setting a list
+        # here (``scripts/benchmark_sim.py``); None keeps nothing. The host keeps this camera for its whole
+        # life, and each capture already carries its own timing.
+        self.timings: list[dict[str, float]] | None = None
         if settings.mount is not None:
             return
         cx, cy, _ = settings.position
@@ -1327,7 +1654,6 @@ class RenderedCamera:
                                            tuple(image), tuple(table), settings.classes, settings.xy_m,
                                            settings.yaw_rad, camera_height_m=settings.position[2] - table_z,
                                            nadir=(cx, cy))
-        self.timings: list[dict[str, float]] = []
 
     def capture(self, joints: Mapping[str, float] | None = None) -> Capture:
         """Render one frame and locate the colour blobs in it."""
@@ -1339,15 +1665,16 @@ class RenderedCamera:
         started = time.perf_counter()
         frame = ArrayFrame(self.world.render(settings.width, settings.height))
         rendered = time.perf_counter()
-        detections = detect(frame, self.detection, self.homography)
+        found = detect(frame, self.detection, self.homography)
         done = time.perf_counter()
         timing = {"render_ms": round((rendered - started) * 1000.0, 3),
                   "detect_ms": round((done - rendered) * 1000.0, 3)}
-        self.timings.append(timing)
+        if self.timings is not None:
+            self.timings.append(timing)
         camera = {"camera_id": settings.id, "kind": "rendered", "width": frame.width, "height": frame.height,
                   "latency_ms": round(latency, 3), **timing, "height_observed": True,
                   "sim_time_s": round(self.world.elapsed(), 4),
-                  "calibration": {"method": "homography", "points": 4}, "seen": len(detections)}
+                  "calibration": {"method": "homography", "points": 4}, "seen": len(found)}
         limit = settings.arm_max_value
 
         def covered(spot: Spot) -> float | None:
@@ -1357,7 +1684,7 @@ class RenderedCamera:
             radius = settings.focal_px() * spot.radius / max(settings.position[2] - spot.z, 1e-6)
             return dark_fraction(frame, u, v, radius, limit)
 
-        return Capture(tuple(detections), _now(), "simulation", camera, covered)
+        return Capture(tuple(found), _now(), "simulation", camera, covered)
 
     def _capture_mounted(self, joints: Mapping[str, float] | None) -> Capture:
         """The camera on the arm: render from its link, place blobs by the chain at the joints read for it."""
@@ -1372,18 +1699,22 @@ class RenderedCamera:
         view = mounted_view(self.chain, mount, joints, fovy_deg=settings.fovy_deg, width=frame.width,
                             height=frame.height)
         detections, in_hand = detect_mounted(frame, settings.classes, settings.stride, view, table_z=self.table_z,
-                                             tool=self.chain.forward(joints).position, xy_m=settings.xy_m,
-                                             yaw_rad=settings.yaw_rad, mount=mount, joints=len(self.chain.links))
+                                             tool=_tool_between_jaws(self.chain, self.jaws_open, joints),
+                                             xy_m=settings.xy_m, yaw_rad=settings.yaw_rad, mount=mount,
+                                             joints=len(self.chain.links))
         done = time.perf_counter()
         timing = {"render_ms": round((rendered - started) * 1000.0, 3),
                   "detect_ms": round((done - rendered) * 1000.0, 3)}
-        self.timings.append(timing)
+        if self.timings is not None:
+            self.timings.append(timing)
         camera = {"camera_id": settings.id, "kind": "rendered", "mount": mount.link, "width": frame.width,
                   "height": frame.height, "latency_ms": round(latency, 3), **timing, "height_observed": True,
                   "sim_time_s": round(self.world.elapsed(), 4),
                   "calibration": {"method": "forward_kinematics", "link": mount.link},
                   "joints_at_capture": {name: round(float(value), 3) for name, value in joints.items()},
-                  "in_hand": in_hand, "seen": len(detections)}
+                  "in_hand": in_hand, "seen": len(detections),
+                  "viewpoint": viewpoint(view, table_z=self.table_z, stride=settings.stride, xy_m=settings.xy_m,
+                                         mount=mount, joints=len(self.chain.links), classes=settings.classes)}
         return Capture(tuple(detections), _now(), "simulation", camera)
 
 
@@ -1476,11 +1807,19 @@ def _build_simulated(settings: SimulatedCameraSettings, config: Any) -> Camera:
 def _build_rendered(settings: RenderedCameraSettings, config: Any) -> Camera:
     from .mujoco_sim import world_for
 
-    return RenderedCamera(settings, world_for(config), config.perception.frame.table_z_m, config.kinematics)
+    return RenderedCamera(settings, world_for(config), config.perception.frame.table_z_m, config.kinematics,
+                          jaws_open=_jaws_open(config))
 
 
 def _build_usb(settings: UsbCameraSettings, config: Any) -> Camera:
-    return UsbCamera(settings, chain=config.kinematics, table_z=config.perception.frame.table_z_m)
+    return UsbCamera(settings, chain=config.kinematics, table_z=config.perception.frame.table_z_m,
+                     jaws_open=_jaws_open(config))
+
+
+def _jaws_open(config: Any) -> Callable[[Mapping[str, float]], bool]:
+    """Whether a joint reading has the gripper open: then nothing can be between its jaws."""
+    gripper = config.gripper
+    return lambda joints: gripper.joint in joints and gripper.state(joints[gripper.joint]) == "open"
 
 
 def _usb_geometry(settings: UsbCameraSettings, table_z: float) -> CameraGeometry | None:
@@ -1548,6 +1887,8 @@ def parse_perception(raw: Any, *, robot_type: str) -> PerceptionConfig:
         reuse_within_s=_non_negative(body.get("reuse_within_s", 0.0), "perception.reuse_within_s"),
         verify_height_m=(_non_negative(body["verify_height_m"], "perception.verify_height_m")
                          if body.get("verify_height_m") is not None else None),
+        max_uncertainty_m=(_non_negative(body["max_uncertainty_m"], "perception.max_uncertainty_m")
+                           if body.get("max_uncertainty_m") is not None else None),
     )
 
 
@@ -1588,11 +1929,13 @@ __all__ = [
     "build_camera",
     "camera_geometry",
     "container_holding",
+    "container_under",
     "dark_fraction",
     "detect_mounted",
     "find",
     "find_blobs",
     "locate_result",
+    "located_within",
     "mounted_view",
     "nearest",
     "object_record",
@@ -1600,4 +1943,5 @@ __all__ = [
     "parse_perception",
     "resting_inside",
     "scene_counts",
+    "viewpoint",
 ]
