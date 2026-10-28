@@ -322,6 +322,13 @@ class KinematicChain:
         """The tool pose for these joint positions (the config's unit)."""
         return self._frames(joints)[1]
 
+    def base_yaw_joint(self, joints: Mapping[str, float]) -> str | None:
+        """The first joint when it turns the whole arm about the vertical (the table's normal), else None."""
+        if not self.links:
+            return None
+        frames, _tool = self._frames(joints)
+        return self.links[0].joint if abs(frames[0][1][2]) > 0.999 else None
+
     def points(self, joints: Mapping[str, float]) -> list[Vector]:
         """The arm as a polyline: its base, each joint's position, and the tool point (table frame, metres)."""
         frames, tool = self._frames(joints)

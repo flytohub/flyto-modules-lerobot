@@ -104,6 +104,7 @@ from .backends import backend_for
 from .capabilities import (
     CONTAINER_REF_ARGUMENTS,
     DEPLOYMENT_MODE,
+    DROPPED_IN_TRANSIT_DETAIL,
     MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
     MAX_LABEL_LENGTH,
@@ -160,6 +161,7 @@ from .perception import (
     Detection,
     Spot,
     arm_hides,
+    arm_margin,
     build_camera,
     camera_geometry,
     container_holding,
@@ -195,6 +197,8 @@ _STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, R
 _DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)
 # The most of a spot a frame may show covered by the arm and still count as seeing it (edge pixels).
 _MAX_COVERED = 0.02
+# How far the base turns per try when the observe pose hides a spot a look must see (``_view_pose``).
+VIEW_TURN_STEP_DEG = 15
 # What a stop measurement says when it could not measure.
 _UNMEASURED: Mapping[str, Any] = {"stop_measured": False, "stop_to_still_ms": None, "overshoot": None}
 
@@ -1037,17 +1041,20 @@ class LeRobotArmAdapter:
 
         It slipped out and fell, or the jaws closed beside it: under or near
         the arm either way, which hides it from a look from where the arm
-        stopped. The arm goes to the observe pose (a camera on the arm: its
-        look pose) and a new look reports the object of its label nearest
-        where the jaws were (``object``; None when the label is not known),
-        with every loose block it sees (``objects``) -- so the failure says
-        where it lies, and the arm is left where a read-only look sees it too.
+        stopped. The arm goes to a pose that does not hide where the jaws
+        were (:meth:`_view_pose`: the observe pose, turned about the base when
+        that pose itself hides the spot; a camera on the arm: its look pose)
+        and a new look reports the object of its label nearest where the jaws
+        were (``object``; None when the label is not known), with every loose
+        block it sees (``objects``) -- so the failure says where it lies, and
+        the arm is left where a read-only look sees it too.
         """
         jaws = self.config.kinematics.forward(positions).position if self.config.kinematics is not None else None
-        pose = self._observe_pose()
-        if pose is not None:
+        fell = (Spot(jaws[0], jaws[1], self._table_z(), self.config.perception.match_radius_m),) if jaws else ()
+        view = self._view_pose(fell)
+        if view is not None:
             with phases(f"{self._view_phase}_after_failure"):
-                positions = self._follow(call, positions, [dict(pose.joints)], counter, leg)
+                positions = self._follow(call, positions, [view], counter, leg)
         with phases("look_after_failure"):
             after = self._look()
         if after is None:
@@ -1259,6 +1266,55 @@ class LeRobotArmAdapter:
         pose = self.config.poses.get(name) if name else None
         return pose if pose is not None and pose.taught else None
 
+    def _view_pose(self, spots: Sequence[Spot]) -> dict[str, float] | None:
+        """Joints for a look that sees every spot past the arm; None without a taught observe pose.
+
+        The observe pose is one taught pose, and the arm standing there hides
+        what lies beside it from an overhead camera: a block that fell beside
+        the base was unseen from it in every case measured, and seen whole
+        with the arm turned away (MuJoCo, 2026-10-28). So when the occlusion
+        model (``perception.arm_margin``) says the observe pose covers a spot,
+        the arm turns about its base -- the one joint that sweeps its whole
+        cast across the table and leaves the camera's height and the arm's
+        reach alone -- to the angle within its limits where the spots lie
+        farthest outside its cast, the smallest turn among equals. The model
+        is a single capsule radius for every link, so it can call a spot
+        covered from every angle that a frame shows clear: the clearest angle
+        is taken rather than none, and the caller's own frame decides what
+        was seen (:meth:`_shows`). Without the model, or a base that turns
+        about the vertical, the taught pose is the look, as before.
+        """
+        pose = self._observe_pose()
+        if pose is None:
+            return None
+        joints = dict(pose.joints)
+        model, chain = self._occlusion(), self.config.kinematics
+        if model is None or not spots or self._margin(model, joints, spots) > 0.0:
+            return joints
+        base = chain.base_yaw_joint(joints)
+        limits = {joint.name: (joint.minimum, joint.maximum) for joint in self.config.joints}
+        if base is None or base not in limits:
+            return joints
+        low, high = limits[base]
+        step = math.radians(VIEW_TURN_STEP_DEG) / chain.to_radians  # the config's unit
+        best, clearest = joints, self._margin(model, joints, spots)
+        for count in range(1, 180 // VIEW_TURN_STEP_DEG + 1):
+            for sign in (1, -1):
+                angle = joints[base] + sign * count * step
+                if not low <= angle <= high:
+                    continue
+                turned = {**joints, base: angle}
+                margin = self._margin(model, turned, spots)
+                if margin > clearest:
+                    best, clearest = turned, margin
+        return best
+
+    def _margin(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> float:
+        """How far the spots lie outside the arm's cast at these joints, the closest one's (``arm_margin``)."""
+        geometry, clearance = model
+        arm = self.config.kinematics.points(positions)
+        return min(arm_margin(geometry, arm, clearance, spot) for spot in spots)
+
     def _occlusion(self) -> tuple[Any, float] | None:
         """``(camera geometry, arm clearance)`` when the config models what the arm hides; None otherwise."""
         perception, chain = self.config.perception, self.config.kinematics
@@ -1306,20 +1362,20 @@ class LeRobotArmAdapter:
             # A camera on the arm looks straight down at what it verifies: no slant to hide how high things rest.
             return self._follow(call, positions, [*path, above], counter, leg, phases=phases,
                                 via_phases={len(path) - 1: self._view_phase}), False
-        pose = self._observe_pose()
-        if pose is None:
+        view = self._view_pose(spots)
+        if view is None:
             return self._follow(call, positions, path, counter, leg), False
         model = self._occlusion()
         watch = None if model is None else (lambda reading: not self._hidden(model, reading, spots))
         tolerance = self.config.motion.tolerance
-        positions, reached, early = self._move(call, positions, [*path, dict(pose.joints)], counter, leg,
+        positions, reached, early = self._move(call, positions, [*path, view], counter, leg,
                                                tolerance=tolerance, phases=phases,
                                                via_phases={len(path) - 1: self._view_phase},
                                                watch=watch, watch_from=len(path) - 1)
         if early and not self._hidden(model, positions, spots):
             return positions, True
         if early:
-            positions = self._follow(call, positions, [dict(pose.joints)], counter, leg)
+            positions = self._follow(call, positions, [view], counter, leg)
         elif not reached:
             raise _ShortOfTarget(positions)
         return positions, False
@@ -1335,10 +1391,10 @@ class LeRobotArmAdapter:
                 return False
         return True
 
-    def _to_observe_pose(self, call: _Call, positions: dict[str, float], counter: list[int],
-                         leg: dict[str, Any]) -> dict[str, float]:
-        """The rest of the way to the observe pose, for a second look when the first one did not settle it."""
-        return self._follow(call, positions, [dict(self._observe_pose().joints)], counter, leg)
+    def _to_view_pose(self, call: _Call, positions: dict[str, float], counter: list[int],
+                      leg: dict[str, Any], spots: Sequence[Spot]) -> dict[str, float]:
+        """The rest of the way to a pose that sees ``spots``, for a second look when the first did not settle it."""
+        return self._follow(call, positions, [self._view_pose(spots)], counter, leg)
 
     def _spots(self, capture: Capture | None, target: _Target, held_id: str | None) -> tuple[Spot, ...]:
         """What a verifying look must see past the arm: the target, and every object the first look saw.
@@ -1411,6 +1467,46 @@ class LeRobotArmAdapter:
             raise _Refused(REASON_TARGET_PARTLY_SEEN, {"object_id": item.id, "seen_at": [round(item.x, 4),
                                                                                           round(item.y, 4)]})
 
+    def _look_past_arm(self, call_id: str, call: _Call, seen: tuple[Capture, _Target], arguments: tuple[Any, Any],
+                       before: Mapping[str, float], motion: tuple[list[int], dict[str, Any], _Phases]
+                       ) -> tuple[Capture | None, _Target, dict[str, float]] | CallResult:
+        """A target the planning look saw only in part: move where the arm does not hide it and look again.
+
+        ``(capture, target, reading)`` once the new look sees it whole, and the
+        grasp is planned from there. The look was cut by the arm (or another
+        object): refusing left every later look to be taken from the same
+        place, which hid it again -- a block beside the base was seen in part
+        or not at all from the observe pose, and whole with the arm turned
+        away. When no pose would be better than where the arm stands it is
+        refused as before, nothing sent. Once the arm moved, a target still
+        not seen whole fails, holding nothing, with the look it took
+        (``perception_after.objects``) for a retry to be bound to.
+        """
+        (capture, target), (object_id, pose), (counter, leg, phases) = seen, arguments, motion
+        view = self._view_pose(self._spots(None, target, None)[:1])
+        tolerance = self.config.motion.tolerance
+        there = view is None or all(abs(float(before.get(name, value)) - value) <= tolerance
+                                    for name, value in view.items())
+        if there:
+            self._seen_whole(capture, target)
+        try:
+            with phases(f"{self._view_phase}_for_target"):
+                positions = self._follow(call, dict(before), [view], counter, leg)
+            with phases("perceive_again"):
+                capture = self._look_for(object_id) if object_id is not None else self._look()
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, phases.evidence())
+        try:
+            target = self._pick_target(capture, object_id, pose)
+            self._seen_whole(capture, target)
+        except _Refused as refused:
+            look = {"object": None, "after_failure": refused.code,
+                    "objects": [self._record(item, capture) for item in (capture.detections if capture else ())
+                                if item.kind == "block"]}
+            return self._pick_failed(call_id, refused.code, before, positions, self._grip(positions), phases,
+                                     {"object_id": object_id, "perception_after": look})
+        return capture, target, positions
+
     def _pick(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
         """``manipulation.pick``: locate, plan, open, approach, descend, grasp, verify the grip, lift, verify."""
         object_id, pose = self._position_arguments(arguments, "object_id", frozenset({"x", "y", "yaw"}))
@@ -1420,13 +1516,21 @@ class LeRobotArmAdapter:
         with phases("perceive"):
             capture = self._capture(object_id, plan=True) if object_id is not None else self._look()
             target = self._pick_target(capture, object_id, pose)
-            self._seen_whole(capture, target)
         before = _unsent(self.session.read)
+        counter: list[int] = [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
+        start = dict(before)
+        if capture is not None and target.detection is not None and target.detection.seen_in_part:
+            seen = self._look_past_arm(call_id, call, (capture, target), (object_id, pose), before,
+                                       (counter, leg, phases))
+            if isinstance(seen, CallResult):
+                return seen
+            capture, target, start = seen
         with phases("plan"):
             started = time.perf_counter()
             grasp_z = target.z + target.height / 2.0
             geometry = chain.grasp
-            approach, descend, lift = self._plan(chain, before, [
+            approach, descend, lift = self._plan(chain, start, [
                 (target.x, target.y, grasp_z + geometry.approach_height_m), (target.x, target.y, grasp_z),
                 (target.x, target.y, grasp_z + geometry.lift_height_m)], target.yaw)
             plan = {"solver": "kinematic_chain_dls", "wall_ms": round((time.perf_counter() - started) * 1000.0, 3),
@@ -1435,9 +1539,7 @@ class LeRobotArmAdapter:
         extra: dict[str, Any] = {"object_id": object_id or (target.detection.id if target.detection else None),
                                  "target": target.pose(frame), "plan": plan,
                                  "perception_before": self._record(target.detection, capture) if capture else None}
-        counter: list[int] = [0]
-        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
-        positions = dict(before)
+        positions = dict(start)
         try:
             with phases("open"):
                 if self.config.gripper.state(positions[self.config.gripper.joint]) != "open":
@@ -1472,7 +1574,7 @@ class LeRobotArmAdapter:
                 # Not settled from where the arm stopped: look again from the observe pose.
                 early = False
                 with phases(f"{self._view_phase}_again"):
-                    positions = self._to_observe_pose(call, positions, counter, leg)
+                    positions = self._to_view_pose(call, positions, counter, leg, spots)
                 with phases("verify_again"):
                     after = self._look_for(extra["object_id"])
                     lifted, seen = self._lifted(after, target, extra["object_id"])
@@ -1492,6 +1594,7 @@ class LeRobotArmAdapter:
         if lifted is False:
             return self._pick_failed(call_id, REASON_PERCEPTION_DISAGREES, before, positions, grip, phases, extra)
         self.session.held_object = extra["object_id"]
+        self.session.held_label = target.detection.label if target.detection else None
         return CallResult(call_id, OUTCOME_COMPLETED, evidence={
             "arm": self._state(positions), "arm_before": self._state(before), "object_held": True, "grip": grip,
             **extra, **phases.evidence(), "effect_applied": True,
@@ -1691,6 +1794,35 @@ class LeRobotArmAdapter:
             "grip": self._grip(positions), "released": False, "object_held": True, "perception_after": None,
             **dict(extra), **dict(observed), **phases.evidence(), "effect_applied": True})
 
+    def _dropped_in_transit(self, call_id: str, call: _Call, before: Mapping[str, float],
+                            grip: Mapping[str, Any]) -> CallResult:
+        """A place whose jaws lost what a pick proved held: look past the arm, then fail with that look.
+
+        The object fell between the pick and the place, under or near the
+        arm, which hides it from a look from where the arm is. Refusing
+        before moving left Cloud a look from there, which did not see it.
+        Like a pick that holds nothing (:meth:`_after_failure`), the arm goes
+        to the observe pose and looks, and the failure carries that look
+        (``perception_after.objects``) for the re-pick to be bound to.
+        Nothing is released: ``object_held: false``, ``released: false``.
+        """
+        held_id = self.session.held_object
+        self.session.held_object = None
+        phases = _Phases(self._clock)
+        counter: list[int] = [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
+        extra: dict[str, Any] = {"object_id": held_id}
+        label = getattr(self.session, "held_label", None)
+        try:
+            positions, extra["perception_after"] = self._after_failure(
+                call, dict(before), counter, leg, phases, label, REASON_NOTHING_HELD)
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, {**extra, **phases.evidence()})
+        return CallResult(call_id, OUTCOME_FAILED, detail=DROPPED_IN_TRANSIT_DETAIL, evidence={
+            "reason_code": REASON_NOTHING_HELD, "arm": self._state(positions), "arm_before": self._state(before),
+            "grip": dict(grip), "released": False, "object_held": False, **extra, **phases.evidence(),
+            "effect_applied": True})
+
     def _place(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
         """``manipulation.place``: locate, plan, approach, descend, release, verify the release, retreat, verify.
 
@@ -1707,7 +1839,9 @@ class LeRobotArmAdapter:
         before = _unsent(self.session.read)
         held_grip = self._grip(before)
         if not held_grip["held"]:
-            raise _Refused(REASON_NOTHING_HELD, {"grip": held_grip})
+            if getattr(self.session, "held_object", None) is None:
+                raise _Refused(REASON_NOTHING_HELD, {"grip": held_grip})
+            return self._dropped_in_transit(call_id, call, before, held_grip)
         phases = _Phases(self._clock)
         held_id = getattr(self.session, "held_object", None)
         counter: list[int] = [0]
@@ -1802,7 +1936,7 @@ class LeRobotArmAdapter:
                 # Not settled from where the arm stopped: look again from the observe pose.
                 early = False
                 with phases(f"{self._view_phase}_again"):
-                    positions = self._to_observe_pose(call, positions, counter, leg)
+                    positions = self._to_view_pose(call, positions, counter, leg, spots)
                 with phases("verify_again"):
                     after = self._look_for(held_id, container_id)
                     inside, seen, container = self._placed(after, target, container_id, held_id)
