@@ -51,6 +51,8 @@ from .perception import (
     scene_counts,
 )
 
+#: The occlusion model: the camera geometry, and the arm's half-width for every link or each one (``link_clearance``).
+_Occlusion = tuple[Any, float | tuple[float, ...]]
 
 class _LooksMixin:
     """Where the arm's camera looks from, and what it sees: the looks every capability takes."""
@@ -258,13 +260,13 @@ class _LooksMixin:
                     best, clearest = turned, margin
         return best
 
-    def _margin(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> float:
+    def _margin(self, model: _Occlusion, positions: Mapping[str, float], spots: Sequence[Spot]) -> float:
         """How far the spots lie outside the arm's cast at these joints, the closest one's (``arm_margin``)."""
         geometry, clearance = model
         arm = self.config.kinematics.points(positions)
         return min(arm_margin(geometry, arm, clearance, spot) for spot in spots)
 
-    def _occlusion(self) -> tuple[Any, float] | None:
+    def _occlusion(self) -> _Occlusion | None:
         """``(camera geometry, arm clearance)`` when the config models what the arm hides; None otherwise."""
         perception, chain = self.config.perception, self.config.kinematics
         if perception is None or chain is None or perception.arm_clearance_m is None:
@@ -272,7 +274,7 @@ class _LooksMixin:
         geometry = camera_geometry(perception)
         return None if geometry is None else (geometry, perception.arm_clearance_m)
 
-    def _hidden(self, model: tuple[Any, float], positions: Mapping[str, float], spots: Sequence[Spot]) -> bool:
+    def _hidden(self, model: _Occlusion, positions: Mapping[str, float], spots: Sequence[Spot]) -> bool:
         """Whether the arm, at these joints, hides any of ``spots`` from the camera (the occlusion model)."""
         geometry, clearance = model
         arm = self.config.kinematics.points(positions)
