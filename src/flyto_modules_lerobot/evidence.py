@@ -18,7 +18,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .capabilities import EVIDENCE_SOURCE, REFUSAL_LINES
+from .capabilities import (
+    EVIDENCE_SOURCE,
+)
+from .refusals import (
+    REFUSAL_LINES,
+)
 
 POLICY_DECISION_KIND = "policy.decision"
 

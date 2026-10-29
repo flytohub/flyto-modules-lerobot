@@ -24,8 +24,10 @@ from conftest import ROOT
 
 from flyto_modules_lerobot.adapter_contract import OUTCOME_REFUSED, CallRequest
 from flyto_modules_lerobot.arm_config import ArmConfigError, parse_arm_config
-from flyto_modules_lerobot.capabilities import REASON_KINEMATICS_UNAVAILABLE
 from flyto_modules_lerobot.perception import ColourClass, RgbImage, find_blobs
+from flyto_modules_lerobot.refusals import (
+    REASON_KINEMATICS_UNAVAILABLE,
+)
 from flyto_modules_lerobot.trajectory import motion_limits
 from flyto_modules_lerobot.urdf_model import MODELS_DIR, load_urdf, rpy_matrix
 

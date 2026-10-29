@@ -11,7 +11,14 @@ object (``object_slipped``).
 from __future__ import annotations
 
 from flyto_modules_lerobot.adapter_contract import OUTCOME_COMPLETED, OUTCOME_FAILED, CallRequest
-from flyto_modules_lerobot.capabilities import GRASP, REASON_NO_OBJECT, REASON_SLIPPED, RELEASE
+from flyto_modules_lerobot.capabilities import (
+    GRASP,
+    RELEASE,
+)
+from flyto_modules_lerobot.refusals import (
+    REASON_NO_OBJECT,
+    REASON_SLIPPED,
+)
 
 
 def grasp(adapter, call_id="grasp-1"):

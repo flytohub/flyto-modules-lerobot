@@ -30,11 +30,6 @@ from .adapter_contract import (
     OUTCOME_COMPLETED,
     CallResult,
 )
-from .capabilities import (
-    REASON_ARGUMENTS,
-    REASON_PERCEPTION_UNAVAILABLE,
-    REASON_VIEWPOINT_UNSUITABLE,
-)
 from .perception import (
     CameraUnavailable,
     Capture,
@@ -49,6 +44,11 @@ from .perception import (
     object_record,
     on_table,
     scene_counts,
+)
+from .refusals import (
+    REASON_ARGUMENTS,
+    REASON_PERCEPTION_UNAVAILABLE,
+    REASON_VIEWPOINT_UNSUITABLE,
 )
 
 #: The occlusion model: the camera geometry, and the arm's half-width for every link or each one (``link_clearance``).

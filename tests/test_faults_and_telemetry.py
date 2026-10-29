@@ -22,10 +22,12 @@ from flyto_modules_lerobot.capabilities import (
     ENV_AUTODISCOVER,
     ENV_CONFIG,
     MANIPULATION_STATE,
-    REASON_FAULT,
     TELEMETRY_CHANNELS,
 )
 from flyto_modules_lerobot.driver import FAULT_PROTECTION, ArmFault
+from flyto_modules_lerobot.refusals import (
+    REASON_FAULT,
+)
 
 FAULT_CODE = re.compile(r"^[a-z][a-z0-9_.:-]{0,63}$")
 CLOUD_CHANNEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$")

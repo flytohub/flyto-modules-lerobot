@@ -28,14 +28,6 @@ from .adapter_contract import (
     OUTCOME_FAILED,
     CallResult,
 )
-from .capabilities import (
-    REASON_OBJECT_NOT_FOUND,
-    REASON_PERCEPTION_DISAGREES,
-    REASON_PERCEPTION_UNAVAILABLE,
-    REASON_SLIPPED,
-    REASON_TARGET_PARTLY_SEEN,
-    refusal_detail,
-)
 from .perception import (
     Capture,
     Detection,
@@ -43,6 +35,14 @@ from .perception import (
     nearest,
     on_table,
     scene_counts,
+)
+from .refusals import (
+    REASON_OBJECT_NOT_FOUND,
+    REASON_PERCEPTION_DISAGREES,
+    REASON_PERCEPTION_UNAVAILABLE,
+    REASON_SLIPPED,
+    REASON_TARGET_PARTLY_SEEN,
+    refusal_detail,
 )
 
 

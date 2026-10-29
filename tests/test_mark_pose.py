@@ -25,6 +25,9 @@ from flyto_modules_lerobot.capabilities import (
     ENV_CONFIG,
     MARK_POSE,
     MOVE_JOINTS,
+)
+from flyto_modules_lerobot.driver import ArmSession
+from flyto_modules_lerobot.refusals import (
     REASON_ARGUMENTS,
     REASON_CONFIG_NOT_WRITABLE,
     REASON_MOTORS_MISMATCH,
@@ -32,7 +35,6 @@ from flyto_modules_lerobot.capabilities import (
     REASON_POSE_TAUGHT,
     REASON_UNREACHABLE,
 )
-from flyto_modules_lerobot.driver import ArmSession
 
 HELD = {"shoulder_pan": 1.25, "shoulder_lift": -20.0, "elbow_flex": 40.0, "wrist_flex": 25.0, "wrist_yaw": -3.0,
         "wrist_roll": 7.5}
