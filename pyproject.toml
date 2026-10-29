@@ -34,6 +34,8 @@ core = ["flyto-core>=2.41.0"]
 # LeRobot itself needs Python 3.12+. AM-ARM200 profiles (`arm_profile`) live
 # in the liyiteng/lerobot_alohamini fork: install it from git instead (README).
 lerobot = ["lerobot>=0.4; python_version >= '3.12'"]
+# A USB camera (`perception.camera.kind: usb`): OpenCV grabs its frames, numpy segments them.
+camera = ["opencv-python-headless>=4.8", "numpy>=1.24"]
 # The MuJoCo simulation backend (robot type `mujoco`), its rendered camera and live view.
 mujoco = ["mujoco>=3.1", "numpy>=1.24", "pillow>=10"]
 # jsonschema: tests hold each reply to its output_schema the way the Cloud host does.

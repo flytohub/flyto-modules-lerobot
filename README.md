@@ -156,6 +156,13 @@ this order. There is no separate tool.
    `stop_to_still_ms` and `overshoot` in that call's result. Stop a few
    moves on purpose and read them before trusting the hold.
 
+6. **Check each joint's mapping, then mark it verified.** Pick and place are
+   refused on hardware until every chain joint is `verified_on_hardware`.
+   `scripts/verify_joint_mapping.py` checks each joint's `sign` and `offset`
+   with the arm's own camera; `scripts/sample_colours.py` sets the colour
+   classes from a real frame. The whole order for the first day is
+   [docs/hardware-bring-up.md](docs/hardware-bring-up.md).
+
 ### Simulation
 
 SIMULATION ONLY until the arm arrives. Point `FLYTO_LEROBOT_ARM_CONFIG` at
