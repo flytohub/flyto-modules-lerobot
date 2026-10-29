@@ -5,6 +5,9 @@
 * Per-device detail is configuration: no source file names a robot model,
   an arm profile or a joint, so a second arm is a second config file.
 * No address or credential literal ships.
+* A source file stays under :data:`MAX_FILE_LINES`; the few that were over it
+  when the limit came in may only shrink (:data:`OVER_LIMIT`), and leave the
+  list once under it -- the count of large files only goes down.
 """
 
 from __future__ import annotations
@@ -83,3 +86,32 @@ def test_env_example_names_every_setting():
     settings = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert settings[capabilities.ENV_CONFIG] == ""
     assert capabilities.ENV_AUTODISCOVER in settings
+
+
+#: The most lines a source file may have (flyto-cloud's atomicity ratchet uses the same).
+MAX_FILE_LINES = 700
+#: Files over the limit when it came in (2026-10-29), at their length then: each may only shrink. The adapter
+#: was split into looks, pick and place that day; these are the next to split.
+OVER_LIMIT = {
+    "perception.py": 1987,
+    "lerobot_adapter.py": 1026,
+    "capabilities.py": 878,
+    "simulation.py": 793,
+    "mujoco_sim.py": 760,
+}
+
+
+def _lines(path: Path) -> int:
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+def test_no_source_file_grows_past_its_limit():
+    over = {path.name: _lines(path) for path in _sources()
+            if _lines(path) > OVER_LIMIT.get(path.name, MAX_FILE_LINES)}
+    assert over == {}, f"split the new unit out, or shrink the file: {over}"
+
+
+def test_a_file_back_under_the_limit_leaves_the_list():
+    sizes = {path.name: _lines(path) for path in _sources()}
+    back = [name for name in OVER_LIMIT if sizes.get(name, 0) <= MAX_FILE_LINES]
+    assert back == [], f"remove from OVER_LIMIT, the limit now holds them: {back}"

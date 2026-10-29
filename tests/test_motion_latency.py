@@ -35,10 +35,14 @@ from flyto_modules_lerobot.capabilities import GRASP, MOVE_JOINTS, PICK, PLACE
 from flyto_modules_lerobot.perception import (
     CameraGeometry,
     ColourClass,
+    PerceptionError,
     RgbImage,
     Spot,
     arm_hides,
+    arm_margin,
     find_blobs,
+    link_clearance,
+    parse_perception,
 )
 from flyto_modules_lerobot.trajectory import motion_limits, plan
 
@@ -302,6 +306,30 @@ def test_the_occlusion_model_casts_the_arm_along_the_cameras_rays():
     link = [(0.0, 0.25, 0.3), (0.5, 0.25, 0.3)]
     assert arm_hides(CameraGeometry((0.25, 0.5, 0.6)), link, 0.02, spot) is True
     assert arm_hides(straight_down, link, 0.02, spot) is False
+
+
+def test_each_link_is_cast_with_its_own_half_width():
+    """A wrist wider than the upper arm hides a spot the single half-width called clear (measured per link
+    on MuJoCo renders, 2026-10-29: the arm's dark pixels reach 0.053-0.083 m from each link's centre line)."""
+    straight_down = CameraGeometry(None)
+    arm = [(0.0, 0.0, 0.2), (0.1, 0.0, 0.2), (0.2, 0.0, 0.2)]
+    spot = Spot(0.15, 0.06, 0.0, 0.0)
+    assert arm_hides(straight_down, arm, 0.05, spot) is False
+    assert arm_hides(straight_down, arm, (0.05, 0.07), spot) is True
+    assert arm_margin(straight_down, arm, (0.05, 0.07), spot) == pytest.approx(-0.01)
+
+
+def test_a_link_past_the_measured_list_takes_its_widest():
+    assert link_clearance(0.05, 4) == 0.05
+    assert link_clearance((0.06, 0.08), 1) == 0.08
+    assert link_clearance((0.06, 0.08, 0.05), 7) == 0.08
+
+
+@pytest.mark.parametrize("value", [[], [0.05] * 17, [0.05, -0.01], ["wide"]])
+def test_a_clearance_list_is_one_to_sixteen_non_negative_widths(sim_data, value):
+    body = dict(sim_data["perception"], arm_clearance_m=value)
+    with pytest.raises(PerceptionError):
+        parse_perception(body, robot_type="sim")
 
 
 # -- simulated servos ------------------------------------------------------------------------

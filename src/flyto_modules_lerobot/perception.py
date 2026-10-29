@@ -155,8 +155,9 @@ class PerceptionConfig:
     # table from the camera; None looks from wherever the move ended.
     observe_pose: str | None = None
     # How far from its links' centre lines the arm can hide the table from the camera (metres, a bound on the
-    # arm's half-width as seen from above); None when not stated: occlusion is then not modelled.
-    arm_clearance_m: float | None = None
+    # arm's half-width as seen from above): one value for every link, or one per link from the base
+    # (:func:`link_clearance`); None when not stated: occlusion is then not modelled.
+    arm_clearance_m: float | tuple[float, ...] | None = None
     # How old a frame may be and still serve a look that plans (never one that verifies); 0: always a new frame.
     reuse_within_s: float = 0.0
     # A camera on the arm verifies a placement looking straight down from this high over the target (metres);
@@ -311,17 +312,31 @@ def _to_segment(px: float, py: float, a: tuple[float, float], b: tuple[float, fl
     return math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy))
 
 
-def arm_margin(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float, spot: Spot) -> float:
+def link_clearance(clearance: float | Sequence[float], link: int) -> float:
+    """The half-width of link ``link`` (0: the one from the base): the one value, or the list's entry for it.
+
+    A list measured per link (each link's rendered silhouette from its cast
+    centre line) is read in order; a link past its end takes the list's
+    widest, so an unmeasured link is never modelled thinner than a measured one.
+    """
+    if isinstance(clearance, (int, float)):
+        return float(clearance)
+    return clearance[link] if link < len(clearance) else max(clearance)
+
+
+def arm_margin(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float | Sequence[float],
+               spot: Spot) -> float:
     """How far ``spot`` lies outside the arm's cast, in metres on its plane: negative when the arm covers it.
 
-    The arm is capsules of radius ``clearance`` along the polyline ``arm``.
+    The arm is capsules along the polyline ``arm``, each of its link's
+    half-width (:func:`link_clearance`).
     Each link's part above the spot is cast along the camera's rays onto the
     spot's plane (magnified the way the camera sees it); the margin is the
     least distance from the spot's edge to a cast capsule. A link reaching
     past the eye's height is not modelled: minus infinity, never trusted.
     """
     margin = math.inf
-    for a, b in pairwise(arm):
+    for link, (a, b) in enumerate(pairwise(arm)):
         clipped = _clip(a, b, spot.z)
         if clipped is None:
             continue
@@ -329,11 +344,13 @@ def arm_margin(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float
         if any(end is None for end in ends):
             return -math.inf
         (ax, ay, sa), (bx, by, sb) = ends  # type: ignore[misc]
-        margin = min(margin, _to_segment(spot.x, spot.y, (ax, ay), (bx, by)) - clearance * max(sa, sb) - spot.radius)
+        width = link_clearance(clearance, link) * max(sa, sb)
+        margin = min(margin, _to_segment(spot.x, spot.y, (ax, ay), (bx, by)) - width - spot.radius)
     return margin
 
 
-def arm_hides(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float, spot: Spot) -> bool:
+def arm_hides(geometry: CameraGeometry, arm: Sequence[Vector], clearance: float | Sequence[float],
+              spot: Spot) -> bool:
     """Whether the arm, as capsules of radius ``clearance`` along the polyline ``arm``, covers any of ``spot``."""
     return arm_margin(geometry, arm, clearance, spot) <= 0.0
 
@@ -995,6 +1012,20 @@ def _number(value: Any, where: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise PerceptionError(f"{where} must be a finite number")
     return float(value)
+
+
+#: The most links a per-link clearance may name.
+MAX_ARM_LINKS = 16
+
+
+def _clearances(value: Any) -> float | tuple[float, ...]:
+    """``perception.arm_clearance_m``: one half-width for every link, or a list of them from the base."""
+    where = "perception.arm_clearance_m"
+    if not isinstance(value, (list, tuple)):
+        return _non_negative(value, where)
+    if not 1 <= len(value) <= MAX_ARM_LINKS:
+        raise PerceptionError(f"{where} lists 1 to {MAX_ARM_LINKS} links")
+    return tuple(_non_negative(item, f"{where}[{index}]") for index, item in enumerate(value))
 
 
 def _non_negative(value: Any, where: str) -> float:
@@ -1889,7 +1920,7 @@ def parse_perception(raw: Any, *, robot_type: str) -> PerceptionConfig:
         max_captures=_captures(body.get("max_captures", 1)),
         observe_pose=(_text(body["observe_pose"], "perception.observe_pose")
                       if body.get("observe_pose") is not None else None),
-        arm_clearance_m=(_non_negative(body["arm_clearance_m"], "perception.arm_clearance_m")
+        arm_clearance_m=(_clearances(body["arm_clearance_m"])
                          if body.get("arm_clearance_m") is not None else None),
         reuse_within_s=_non_negative(body.get("reuse_within_s", 0.0), "perception.reuse_within_s"),
         verify_height_m=(_non_negative(body["verify_height_m"], "perception.verify_height_m")
@@ -1942,6 +1973,7 @@ __all__ = [
     "detect_mounted",
     "find",
     "find_blobs",
+    "link_clearance",
     "locate_result",
     "located_within",
     "mounted_view",

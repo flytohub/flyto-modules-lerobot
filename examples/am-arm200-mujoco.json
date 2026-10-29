@@ -2,7 +2,7 @@
   "schema": "flyto.lerobot.arm.v1",
   "resource_id": "am-arm200-mujoco",
   "display_name": "AM-ARM200 (MuJoCo simulation)",
-  "notes": "SIMULATION ONLY, on MuJoCo (the `mujoco` extra). The same arm and scene as am-arm200-sim.json: grasping is contact physics on collision pads declared over the jaws, and the overhead camera is rendered offscreen and segmented by colour, never read from the scene. The mujoco robot type refuses a port that is not a sim: name. The arm is the official AM-ARM200 robot description (URDF and meshes from liyiteng/AM-ARM 5b03af1, Apache-2.0, packaged under models/am-arm200): the chain the planner solves is read from it, so link lengths are the published ones. The joint limits and the sign/offset of each joint against the URDF are placeholders not confirmed on a physical arm (verified_on_hardware: false), as is the gripper's jaw-angle mapping. Servo classes follow the lerobot_alohamini am-follower-6dof profile; their ratings are reseller-listed values (see servos.classes.*.source). The scene is laid out inside the arm's reach, off the strip under the arm's ready pose so the overhead camera sees every object. The 'observe' pose (gripper down, arm folded back) is where a verifying look is taken; it was chosen in simulation, not taught on an arm. perception.arm_clearance_m (0.05 m) is the occlusion model's half-width of the arm; the look's own frame decides whether the table was really in view.",
+  "notes": "SIMULATION ONLY, on MuJoCo (the `mujoco` extra). The same arm and scene as am-arm200-sim.json: grasping is contact physics on collision pads declared over the jaws, and the overhead camera is rendered offscreen and segmented by colour, never read from the scene. The mujoco robot type refuses a port that is not a sim: name. The arm is the official AM-ARM200 robot description (URDF and meshes from liyiteng/AM-ARM 5b03af1, Apache-2.0, packaged under models/am-arm200): the chain the planner solves is read from it, so link lengths are the published ones. The joint limits and the sign/offset of each joint against the URDF are placeholders not confirmed on a physical arm (verified_on_hardware: false), as is the gripper's jaw-angle mapping. Servo classes follow the lerobot_alohamini am-follower-6dof profile; their ratings are reseller-listed values (see servos.classes.*.source). The scene is laid out inside the arm's reach, off the strip under the arm's ready pose so the overhead camera sees every object. The 'observe' pose (gripper down, arm folded back) is where a verifying look is taken; it was chosen in simulation, not taught on an arm. perception.arm_clearance_m is the occlusion model's half-width of each arm link from the base, measured on this model's renders (p99 of the arm's dark pixels from each link's cast centre line, 2026-10-29; the first, hidden under the others, takes the second's); the look's own frame decides whether the table was really in view.",
   "lerobot": {
     "robot_module": "flyto_modules_lerobot.mujoco_sim",
     "robot_type": "mujoco",
@@ -297,7 +297,7 @@
     "match_radius_m": 0.04,
     "max_captures": 3,
     "observe_pose": "observe",
-    "arm_clearance_m": 0.05,
+    "arm_clearance_m": [0.06, 0.06, 0.064, 0.066, 0.053, 0.083, 0.072],
     "reuse_within_s": 0.25
   },
   "simulation": {

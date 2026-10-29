@@ -367,3 +367,47 @@ def test_a_look_at_a_spot_the_observe_pose_hides_turns_the_arm_away(data):
     seen = look_from(view)
     assert seen and seen[0].height_known and not seen[0].seen_in_part
     assert ((seen[0].x - 0.09) ** 2 + seen[0].y ** 2) ** 0.5 < 0.02
+
+
+def test_the_per_link_occlusion_model_never_calls_a_covered_spot_clear(data):
+    """With each link's measured half-width, wherever the model says a spot is clear the rendered frame shows
+    it clear, across observe and ready, the observe pose turned, and reaches over the table (330 judgements;
+    the single 0.05 m half-width called 5 covered spots clear). A spot it calls covered may still be clear in
+    the frame: that costs travel, never a look that misses what it was taken for."""
+    import itertools
+
+    from flyto_modules_lerobot.perception import Spot, arm_margin, camera_geometry
+
+    rig = Rig(data)
+    world, adapter = rig.world, rig.adapter
+    config = adapter.config
+    geometry, chain = camera_geometry(config.perception), config.kinematics
+    clearance = config.perception.arm_clearance_m
+    assert isinstance(clearance, tuple) and len(clearance) == len(chain.points(dict(config.poses["ready"].joints))) - 1
+    limits = {joint.name: (joint.minimum, joint.maximum) for joint in config.joints}
+    ready, observe = dict(config.poses["ready"].joints), dict(config.poses["observe"].joints)
+    turned = ({**observe, "shoulder_pan": observe["shoulder_pan"] + turn} for turn in (-90, -45, 45, 90))
+    poses = [observe, ready, *turned]
+    for target in [(0.24, 0.08, 0.13), (0.2, -0.14, 0.11), (0.15, 0.0, 0.15), (0.28, -0.03, 0.12), (0.12, 0.12, 0.10)]:
+        solved = chain.solve(target, ready, limits, yaw=0.0)
+        if solved:
+            poses.append({**ready, **solved})
+    spots = [Spot(x, y, 0.0, 0.02) for x, y in itertools.product((0.06, 0.1, 0.14, 0.18, 0.22, 0.26),
+                                                                   (-0.12, -0.06, 0.0, 0.06, 0.12))]
+    misses, judged = [], 0
+    for pose in poses:
+        for name, value in pose.items():
+            world.data.qpos[world._joint[name].qposadr[0]] = world._to_q(name, value)
+            world.goals[name] = value
+            world._ctrl[name] = world._to_q(name, value)
+        world.mj.mj_forward(world.model, world.data)
+        capture, arm = adapter._look(), chain.points(pose)
+        for spot in spots:
+            covered = capture.covered(spot)
+            if covered is None:
+                continue
+            judged += 1
+            if arm_margin(geometry, arm, clearance, spot) > 0 and covered > 0.02:
+                misses.append((spot.x, spot.y, round(covered, 3)))
+    assert judged >= 300
+    assert misses == []
