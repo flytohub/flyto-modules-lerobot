@@ -34,6 +34,10 @@ from flyto_modules_lerobot.capabilities import (
     GRASP,
     MANIPULATION_STATE,
     MOVE_JOINTS,
+    RELEASE,
+)
+from flyto_modules_lerobot.driver import ArmSession
+from flyto_modules_lerobot.refusals import (
     REASON_ARGUMENTS,
     REASON_EFFECT_UNKNOWN,
     REASON_FAULT,
@@ -44,9 +48,7 @@ from flyto_modules_lerobot.capabilities import (
     REASON_POSE_NOT_TAUGHT,
     REASON_POSE_UNKNOWN,
     REASON_UNREACHABLE,
-    RELEASE,
 )
-from flyto_modules_lerobot.driver import ArmSession
 
 
 def call(adapter, spec, arguments=None, call_id="call-1", deadline=30.0):

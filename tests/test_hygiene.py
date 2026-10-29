@@ -90,12 +90,12 @@ def test_env_example_names_every_setting():
 
 #: The most lines a source file may have (flyto-cloud's atomicity ratchet uses the same).
 MAX_FILE_LINES = 700
-#: Files over the limit when it came in (2026-10-29), at their length then: each may only shrink. The adapter
-#: was split into looks, pick and place that day; these are the next to split.
+#: Files over the limit when it came in (2026-10-29), each at its length now: each may only shrink. The adapter
+#: was split into looks, pick, place and teach, and the refusal codes left the capability table.
 OVER_LIMIT = {
     "perception.py": 1987,
-    "lerobot_adapter.py": 1026,
-    "capabilities.py": 878,
+    "lerobot_adapter.py": 982,
+    "capabilities.py": 744,
     "simulation.py": 793,
     "mujoco_sim.py": 760,
 }

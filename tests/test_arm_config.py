@@ -51,9 +51,9 @@ def test_toml_is_read_the_same_as_json(tmp_path):
         lines += [f"{joint} = {value}" for joint, value in pose["joints"].items()]
     path = tmp_path / "arm.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    # The TOML carries every section but the servo classes, the kinematic chain and the camera.
+    # The TOML carries every section but the servo classes, the kinematic chain, the camera and its survey.
     assert load_arm_config(path) == parse_arm_config(
-        {key: value for key, value in data.items() if key not in ("servos", "kinematics", "perception")})
+        {key: value for key, value in data.items() if key not in ("servos", "kinematics", "perception", "survey")})
 
 
 def test_lerobot_is_always_told_to_keep_torque_on_disconnect():

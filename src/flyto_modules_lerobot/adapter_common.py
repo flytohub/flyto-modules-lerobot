@@ -15,15 +15,6 @@ from .adapter_contract import (
     OUTCOME_CANCELLED,
     OUTCOME_TIMEOUT,
 )
-from .capabilities import (
-    REASON_DEADLINE,
-    REASON_FAULT,
-    REASON_MOTORS_MISMATCH,
-    REASON_NOT_CALIBRATED,
-    REASON_SIMULATION_ON_HARDWARE,
-    REASON_STOP_REQUESTED,
-    REASON_UNREACHABLE,
-)
 from .driver import (
     FAULT_SIMULATION_ON_HARDWARE,
     ArmFault,
@@ -34,6 +25,15 @@ from .driver import (
 )
 from .perception import (
     Detection,
+)
+from .refusals import (
+    REASON_DEADLINE,
+    REASON_FAULT,
+    REASON_MOTORS_MISMATCH,
+    REASON_NOT_CALIBRATED,
+    REASON_SIMULATION_ON_HARDWARE,
+    REASON_STOP_REQUESTED,
+    REASON_UNREACHABLE,
 )
 
 OBSERVATION_SCHEMA = "flyto.lerobot.observation.v1"

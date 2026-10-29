@@ -113,36 +113,17 @@ from .adapter_contract import (
     OUTCOME_REFUSED,
     CallResult,
 )
-from .arm_config import ArmConfig, ArmConfigError, record_taught_pose, valid_name
+from .arm_config import ArmConfig
 from .arm_looks import _LooksMixin
 from .arm_pick import _PickMixin
 from .arm_place import _PlaceMixin
+from .arm_teach import _TeachMixin
 from .backends import backend_for
 from .capabilities import (
     DEPLOYMENT_MODE,
-    MARK_CANCELLED_DETAIL,
     MAX_CALL_ID_LENGTH,
     OBSERVED_HELD,
-    POWER_CUTOFF_DETAIL,
-    REASON_ARGUMENTS,
-    REASON_CONFIG_NOT_WRITABLE,
-    REASON_DEADLINE,
-    REASON_EFFECT_UNKNOWN,
-    REASON_FAULT,
-    REASON_KINEMATICS_UNAVAILABLE,
-    REASON_NO_OBJECT,
-    REASON_NOT_REACHED,
-    REASON_NOT_RELEASED,
-    REASON_NOT_SEEN_IN_JAWS,
-    REASON_OUTSIDE_LIMITS,
-    REASON_POSE_NOT_TAUGHT,
-    REASON_POSE_TAUGHT,
-    REASON_POSE_UNKNOWN,
-    REASON_POSE_UNREACHABLE,
-    REASON_SLIPPED,
-    REASON_STOP_REQUESTED,
     SPECS_BY_CAPABILITY,
-    refusal_detail,
 )
 from .driver import (
     ArmFault,
@@ -156,11 +137,30 @@ from .evidence import policy_refusal
 from .perception import (
     scene_counts,
 )
+from .refusals import (
+    POWER_CUTOFF_DETAIL,
+    REASON_ARGUMENTS,
+    REASON_DEADLINE,
+    REASON_EFFECT_UNKNOWN,
+    REASON_FAULT,
+    REASON_KINEMATICS_UNAVAILABLE,
+    REASON_NO_OBJECT,
+    REASON_NOT_REACHED,
+    REASON_NOT_RELEASED,
+    REASON_NOT_SEEN_IN_JAWS,
+    REASON_OUTSIDE_LIMITS,
+    REASON_POSE_NOT_TAUGHT,
+    REASON_POSE_UNKNOWN,
+    REASON_POSE_UNREACHABLE,
+    REASON_SLIPPED,
+    REASON_STOP_REQUESTED,
+    refusal_detail,
+)
 from .trajectory import Trajectory, motion_limits
 from .trajectory import plan as plan_trajectory
 
 
-class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin):
+class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin, _TeachMixin):
     """One arm, through its shared LeRobot session."""
 
     # capability row ``action`` -> handler method.
@@ -171,6 +171,7 @@ class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin):
         "release": "_release",
         "mark_pose": "_mark_pose",
         "locate_objects": "_locate_objects",
+        "survey": "_survey",
         "pick": "_pick",
         "place": "_place",
     }
@@ -975,52 +976,7 @@ class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin):
 
     # -- teaching ------------------------------------------------------------------
 
-    @staticmethod
-    def _pose_to_mark(arguments: Mapping[str, Any]) -> tuple[str, bool]:
-        """``(pose name, replace)``; refused unless a pose name by the config's rule and an optional boolean."""
-        name = arguments.get("pose")
-        replace = arguments.get("replace", False)
-        if (not set(arguments) <= {"pose", "replace"} or not isinstance(name, str)
-                or not valid_name(name.strip()) or not isinstance(replace, bool)):
-            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
-        return name.strip(), replace
 
-    def _mark_pose(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
-        """``manipulation.mark_pose``: record the body joints' current position as a taught pose. Moves nothing.
-
-        Refused, with the file untouched, for a name already taught without
-        ``replace``, a reading outside the limits, or a config file that cannot
-        take it. One teach at a time per arm (the session's config lock); the
-        motion lock is held only for the read, so a stop never waits on a write.
-        """
-        name, replace = self._pose_to_mark(arguments)
-        with self.session.config_lock:
-            config = self.config
-            if config.source is None or config.source.suffix.lower() != ".json":
-                raise _Refused(REASON_CONFIG_NOT_WRITABLE, {"why": "the arm config was not read from a .json file"})
-            existing = config.poses.get(name)
-            replaced = existing is not None and existing.taught
-            if replaced and not replace:
-                raise _Refused(REASON_POSE_TAUGHT, {"pose": name})
-            positions = _unsent(self.session.read)
-            outside = [{"joint": joint.name, "position": round(positions[joint.name], 3),
-                        "min": joint.minimum, "max": joint.maximum}
-                       for joint in config.joints if not joint.admits(positions[joint.name])]
-            if outside:
-                raise _Refused(REASON_OUTSIDE_LIMITS, {"pose": name, "outside": outside})
-            if call.cancel.is_set():
-                return CallResult(call_id, OUTCOME_CANCELLED, detail=MARK_CANCELLED_DETAIL,
-                                  evidence={"reason_code": REASON_STOP_REQUESTED, "effect_applied": False})
-            try:
-                updated, backup = record_taught_pose(config, name,
-                                                     {joint: positions[joint] for joint in config.joint_names})
-            except ArmConfigError as error:
-                raise _Refused(REASON_CONFIG_NOT_WRITABLE, {"why": str(error)[:200]}) from error
-            self.session.config = updated
-        return CallResult(call_id, OUTCOME_COMPLETED, evidence={
-            "arm": self._state(positions), "pose": name, "joints": dict(updated.poses[name].joints),
-            "replaced": replaced, "backup": backup.name, "effect_applied": True,
-        })
 
 
 __all__ = ["OBSERVATION_SCHEMA", "LeRobotArmAdapter"]

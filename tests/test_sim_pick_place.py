@@ -25,6 +25,10 @@ from flyto_modules_lerobot.capabilities import (
     LOCATE_OBJECTS,
     PICK,
     PLACE,
+    RELEASE,
+    SPECS,
+)
+from flyto_modules_lerobot.refusals import (
     REASON_CONTAINER_NOT_FOUND,
     REASON_FAULT,
     REASON_NO_OBJECT,
@@ -34,8 +38,6 @@ from flyto_modules_lerobot.capabilities import (
     REASON_POSE_UNREACHABLE,
     REASON_SIMULATION_ON_HARDWARE,
     REASON_TARGET_PARTLY_SEEN,
-    RELEASE,
-    SPECS,
 )
 
 PICK_PHASES = ("perceive", "plan", "open", "approach", "descend", "grasp", "verify_grip", "lift", "clear_view",
@@ -196,7 +198,8 @@ def test_served_identity_and_every_reading_say_simulation(sim):
     for spec in SPECS:
         if not spec.actuates:
             continue
-        assert spec.contract["evidence"] or spec.capability_id == "manipulation.move_joints"
+        # Moving the joints and surveying move only the arm: no object changes, so nothing to prove of one.
+        assert spec.contract["evidence"] or spec.capability_id in ("manipulation.move_joints", "perception.survey")
 
 
 # -- the evidence Cloud judges, from the adapter's own observations --------------------------------

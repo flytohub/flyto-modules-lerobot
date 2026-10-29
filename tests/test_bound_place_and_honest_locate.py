@@ -24,7 +24,9 @@ import random
 import pytest
 from conftest import ROOT
 
-from flyto_modules_lerobot.capabilities import PLACE, REFUSAL_DETAILS, REFUSAL_LINES
+from flyto_modules_lerobot.capabilities import (
+    PLACE,
+)
 from flyto_modules_lerobot.modules import CapabilityRequestError, capability_request
 from flyto_modules_lerobot.perception import (
     CameraMount,
@@ -32,6 +34,10 @@ from flyto_modules_lerobot.perception import (
     MountedView,
     RgbImage,
     detect_mounted,
+)
+from flyto_modules_lerobot.refusals import (
+    REFUSAL_DETAILS,
+    REFUSAL_LINES,
 )
 
 WRIST = ROOT / "examples" / "am-arm200-mujoco-wrist.json"

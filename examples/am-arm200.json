@@ -333,5 +333,6 @@
     "verify_height_m": 0.25,
     "max_uncertainty_m": 0.04,
     "reuse_within_s": 3.0
-  }
+  },
+  "survey": {"x": [0.04, 0.32], "y": [-0.22, 0.28], "overlap": 0.25}
 }

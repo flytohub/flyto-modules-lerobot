@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from .adapter_common import (
@@ -21,19 +22,18 @@ from .adapter_common import (
     _MAX_COVERED,
     VIEW_TURN_STEP_DEG,
     _Call,
+    _Interrupted,
+    _Lost,
     _Phases,
     _Refused,
     _ShortOfTarget,
     _Target,
+    _unsent,
 )
 from .adapter_contract import (
     OUTCOME_COMPLETED,
+    OUTCOME_FAILED,
     CallResult,
-)
-from .capabilities import (
-    REASON_ARGUMENTS,
-    REASON_PERCEPTION_UNAVAILABLE,
-    REASON_VIEWPOINT_UNSUITABLE,
 )
 from .perception import (
     CameraUnavailable,
@@ -50,6 +50,13 @@ from .perception import (
     on_table,
     scene_counts,
 )
+from .refusals import (
+    REASON_ARGUMENTS,
+    REASON_PERCEPTION_UNAVAILABLE,
+    REASON_POSE_UNREACHABLE,
+    REASON_VIEWPOINT_UNSUITABLE,
+)
+from .survey import footprint, merge, vantages
 
 #: The occlusion model: the camera geometry, and the arm's half-width for every link or each one (``link_clearance``).
 _Occlusion = tuple[Any, float | tuple[float, ...]]
@@ -365,3 +372,54 @@ class _LooksMixin:
         seen = [spot(item, item.x, item.y, 0.0) for item in (capture.detections if capture is not None else ())
                 if item.id != held_id and item is not target.detection]
         return (spot(target.detection, target.x, target.y, target.height), *seen)
+
+    def _survey(self, call_id: str, call: _Call, arguments: Mapping[str, Any]) -> CallResult:
+        """``perception.survey``: look straight down from above each point covering the work area; one listing.
+
+        The points cover the arm file's ``survey`` area with the footprint
+        the camera has from ``perception.verify_height_m`` (``survey.vantages``);
+        a point the arm cannot hold the camera over is skipped, and a survey
+        with none is refused before anything moves. Each look's objects --
+        not what is in the jaws -- are merged into one listing
+        (``survey.merge``), the whole area's, as a locate's is. The arm ends
+        above the last point.
+        """
+        if not set(arguments) <= {"kind", "label"} or not all(isinstance(value, str) for value in arguments.values()):
+            raise _Refused(REASON_ARGUMENTS, {"arguments": sorted(map(str, arguments))})
+        perception, area = self.config.perception, self.config.survey
+        camera = perception.camera if perception is not None else None
+        if area is None or getattr(camera, "mount", None) is None or perception.verify_height_m is None:
+            raise _Refused(REASON_PERCEPTION_UNAVAILABLE, {"survey": "no camera on the arm, or no survey area"})
+        _unsent(self.session.ensure_connected)
+        before = _unsent(self.session.read)
+        seed = dict(self._observe_pose().joints) if self._observe_pose() is not None else dict(before)
+        seen = footprint(camera.fovy_deg, camera.width, camera.height, perception.verify_height_m)
+        points = [(x, y, self._over(seed, x, y)) for x, y in vantages(area, seen)]
+        reachable = [(x, y, joints) for x, y, joints in points if joints is not None]
+        if not reachable:
+            raise _Refused(REASON_POSE_UNREACHABLE, {"survey": "the arm reaches no point of the area"})
+        phases, counter = _Phases(self._clock), [0]
+        leg: dict[str, Any] = {"start": dict(before), "target": dict(before)}
+        positions, looks, rows, last = dict(before), [], [], None
+        try:
+            for index, (x, y, joints) in enumerate(reachable, start=1):
+                with phases(f"vantage_{index}"):
+                    positions = self._follow(call, positions, [joints], counter, leg)
+                with phases(f"look_{index}"):
+                    capture = self._look()
+                in_hand = set(capture.camera.get("in_hand", ())) if capture is not None else set()
+                looks.append([item for item in capture.detections if item.id not in in_hand] if capture else [])
+                rows.append({"x": round(x, 4), "y": round(y, 4), "objects": len(looks[-1])})
+                last = capture or last
+        except (_Interrupted, _Lost, _ShortOfTarget) as error:
+            return self._ended(call_id, call, error, leg, counter, before, {"vantages": rows, **phases.evidence()})
+        if last is None:
+            return CallResult(call_id, OUTCOME_FAILED, evidence={
+                "reason_code": REASON_PERCEPTION_UNAVAILABLE, "arm": self._state(positions),
+                "vantages": rows, **phases.evidence(), "effect_applied": True})
+        merged = replace(last, detections=tuple(merge(looks)), camera={**dict(last.camera), "in_hand": [],
+                                                                        "survey": len(rows)})
+        body = locate_result(merged, perception.frame, kind=arguments.get("kind"), label=arguments.get("label"))
+        return CallResult(call_id, OUTCOME_COMPLETED, evidence={
+            **body, "source": last.source, "vantages": rows, "arm": self._state(positions),
+            **phases.evidence(), "effect_applied": True})
