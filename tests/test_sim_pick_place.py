@@ -198,7 +198,8 @@ def test_served_identity_and_every_reading_say_simulation(sim):
     for spec in SPECS:
         if not spec.actuates:
             continue
-        assert spec.contract["evidence"] or spec.capability_id == "manipulation.move_joints"
+        # Moving the joints and surveying move only the arm: no object changes, so nothing to prove of one.
+        assert spec.contract["evidence"] or spec.capability_id in ("manipulation.move_joints", "perception.survey")
 
 
 # -- the evidence Cloud judges, from the adapter's own observations --------------------------------

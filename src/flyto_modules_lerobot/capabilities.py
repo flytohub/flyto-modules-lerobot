@@ -518,6 +518,39 @@ LOCATE_OBJECTS = CapabilitySpec(
     }),
 )
 
+SURVEY = CapabilitySpec(
+    capability_id="perception.survey",
+    module_id="perception.survey",
+    action="survey",
+    label="Survey the work area",
+    display_name="巡視工作區",
+    description=("Move the camera on the arm over the declared work area, looking down from a few points, "
+                 "and list every object on it"),
+    manifest_description=(
+        "移動手臂，用手臂上的攝影機從幾個點俯拍整個工作區，列出上面所有的物品與位置。"
+        "Move the arm so its camera covers the whole work area, and list every object on it."
+    ),
+    icon="ScanSearch",
+    color="#5CE4C8",
+    tags=("perception", "camera", "objects", "movement"),
+    params_schema=LOCATE_OBJECTS.params_schema,
+    contract=_moving(idempotent=True),
+    output_schema=MappingProxyType({
+        "type": "object",
+        "required": ["objects", "frame", "capture", "source", "vantages"],
+        "properties": {
+            **dict(LOCATE_OBJECTS.output_schema["properties"]),
+            "vantages": {"type": "array", "maxItems": 16,
+                         "items": {"type": "object", "properties": {"x": _NUMBER, "y": _NUMBER,
+                                                                     "objects": {"type": "integer"}}}},
+            "phases": _PHASES,
+        },
+    }),
+    timeout_ms=60_000,
+    input_schema=LOCATE_OBJECTS.input_schema,
+    required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
+)
+
 PICK = CapabilitySpec(
     capability_id="manipulation.pick",
     module_id="manipulation.pick",
@@ -632,7 +665,7 @@ PLACE = CapabilitySpec(
     renamed=MappingProxyType({CONTAINER_REF: CONTAINER_REF_ARGUMENTS}),
 )
 
-SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS,
+SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS, SURVEY,
                                      PICK, PLACE)
 SPECS_BY_CAPABILITY: Mapping[str, CapabilitySpec] = MappingProxyType({spec.capability_id: spec for spec in SPECS})
 SPECS_BY_MODULE: Mapping[str, CapabilitySpec] = MappingProxyType({spec.module_id: spec for spec in SPECS})
@@ -663,6 +696,13 @@ TELEMETRY_CHANNELS: tuple[Mapping[str, Any], ...] = tuple(MappingProxyType(row) 
 ))
 #: Seconds between samples (the host clamps it to 0.5..30).
 TELEMETRY_INTERVAL_SECONDS = 1.0
+
+
+def offered_specs(config: Any) -> tuple[CapabilitySpec, ...]:
+    """The capabilities this arm offers: every one, except a survey without a camera on the arm and an area."""
+    camera = getattr(getattr(config, "perception", None), "camera", None)
+    surveys = getattr(camera, "mount", None) is not None and getattr(config, "survey", None) is not None
+    return tuple(spec for spec in SPECS if spec is not SURVEY or surveys)
 
 
 def contract_of(capability_id: str) -> dict[str, Any] | None:
@@ -696,7 +736,9 @@ __all__ = [
     "SPECS",
     "SPECS_BY_CAPABILITY",
     "SPECS_BY_MODULE",
+    "SURVEY",
     "TELEMETRY_CHANNELS",
     "CapabilitySpec",
     "contract_of",
+    "offered_specs",
 ]

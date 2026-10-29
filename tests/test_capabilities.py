@@ -57,6 +57,9 @@ REQUESTED_ROWS = {
                           "cancellable": True, "required_permissions": ("equipment.motion",)},
     "manipulation.place": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
                            "cancellable": True, "required_permissions": ("equipment.motion",)},
+    # Requested 2026-10-29: a camera on the arm finds what left its view only by moving it.
+    "perception.survey": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
+                          "cancellable": True, "required_permissions": ("equipment.motion",)},
 }
 
 

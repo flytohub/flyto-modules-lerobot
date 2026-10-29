@@ -64,7 +64,8 @@ ARM_CONFIG_SCHEMA = "flyto.lerobot.arm.v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _RESOURCE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TOP_KEYS = frozenset({"schema", "resource_id", "display_name", "notes", "lerobot", "unit", "joints", "gripper",
-                       "motion", "poses", "servos", "kinematics", "perception", "simulation"})
+                       "motion", "poses", "servos", "kinematics", "perception", "simulation",
+                       "survey"})
 _LEROBOT_KEYS = frozenset({"robot_module", "robot_type", "port", "id", "calibration_dir", "options"})
 # Fields set once, by the keys above or by this pack, never through ``options``.
 _RESERVED_OPTIONS = frozenset({"port", "id", "calibration_dir", "disable_torque_on_disconnect"})
@@ -221,6 +222,8 @@ class ArmConfig:
     kinematics: Any = None
     perception: Any = None
     simulation: Any = None
+    # The work area a camera on the arm surveys (``survey.SurveyArea``); None: the arm offers no survey.
+    survey: Any = None
     # Each motor's servo class (joint or gripper name -> ServoClass); empty when the config names none.
     servos: Mapping[str, ServoClass] = dataclasses.field(default_factory=lambda: MappingProxyType({}))
     # The file it was read from, or None when parsed from data. Where the arm
@@ -450,11 +453,12 @@ def parse_arm_config(data: Any, *, config_dir: Path | None = None) -> ArmConfig:
 
 def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: str, poses: Mapping[str, Pose],
               lerobot: LeRobotSettings, config_dir: Path | None) -> dict[str, Any]:
-    """The optional ``kinematics``, ``perception`` and ``simulation`` sections, each checked by its own module."""
+    """The optional ``kinematics``, ``perception``, ``simulation`` and ``survey`` sections, each by its own module."""
     from .backends import backend_for
     from .kinematics import KinematicsError, parse_kinematics
     from .perception import PerceptionError, parse_perception
     from .simulation import SimulationError, parse_simulation
+    from .survey import SurveyError, parse_survey
 
     simulated = backend_for(lerobot.robot_type).simulated
     if simulated != ("simulation" in body):
@@ -472,8 +476,9 @@ def _sections(body: Mapping[str, Any], *, joints: tuple[JointLimit, ...], unit: 
             "perception": (parse_perception(body["perception"], robot_type=lerobot.robot_type)
                            if "perception" in body else None),
             "simulation": parse_simulation(body["simulation"], poses=tuple(poses)) if simulated else None,
+            "survey": parse_survey(body["survey"]) if "survey" in body else None,
         }
-    except (KinematicsError, PerceptionError, SimulationError) as error:
+    except (KinematicsError, PerceptionError, SimulationError, SurveyError) as error:
         raise ArmConfigError(str(error)) from error
 
 

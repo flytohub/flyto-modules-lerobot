@@ -39,16 +39,15 @@ from .arm_config import ArmConfig, ArmConfigError
 from .backends import backend_for
 from .capabilities import (
     ADAPTER_ID,
-    CAPABILITY_IDS,
     ENV_AUTODISCOVER,
     MODULE_PACK,
     MOVE_JOINTS,
     PACK_VERSION,
     PROVIDER_NAME,
     RESOURCE_TYPE,
-    SPECS,
     TELEMETRY_CHANNELS,
     TELEMETRY_INTERVAL_SECONDS,
+    offered_specs,
 )
 from .driver import ArmFault, ArmUnreachable, MotorsMismatch, NotCalibrated
 from .live_view import ensure_live_view, live_channels, live_port
@@ -74,6 +73,8 @@ def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = F
                    live_view: bool = False) -> dict[str, Any]:
     """The resource manifest, from the capability table and the arm config."""
     schemas = {MOVE_JOINTS.capability_id: move_input_schema(config)}
+    # A survey only where the camera rides on the arm and the arm file declares the area to cover.
+    offered = offered_specs(config)
     manifest: dict[str, Any] = {
         "contract": MANIFEST_CONTRACT,
         "resource_id": config.resource_id,
@@ -82,9 +83,9 @@ def build_manifest(config: ArmConfig, *, observed_at: str, module_pack: bool = F
         "revision": 1,
         "adapter": {"adapter_id": ADAPTER_ID, "version": PACK_VERSION, "provider": PROVIDER_NAME},
         "deployment_mode": backend_for(config.lerobot.robot_type).deployment_mode,
-        "capability_ids": list(CAPABILITY_IDS),
+        "capability_ids": [spec.capability_id for spec in offered],
         "capability_contracts": [spec.manifest_contract(schemas.get(spec.capability_id, spec.input_schema))
-                                 for spec in SPECS],
+                                 for spec in offered],
         "settings": [],
         "telemetry_channels": [dict(row) for row in TELEMETRY_CHANNELS],
         "observed_at": observed_at,

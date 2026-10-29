@@ -171,6 +171,7 @@ class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin, _TeachMixin):
         "release": "_release",
         "mark_pose": "_mark_pose",
         "locate_objects": "_locate_objects",
+        "survey": "_survey",
         "pick": "_pick",
         "place": "_place",
     }
