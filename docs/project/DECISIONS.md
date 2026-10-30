@@ -659,3 +659,11 @@ SIMULATION ONLY. The end-to-end run through Cloud's host (flyto-cloud
   context per frame size serve the process, each world owning only its
   drawing state (frames pixel-identical); a long-lived camera keeps no
   per-frame history unless a measurement asks for it.
+
+## 2026-10-30 -- The requested rows are in Cloud
+
+Cloud `205bd52f6` (PR #599, 2026-10-28) added `manipulation.mark_pose`,
+`perception.locate_objects`, `manipulation.pick` and `manipulation.place` to
+its vocabulary. The two earlier entries that expect `capability_not_in_vocabulary`
+describe the time before it; `tests/integration` now declares all eight and
+passes (14 of 14 against Cloud main `16c3995bd`, flyto-core `253561a`).

@@ -19,10 +19,10 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
     (`stop_to_still_ms`, `overshoot`);
   - jogging is `manipulation.move_joints` with joint targets (README
     "Commissioning an arm").
-- `manipulation.mark_pose` goes through Cloud `e1f9bfa13`'s dispatcher and
-  result-schema check, but Cloud's vocabulary has no row for it yet, so
-  `declare` refuses it (`capability_not_in_vocabulary`). The row Cloud needs
-  is in `DECISIONS.md`.
+- Cloud main `16c3995bd` (with the rows from `205bd52f6`) declares all eight
+  capabilities, `manipulation.mark_pose`, `perception.locate_objects`,
+  `manipulation.pick` and `manipulation.place` included:
+  `tests/integration` 14 passed on 2026-10-30 with flyto-core `253561a`.
 - The adapter is tested against a fake LeRobot follower
   (`tests/fake_lerobot.py`): moves by pose and by joints, limits, untaught
   poses, blocked joints, lost replies (effect unknown, never resent),
@@ -106,8 +106,6 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
 - **move_joints and mark_pose declare no evidence** (`DECISIONS.md`). Grasp,
   release, pick and place declare self-observed specs; the perception half
   would be `other_resource` once the camera is its own resource.
-- **No Cloud rows for `perception.locate_objects`, `manipulation.pick`,
-  `manipulation.place`** (another lane adds them).
 - **Simulation only.** No real camera, no real pick. The chain is the
   official URDF, but its calibration against LeRobot's joint readings is
   unconfirmed on the arm (`verified_on_hardware: false`).
@@ -115,6 +113,4 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   The stop measurement has run only against the fake follower (including
   one that moves with time and runs on after a new goal); no real stop has
   been measured.
-- **No Cloud row for `manipulation.mark_pose`.** A Space cannot approve
-  teaching until Cloud adds it.
 - No execution-host run with a paired Cloud.
