@@ -7,8 +7,17 @@ An arm config's ``lerobot.robot_type`` is looked up in :data:`BACKENDS`
 type not listed there is one of LeRobot's own (its registry resolves it). The
 row says everything that differs between the two -- how the robot is built,
 the deployment mode the manifest and ``served_identity`` state, the
-``source`` every reading carries, how a port is judged present, and which
-ports are refused outright -- so no other module compares a robot type.
+``source`` every reading carries, how a port is judged present, which
+ports are refused outright, and how the robot is connected -- so no other
+module compares a robot type.
+
+Connecting a LeRobot arm is not ``robot.connect()``. LeRobot's connect writes
+the motors with torque off and then turns every motor's torque on, leaving
+each goal register as it was. A servo keeps its last goal while powered, so an
+arm moved by hand since then jumps back to it (found on a follower arm,
+2026-10-29). :func:`_connect_aimed` opens the bus, sets every goal to where
+the motor is (raw registers: no calibration needed), and only then lets
+LeRobot configure the motors. It never calibrates.
 """
 
 from __future__ import annotations
@@ -45,6 +54,19 @@ def _build_lerobot(config: Any, factory: Callable[..., Any]) -> Any:
                    settings=lerobot.robot_settings())
 
 
+def _connect_aimed(robot: Any) -> None:
+    bus = robot.bus
+    bus.connect()
+    bus.sync_write("Goal_Position", bus.sync_read("Present_Position", normalize=False), normalize=False)
+    for camera in getattr(robot, "cameras", {}).values():
+        camera.connect()
+    robot.configure()
+
+
+def _connect_simulated(robot: Any) -> None:
+    robot.connect(calibrate=False)
+
+
 def _build_simulation(config: Any, _factory: Callable[..., Any]) -> Any:
     from .simulation import simulated_robot
 
@@ -73,15 +95,19 @@ class Backend:
     port_present: Callable[[str], bool]
     #: A port this backend must never be pointed at (refused before anything is built).
     refuses_port: Callable[[str], bool]
+    #: Open the robot built by ``build``; never calibrates.
+    connect: Callable[[Any], None]
 
 
 LEROBOT = Backend(deployment_mode="real", source="hardware", simulated=False, build=_build_lerobot,
-                  port_present=_device_exists, refuses_port=_never)
+                  port_present=_device_exists, refuses_port=_never, connect=_connect_aimed)
 SIMULATION = Backend(deployment_mode="simulation", source="simulation", simulated=True, build=_build_simulation,
-                     port_present=_sim_port, refuses_port=_not_a_sim_port)
+                     port_present=_sim_port, refuses_port=_not_a_sim_port,
+                     connect=_connect_simulated)
 
 MUJOCO = Backend(deployment_mode="simulation", source="simulation", simulated=True, build=_build_mujoco,
-                 port_present=_sim_port, refuses_port=_not_a_sim_port)
+                 port_present=_sim_port, refuses_port=_not_a_sim_port,
+                     connect=_connect_simulated)
 
 #: Robot types served by something other than LeRobot's own registry: the in-process world, MuJoCo.
 BACKENDS: dict[str, Backend] = {"sim": SIMULATION, "mujoco": MUJOCO}

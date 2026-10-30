@@ -97,14 +97,13 @@ E2E_RESOURCE_ID=<resource_id in arm.json> python setup_space.py space-arm.json "
 python grant.py space-arm.json
 ```
 
-**The first connect turns torque on.** LeRobot's connect writes its settings
-with torque off and then turns every motor's torque on, without first setting
-each motor's goal to where it is. A powered servo keeps its last goal, so a
-joint moved by hand since torque was last on drives back toward that goal the
-moment the pack connects. So connect for the first time right after the power
-cycle of step 3, with the arm at rest, and keep a hand on the cut-off. Whether
-a power cycle starts each goal at the present position is not yet measured on
-this arm: if any joint moves on connect, cut the 12 V.
+**The first connect turns torque on.** LeRobot's own connect turns every
+motor's torque on without first setting each motor's goal to where it is, and
+a powered servo keeps its last goal: a joint moved by hand would drive back
+toward it. The pack sets every goal to the motor's present position before
+torque comes on, so the arm should hold where it rests. This is tested only
+against a fake arm. Connect the first time with the arm at rest and a hand on
+the cut-off: if any joint moves on connect, cut the 12 V.
 
 Then follow the README's *Commissioning an arm*:
 1. connect and read the state;

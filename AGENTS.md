@@ -57,7 +57,13 @@ rejected.
 - **Wrap LeRobot; never re-implement it.** `driver.py` is the only module
   that calls LeRobot, and only its public `Robot` API (`connect(calibrate=False)`,
   `is_calibrated`, `action_features`, `get_observation`, `send_action`). No
-  motor-bus or servo protocol call, ever.
+  motor-bus or servo protocol call, with one exception the owner allowed on
+  2026-10-30: connecting a LeRobot arm opens its bus and sets every
+  `Goal_Position` to the raw `Present_Position` before LeRobot's
+  `configure()` turns torque on (`backends._connect_aimed`). LeRobot's own
+  connect leaves each goal as it was, and a joint moved by hand drives back
+  to it. Nothing else touches the bus; this never calibrates or touches
+  torque.
 - **Stop is HOLD, never torque off.** These servos have no hardware E-stop;
   torque off drops the arm. `safe_stop` and cancel command every body joint
   to its present position with torque on and report `stop_requested`,
