@@ -82,8 +82,9 @@ rejected.
 - **Capability ids and their safety words are Cloud's.** The rows in
   flyto-cloud `services/space_tasks/capabilities.py`, as they resolve
   (`movement`, safe stop required, cancellable, `equipment.motion` for the
-  three that move). `manipulation.mark_pose` is the one row requested from
-  Cloud and not yet shipped there (`docs/project/DECISIONS.md`). Change
+  three that move). The rows this pack requested -- `manipulation.mark_pose`,
+  `perception.locate_objects`, `manipulation.pick`, `manipulation.place` --
+  shipped in Cloud `205bd52f6` (`docs/project/DECISIONS.md`). Change
   `tests/test_capabilities.py`'s copy only together with that file. Never
   invent another id.
 - **LeRobot, torch and flyto-core are optional.** Nothing imports them at

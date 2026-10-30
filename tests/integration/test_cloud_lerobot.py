@@ -83,15 +83,17 @@ from flyto_modules_lerobot.capabilities import (  # noqa: E402
     MOVE_JOINTS,
     PICK,
     PLACE,
-    REASON_EFFECT_UNKNOWN,
-    REASON_NO_OBJECT,
-    REASON_OUTSIDE_LIMITS,
     SPECS,
     SPECS_BY_CAPABILITY,
 )
 from flyto_modules_lerobot.discovery import build_manifest  # noqa: E402
 from flyto_modules_lerobot.driver import ArmSession  # noqa: E402
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter  # noqa: E402
+from flyto_modules_lerobot.refusals import (  # noqa: E402
+    REASON_EFFECT_UNKNOWN,
+    REASON_NO_OBJECT,
+    REASON_OUTSIDE_LIMITS,
+)
 
 ARM = "am-arm200-01"
 PLUGIN = "flyto-modules-lerobot"

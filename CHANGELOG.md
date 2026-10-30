@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The Cloud integration test imports the refusal codes from `refusals.py`,
+  where they moved; it had stopped collecting. Against Cloud main it passes
+  14 of 14, the four rows this pack requested included.
 - Place bound to a located container, in Cloud's vocabulary: `x`, `y` with
   `container_label`, `container_uncertainty_m`, `container_observed_at` (a
   core step's `container_ref`); the container is located again at place
