@@ -72,16 +72,38 @@ def test_the_adapter_connects_without_letting_lerobot_prompt_for_calibration(mak
     result = call(make_adapter(), MANIPULATION_STATE)
     assert result.outcome == OUTCOME_COMPLETED, result.detail
     arm = factory.arms[session.config.lerobot.port]
-    assert arm.connect_calls == [False]
+    assert arm.connect_calls == [] and arm.bus.is_connected
     module, robot_type, settings = factory.built_with[0]
     assert (module, robot_type) == ("lerobot.robots.so_follower", "so101_follower")
     assert settings["disable_torque_on_disconnect"] is False
 
 
+def test_connecting_aims_every_motor_where_it_is_before_torque_comes_on(make_adapter, session, factory):
+    """LeRobot's connect turns torque on and leaves each goal register as it was.
+
+    A servo keeps its last goal while powered: an arm moved by hand after the
+    last run would jump back to it the moment torque came on (AM-ARM200
+    follower, 2026-10-29). Each motor's goal is set to where it is first.
+    """
+    from fake_lerobot import FakeFollowerArm, FakeFollowerConfig
+
+    port = session.config.lerobot.port
+    arm = FakeFollowerArm(FakeFollowerConfig(port=port))
+    arm.goals["shoulder_lift"] = 40.0  # left over from before the arm was moved by hand
+    factory.arms[port] = arm
+
+    result = call(make_adapter(), MANIPULATION_STATE)
+
+    assert result.outcome == OUTCOME_COMPLETED, result.detail
+    first_torque_on = arm.events.index(("torque", True))
+    assert ("goal", tuple(sorted(arm.motors))) in arm.events[:first_torque_on]
+    assert arm.positions["shoulder_lift"] == 0.0 and arm.goals["shoulder_lift"] == 0.0
+
+
 def test_one_connection_per_arm_is_shared_by_every_adapter(make_adapter, factory, session):
     call(make_adapter(), MANIPULATION_STATE, call_id="a")
     call(make_adapter(), MANIPULATION_STATE, call_id="b")
-    assert factory.arms[session.config.lerobot.port].connect_calls == [False]
+    assert factory.arms[session.config.lerobot.port].bus.is_connected
 
 
 def test_an_uncalibrated_arm_is_refused_and_nothing_is_sent(arm_config):
@@ -137,7 +159,7 @@ def test_an_arm_driving_other_motors_than_the_config_is_refused_on_connect(arm_c
         assert again.outcome == OUTCOME_REFUSED and again.evidence["reason_code"] == REASON_MOTORS_MISMATCH
     stop = adapter.safe_stop()
     assert stop.outcome == OUTCOME_FAILED and stop.evidence["holding"] is False
-    assert arm.actions == [] and arm.connect_calls == [False]
+    assert arm.actions == [] and arm.connect_calls == []
     assert arm.torque is True
 
 
@@ -323,7 +345,7 @@ def test_an_overcurrent_trip_is_an_arm_fault_and_refuses_what_follows(make_adapt
     # LeRobot cut torque and disconnected; the pack never reconnects on its own.
     second = call(make_adapter(), MANIPULATION_STATE, call_id="b")
     assert second.outcome == OUTCOME_REFUSED and second.evidence["reason_code"] == REASON_FAULT
-    assert arm.connect_calls == [False]
+    assert arm.events.count(("torque", True)) == 1  # connected once, never again
 
 
 # -- the gripper ------------------------------------------------------------------------

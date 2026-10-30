@@ -7,8 +7,13 @@ liyiteng/lerobot_alohamini (``src/lerobot/robots/so_follower/so_follower.py``):
 * ``connect(calibrate=True)`` -- opens the bus; with ``calibrate=True`` and no
   matching calibration it would prompt on stdin, so the adapter must call it
   with ``calibrate=False`` (recorded here, and a prompt fails the test).
-  Connecting configures the motors with torque briefly disabled, as LeRobot
-  does (``configure`` under ``bus.torque_disabled()``).
+  Connecting is ``bus.connect()`` then ``configure()``, as LeRobot's is:
+  ``configure`` writes the motors under ``bus.torque_disabled()``, whose exit
+  turns every motor's torque on. Nothing aims the motors first, so each
+  drives toward whatever goal its register still holds (``goals``, kept
+  across connects, as a servo keeps it while powered).
+* ``bus`` -- the motors bus: ``connect``, and raw ``sync_read`` /
+  ``sync_write`` of ``Present_Position`` / ``Goal_Position``.
 * ``is_connected`` / ``is_calibrated``.
 * ``get_observation()`` -- ``{"<motor>.pos": float}``, degrees for the body,
   0..100 for the gripper. An over-current trip disables torque, disconnects
@@ -78,6 +83,9 @@ class FakeFollowerArm:
         self.torque = False
         self.lock = threading.Lock()
         self.connect_calls: list[bool] = []
+        self.bus = FakeBus(self)
+        #: What reached the motors, in order: ("torque", on) and ("goal", motors).
+        self.events: list[tuple[str, Any]] = []
         self.actions: list[dict[str, float]] = []
         self.torque_log: list[bool] = []
         self.blocked: dict[str, float] = {}  # motor -> the value it cannot pass
@@ -113,15 +121,17 @@ class FakeFollowerArm:
         if self.connected:
             raise ConnectionError("FakeFollowerArm is already connected")
         self.connect_calls.append(calibrate)
-        if self.fail_connect:
-            raise ConnectionError(f"Failed to open port '{self.config.port}'.")
+        self.bus.connect()
         if not self.calibrated and calibrate:
             raise AssertionError("connect(calibrate=True) would prompt on stdin for a calibration")
-        self.connected = True
-        # LeRobot's configure(): motors are written with torque disabled, then re-enabled.
+        self.configure()
+
+    def configure(self) -> None:
+        """LeRobot's: motors written with torque disabled, then every motor's torque on, goals untouched."""
+        self.bus.require_open()
         self._set_torque(False)
         self._set_torque(True)
-        self.goals = dict(self.positions)
+        self.connected = True
         self._stepped_at = self.clock()
 
     def get_observation(self) -> dict[str, float]:
@@ -131,6 +141,7 @@ class FakeFollowerArm:
             if self.overcurrent_on_read:
                 self._set_torque(False)
                 self.connected = False
+                self.bus.open = False
                 raise RuntimeError("Overcurrent protection triggered on 'elbow_flex' (2700.0mA).")
             failing_after = self.drop_reads_after_actions
             if self.drop_reads or (failing_after is not None and len(self.actions) >= failing_after):
@@ -162,6 +173,7 @@ class FakeFollowerArm:
         if self.config.disable_torque_on_disconnect:
             self._set_torque(False)
         self.connected = False
+        self.bus.open = False
 
     # -- simulation ------------------------------------------------------------
 
@@ -177,6 +189,7 @@ class FakeFollowerArm:
     def _set_torque(self, on: bool) -> None:
         self.torque = on
         self.torque_log.append(on)
+        self.events.append(("torque", on))
 
     def _step(self) -> None:
         if self.velocity is not None:
@@ -210,6 +223,42 @@ class FakeFollowerArm:
             if stop is not None and (current <= stop < moved or moved < stop <= current):
                 moved = stop
             self.positions[name] = moved
+
+
+class FakeBus:
+    """The arm's ``FeetechMotorsBus``, as far as connecting uses it: raw registers, no calibration needed."""
+
+    def __init__(self, arm: FakeFollowerArm) -> None:
+        self.arm = arm
+        self.open = False
+
+    @property
+    def is_connected(self) -> bool:
+        return self.open
+
+    def connect(self, handshake: bool = True) -> None:
+        if self.open:
+            raise ConnectionError("FakeBus is already connected")
+        if self.arm.fail_connect:
+            raise ConnectionError(f"Failed to open port '{self.arm.config.port}'.")
+        self.open = True
+
+    def require_open(self) -> None:
+        if not self.open:
+            raise DeviceNotConnectedError("FakeBus is not connected")
+
+    def sync_read(self, data_name: str, motors=None, *, normalize: bool = True, num_retry: int = 3) -> dict:
+        self.require_open()
+        if data_name != "Present_Position" or normalize:
+            raise AssertionError(f"connecting reads only raw Present_Position, not {data_name} normalize={normalize}")
+        return dict(self.arm.positions)
+
+    def sync_write(self, data_name: str, values, *, normalize: bool = True, num_retry: int = 0) -> None:
+        self.require_open()
+        if data_name != "Goal_Position" or normalize:
+            raise AssertionError(f"connecting writes only raw Goal_Position, not {data_name} normalize={normalize}")
+        self.arm.goals.update(values)
+        self.arm.events.append(("goal", tuple(sorted(values))))
 
 
 def fake_factory(arms: dict[str, FakeFollowerArm] | None = None, **kwargs):

@@ -228,7 +228,7 @@ class ArmSession:
                 raise SimulationTargetsHardware(self.fault or "")
             try:
                 robot = self.backend.build(self.config, self._factory)
-                robot.connect(calibrate=False)
+                self.backend.connect(robot)
             except (OSError, ConnectionError) as error:
                 raise ArmUnreachable(f"the arm's port did not open ({type(error).__name__})") from error
             self._robot = robot
