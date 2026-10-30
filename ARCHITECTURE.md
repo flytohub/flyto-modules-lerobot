@@ -241,10 +241,12 @@ separate test run. The call answers once the arm is still, at most
 
 ## The LeRobot session (`driver.py`, `plugin.py`)
 
-One `ArmSession` per arm per process, connected lazily on the first call with
-`connect(calibrate=False)` and never reconnected automatically: LeRobot's
-`configure()` writes motor settings with torque briefly disabled, so connect
-only with the arm at rest. After an over-current trip (LeRobot cuts torque
+One `ArmSession` per arm per process, connected lazily on the first call and
+never reconnected automatically. The backend table says how: a simulator with
+`connect(calibrate=False)`; a LeRobot arm by opening its bus, setting every
+goal to the present position (raw registers), and then LeRobot's
+`configure()`, which writes motor settings with torque briefly disabled and
+turns torque on. So connect only with the arm at rest. After an over-current trip (LeRobot cuts torque
 and disconnects) the session refuses everything until the host restarts.
 LeRobot is imported only in `driver.lerobot_robot`.
 

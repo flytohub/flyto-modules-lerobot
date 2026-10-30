@@ -667,3 +667,16 @@ Cloud `205bd52f6` (PR #599, 2026-10-28) added `manipulation.mark_pose`,
 its vocabulary. The two earlier entries that expect `capability_not_in_vocabulary`
 describe the time before it; `tests/integration` now declares all eight and
 passes (14 of 14 against Cloud main `16c3995bd`, flyto-core `253561a`).
+
+## 2026-10-30 -- One motor-bus write: aim every goal before torque comes on
+
+LeRobot's `connect()` (fork `ec65318`) writes motor settings under
+`bus.torque_disabled()`, whose exit turns every motor's torque on, and never
+sets a goal. A powered servo keeps its last goal, so a follower moved by hand
+since torque was last on drives back toward it on connect. The public `Robot`
+API cannot prevent that: `send_action` works only once torque is already on.
+The owner allowed one exception to "no motor-bus call": the LeRobot backend
+opens the bus, sets each `Goal_Position` to the raw `Present_Position`, and
+then calls LeRobot's `configure()`. Simulators keep `connect(calibrate=False)`.
+The fake arm now connects as LeRobot does (goals untouched), so the test fails
+without the write.

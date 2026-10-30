@@ -3,10 +3,11 @@
 """The one place this package touches LeRobot: one session per arm.
 
 LeRobot owns the motors. This module builds LeRobot's own robot from the arm
-config and calls only its public ``Robot`` API -- ``connect(calibrate=False)``,
-``is_calibrated``, ``action_features``, ``get_observation()``,
-``send_action()`` -- never the motor bus, never the servo protocol, never
-torque.
+config and calls only its public ``Robot`` API -- ``is_calibrated``,
+``action_features``, ``get_observation()``, ``send_action()`` -- never the
+servo protocol, never torque. Connecting is the backend's (``backends.py``):
+for a LeRobot arm, the one motor-bus write this package makes, every goal set
+to where the motor is before LeRobot turns torque on.
 
 LeRobot (and torch with it) is imported only by :func:`lerobot_robot`, the
 default factory, when an execution host first talks to a configured arm.
@@ -24,7 +25,7 @@ it:
   makes it cut torque and disconnect). The session refuses everything after
   that until the host process restarts: reconnecting is an operator's call.
 * :class:`NotCalibrated` -- LeRobot reports the motors do not match the
-  calibration for this ``id``. ``connect(calibrate=False)`` is used because
+  calibration for this ``id``. Connecting never calibrates: LeRobot's
   ``calibrate=True`` would prompt on stdin.
 * :class:`MotorsMismatch` -- the motors LeRobot's robot drives (its
   ``<motor>.pos`` action features) are not the config's joints and gripper.
