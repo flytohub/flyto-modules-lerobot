@@ -42,6 +42,7 @@ from .capabilities import (
 from .perception import (
     Capture,
     Detection,
+    Spot,
     container_holding,
     container_under,
     find,
@@ -169,24 +170,43 @@ class _PlaceMixin:
                   ) -> tuple[dict[str, float], Capture | None, bool]:
         """A new look at where a place goes, from where the camera sees it whole: ``(reading, capture, moved)``.
 
-        A fixed camera looks from where it is. A camera on the arm first goes
-        straight over ``(x, y)`` (:meth:`_vantage`): from wherever the arm
-        is -- holding the object in front of the lens -- it may see the
-        container only in part.
+        A camera on the arm first goes straight over ``(x, y)``
+        (:meth:`_vantage`): from wherever the arm is -- holding the object in
+        front of the lens -- it may see the container only in part. A fixed
+        camera looks from where it is, unless the arm stands between it and
+        ``(x, y)`` (the occlusion model): the arm then turns out of its way
+        first (:meth:`_view_pose`), as for the look after a place. Holding a
+        block over the table, it hid a bin that had moved, which was then
+        seen only in part and refused (MuJoCo, 2026-10-30).
         """
-        moved = False
+        radius, top = self._container_extent(label)
         if self._mounted:
-            radius, top = self._container_extent(label)
-            vantage = self._vantage(positions, x, y, radius, top)
-            if vantage is not None:
-                # The body only: the gripper keeps squeezing what it holds.
-                vantage = {joint: vantage[joint] for joint in self.config.joint_names}
-                with phases("look_pose"):
-                    positions = self._follow(call, positions, [vantage], counter, leg)
-                moved = True
+            view = self._vantage(positions, x, y, radius, top)
+        else:
+            view = self._clear_view(positions, x, y, radius)
+        if view is None:
+            with phases("perceive"):
+                capture = self._look_for_label(label) if label is not None else self._look()
+            return positions, capture, False
+        # The body only: the gripper keeps squeezing what it holds.
+        view = {joint: view[joint] for joint in self.config.joint_names}
+        with phases("look_pose"):
+            positions = self._follow(call, positions, [view], counter, leg)
         with phases("perceive"):
             capture = self._look_for_label(label) if label is not None else self._look()
-        return positions, capture, moved
+        return positions, capture, True
+
+    def _clear_view(self, positions: Mapping[str, float], x: float, y: float,
+                    radius: float) -> dict[str, float] | None:
+        """A fixed camera's joints from which the arm hides none of the disc at ``(x, y)``; None if it hides none now.
+
+        None too without an occlusion model or a taught observe pose: the look is then taken from where the arm is.
+        """
+        model = self._occlusion()
+        spots = (Spot(x, y, self._table_z(), radius),)
+        if model is None or not self._hidden(model, positions, spots):
+            return None
+        return self._view_pose(spots)
 
     def _container_extent(self, label: str | None) -> tuple[float, float]:
         """``(half the footprint's diagonal, height)`` of the container class with this label (any, at most)."""
@@ -298,9 +318,11 @@ class _PlaceMixin:
                 label = ref.label if ref is not None else None
                 positions, capture, moved = self._relocate(call, positions, counter, leg, phases, x, y, label)
                 found = self._container_seen(capture, label, x, y)
-                if found is not None and not found.height_known and self._mounted:
-                    # Seen only in part (behind what the jaws hold, or at the frame's edge): look again from
-                    # straight over where it was seen, so it is seen whole.
+                if found is not None and not found.height_known and (
+                        self._mounted or self._clear_view(positions, found.x, found.y,
+                                                          self._container_extent(found.label)[0]) is not None):
+                    # Seen only in part (behind the arm, what the jaws hold, or at the frame's edge): look again
+                    # from where it is seen whole -- straight over it, or past the arm for a fixed camera.
                     positions, capture, _again = self._relocate(call, positions, counter, leg, phases, found.x,
                                                                 found.y, found.label)
                     found = self._container_seen(capture, found.label, found.x, found.y)
