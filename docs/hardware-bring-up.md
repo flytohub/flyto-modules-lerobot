@@ -46,6 +46,16 @@ lerobot-calibrate --robot.type=so101_follower --robot.port=<serial port> \
 This pack never calibrates. It refuses an arm LeRobot reports uncalibrated
 (`arm_not_calibrated`).
 
+**Then switch the arm's 12 V off and on again, before anything turns torque
+on.** Calibrating writes a new zero (homing offset) into each motor, and so
+does pressing ENTER to reuse a calibration file. On the follower's STS3095
+the new zero reaches position control only after a power cycle. Until then
+the motor reports positions against the new zero while its control still
+uses the old one: it does not push toward a target, or it jumps hard when
+torque comes on (found on the follower's shoulder, 2026-10-29; after the
+power cycle it reached +39 for a +40 target). The leader arm never takes
+torque and needs no power cycle.
+
 ## 4. The arm file
 
 Copy `examples/am-arm200.json` to the host and set:
@@ -86,6 +96,15 @@ ARM_CONFIG=/path/to/arm.json HOST_PY=~/arm-venv/bin/python FLYTO_PAIRING_CODE=<c
 E2E_RESOURCE_ID=<resource_id in arm.json> python setup_space.py space-arm.json "Arm bring-up"
 python grant.py space-arm.json
 ```
+
+**The first connect turns torque on.** LeRobot's connect writes its settings
+with torque off and then turns every motor's torque on, without first setting
+each motor's goal to where it is. A powered servo keeps its last goal, so a
+joint moved by hand since torque was last on drives back toward that goal the
+moment the pack connects. So connect for the first time right after the power
+cycle of step 3, with the arm at rest, and keep a hand on the cut-off. Whether
+a power cycle starts each goal at the present position is not yet measured on
+this arm: if any joint moves on connect, cut the 12 V.
 
 Then follow the README's *Commissioning an arm*:
 1. connect and read the state;
