@@ -247,6 +247,10 @@ class ArmSession:
 
     def read(self) -> dict[str, float]:
         """Every configured motor's position (body joints, then the gripper)."""
+        return self.observe()[0]
+
+    def observe(self) -> tuple[dict[str, float], dict[str, Any]]:
+        """``(every configured motor's position, the whole observation)``: LeRobot's, camera frames included."""
         with self.lock:
             self.ensure_connected()
             if not self._robot.is_calibrated:
@@ -263,7 +267,7 @@ class ArmSession:
             except ArmFault as error:
                 raise self.latch(str(error), error.fault_code) from error
             self.effort = _effort(observation, self.config.gripper.effort_key)
-            return positions
+            return positions, dict(observation)
 
     def command(self, targets: Mapping[str, float]) -> None:
         """Send goal positions for these motors only; others keep their goals."""

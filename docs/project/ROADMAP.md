@@ -22,6 +22,10 @@ Serves flyto-cloud `ROADMAP.md` "CONVERGED P0" item 4 (AM-ARM200 M0 / M1).
    on the official AM-ARM200 geometry; on the real arm it needs the chain's
    calibration confirmed (`verified_on_hardware`), the mounted camera and
    the Cloud vocabulary rows.
+7. Trained policies (2026-11-06): `manipulation.perform_task` with scripted
+   policies; next a real ACT checkpoint on the GPU host, then on the arm
+   once it is calibrated; Cloud's vocabulary row and core's step; a GR00T
+   inference-server client.
 
 Out of scope (owner 2026-10-23): CLI, MCP server, planners, recording,
 training, datasets, teleoperation, web. Telemetry and the simulation live

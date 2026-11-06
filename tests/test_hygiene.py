@@ -95,7 +95,7 @@ MAX_FILE_LINES = 700
 OVER_LIMIT = {
     "perception.py": 1987,
     "lerobot_adapter.py": 982,
-    "capabilities.py": 744,
+    "capabilities.py": 723,
     "simulation.py": 793,
     "mujoco_sim.py": 760,
 }

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `manipulation.perform_task` (owner 2026-11-06): runs a trained LeRobot
+  policy (ACT) named in the arm config's new `policies` section at its `fps`,
+  each goal clamped to the limits and one `max_step` from the reading; HOLD
+  on cancel / stop / deadline; `task_time_exceeded` past `max_seconds`;
+  proven by `objects_in_containers` +1, never by the policy. New refusal
+  codes `policy_unknown`, `policy_unavailable`, `policy_input_missing`,
+  `policy_error`, `task_time_exceeded`. `ArmSession.observe()` returns the
+  whole observation. The schema pieces of the capability table moved to
+  `contract_schemas.py`. Tested with scripted policies only.
 - The Cloud integration test imports the refusal codes from `refusals.py`,
   where they moved; it had stopped collecting. Against Cloud main it passes
   14 of 14, the four rows this pack requested included.

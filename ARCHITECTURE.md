@@ -94,6 +94,8 @@ responsibility:
 | `arm_looks.py` (`_LooksMixin`) | where the camera looks from (`_view_pose`), each look, the look after a failure, the look that stops once its spots are clear |
 | `arm_pick.py` (`_PickMixin`) | `manipulation.pick`, including the look past the arm for a target seen in part |
 | `arm_place.py` (`_PlaceMixin`) | `manipulation.place`, including the container re-check and a drop in transit |
+| `arm_teach.py` (`_TeachMixin`) | `manipulation.mark_pose` |
+| `arm_policy.py` (`_PolicyMixin`) | `manipulation.perform_task`: the policy's control loop, clamping, its outcomes (2026-11-06) |
 
 `_view_pose` is the one place a look's vantage is chosen. It starts from the
 taught observe pose. When the occlusion model (`perception.arm_margin`) says
@@ -389,3 +391,34 @@ the capture records `joints_at_capture`.
 - The camera is part of the arm, so its counts are the arm's own word:
   evidence stays `observer: "self"`; `observe` says `camera_on_arm`.
 
+
+## Trained policies (`policies.py`, `arm_policy.py`, 2026-11-06)
+
+`manipulation.perform_task` runs a policy the arm config's `policies`
+section names (`policies.parse_policies` checks it when the file is read).
+`policies.load_policy` loads it once per adapter: `act` through LeRobot's
+policy API (checkpoint folder, `make_pre_post_processors`, `predict_action`,
+imported only then); `gr00t` is reserved and refused (`policy_unavailable`)
+until its inference-server client is written. Tests set
+`adapter.policy_loader` to a script.
+
+Each control period (`1 / fps`):
+
+1. check for a stop, cancel or the deadline, and `max_seconds`;
+2. `policy.act(observation)` -- LeRobot's whole observation
+   (`ArmSession.observe()`: `<motor>.pos` and the camera frames by name);
+3. check for a stop again (inference takes time);
+4. clamp every motor's goal to its limits, then to at most `max_step`
+   (`max_gripper_step` for the gripper) from its reading, then to its limits;
+5. `send_action`, read the arm, wait out the period.
+
+It ends when the policy's `finished` is true, or when the arm has moved and
+then rested (two readings within `motion.still_drift`, every body joint
+within `motion.tolerance` of its goal; the gripper may stop on what it holds)
+for `still_seconds`. Then the arm holds. Before and after, the camera's
+counts (`scene_before`, `scene_after`) are returned as data when there is a
+camera; the evidence Cloud judges is `objects_in_containers` +1 from its own
+observations. Refused before the first goal: unknown policy, a policy that
+does not load, a camera key missing from the observation, a policy that
+fails on its first step. After: `policy_error` and `task_time_exceeded` fail
+with the arm held; a stop, cancel or deadline is the usual measured hold.

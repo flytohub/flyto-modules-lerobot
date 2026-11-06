@@ -60,6 +60,9 @@ REQUESTED_ROWS = {
     # Requested 2026-10-29: a camera on the arm finds what left its view only by moving it.
     "perception.survey": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
                           "cancellable": True, "required_permissions": ("equipment.motion",)},
+    # Requested 2026-11-06 (owner): run a trained policy on the arm; the manipulation family's movement defaults.
+    "manipulation.perform_task": {"actuates": True, "safety_class": "movement", "requires_safe_stop": True,
+                                  "cancellable": True, "required_permissions": ("equipment.motion",)},
 }
 
 

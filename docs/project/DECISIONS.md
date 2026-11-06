@@ -680,3 +680,52 @@ opens the bus, sets each `Goal_Position` to the raw `Present_Position`, and
 then calls LeRobot's `configure()`. Simulators keep `connect(calibrate=False)`.
 The fake arm now connects as LeRobot does (goals untouched), so the test fails
 without the write.
+
+## 2026-11-06 -- Owner addition: `manipulation.perform_task` runs a trained policy
+
+The owner agreed on 2026-11-06 to add one capability, `manipulation.perform_task`:
+run a trained LeRobot policy (ACT first; a GR00T inference server is reserved
+in the config, its client not written) on the execution host until it ends.
+Inference only. Recording, training, datasets and teleoperation stay out of
+this pack; they are done with LeRobot's own tools elsewhere.
+
+- **Policies are configuration.** The arm config's `policies` section names
+  each one: `type` (`act` | `gr00t`), `checkpoint` (or `server`), `task`,
+  `cameras` (observation keys the policy reads), `max_seconds`, and optional
+  `fps` (30), `max_step` / `max_gripper_step`, `still_seconds`, `device`.
+  `policies.py` checks it when the file is read; a malformed entry refuses
+  the whole file, as any other section does. The capability is offered only
+  by an arm that names at least one policy.
+- **The unit is the arm's.** Datasets are recorded in LeRobot's calibrated
+  unit (degrees for the body joints, 0..100 for the gripper), so a goal goes
+  to `send_action` without conversion.
+- **Every goal is clamped before it is sent:** to the joint limits and the
+  gripper range, and to at most `max_step` (default `motion.max_step`) from
+  where the motor reads in that control period. Counted in `clamped`.
+- **Stop is HOLD**, as everywhere: a cancel, safe stop or deadline is
+  checked before every goal (also after inference), and interrupts the run
+  with the measured hold.
+- **Ending is not proof.** A run ends when the policy says its episode is
+  over (`finished`) or when, after moving, the arm has rested where the
+  policy keeps commanding it for `still_seconds`. The contract's evidence is
+  `objects_in_containers` rising by one, the camera's count from the host's
+  before/after observations (the place's spec, observer `self`). The
+  policy's own word is never evidence.
+- **Past `max_seconds`** the arm holds and the call fails
+  (`task_time_exceeded`) with the readings and the camera's counts from
+  before and after.
+- **A second module calls LeRobot.** `policies.py` loads a checkpoint with
+  LeRobot's policy API (`PreTrainedConfig`, `get_policy_class`,
+  `make_pre_post_processors`, `predict_action`), imported only when a policy
+  is first run. The robot is still only `driver.py`'s; the driver gained
+  `ArmSession.observe()` so the policy sees LeRobot's whole observation,
+  camera frames included.
+- `capabilities.py` was at its line ceiling; its returned-data schemas and
+  evidence specs moved to `contract_schemas.py` (re-exported), and the pin
+  dropped from 744 to 723.
+
+Cloud needs one row (beside `manipulation.place`), and core a step for it.
+They are written down in `docs/project/handoffs/2026-11-06-perform-task.md`;
+neither repository is changed here. Until Cloud ships the row it refuses
+this declaration as `capability_not_in_vocabulary` and the others are
+unaffected.

@@ -28,6 +28,7 @@ arm is the AM-ARM200 follower (liyiteng, LeRobot fork `lerobot_alohamini`).
 - Commissioning an arm through those capabilities (no separate tool).
 - The arm config format (`flyto.lerobot.arm.v1`) and the AM-ARM200 example.
 - The resource manifest built from that config.
+- Running a trained policy named in the arm config (`manipulation.perform_task`, owner 2026-11-06): inference only.
 
 ## Non-goals
 

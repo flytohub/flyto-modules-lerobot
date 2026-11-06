@@ -78,6 +78,16 @@ REASON_NOT_REACHED = "target_not_reached"
 REASON_STOP_REQUESTED = "stop_requested"
 #: The call's deadline passed before the move ended; the arm was told to hold.
 REASON_DEADLINE = "deadline_reached"
+#: The arm config names no policy of that name; nothing was sent.
+REASON_POLICY_UNKNOWN = "policy_unknown"
+#: The policy cannot be loaded on this host (no checkpoint, no LeRobot, a type not supported yet); nothing was sent.
+REASON_POLICY_UNAVAILABLE = "policy_unavailable"
+#: The robot's observation lacks a camera frame the policy reads; nothing was sent.
+REASON_POLICY_INPUT_MISSING = "policy_input_missing"
+#: The policy raised, or returned no finite goal for a motor; nothing more was sent.
+REASON_POLICY_ERROR = "policy_error"
+#: The policy did not come to its end within the policy's ``max_seconds``; the arm was told to hold.
+REASON_TASK_TIME_EXCEEDED = "task_time_exceeded"
 
 # The arm's own words for each, shown to the person verbatim.
 REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
@@ -119,6 +129,12 @@ REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
             "這支手臂沒有可用的運動學鏈（未設定，或關節校準尚未在實機確認），"
             "無法規劃座標目標，沒有送出任何動作指令。"),
         REASON_SIMULATION_ON_HARDWARE: "模擬設定指向的不是模擬埠（可能是實體手臂），拒絕執行，沒有送出任何動作指令。",
+        REASON_POLICY_UNKNOWN: "這支手臂沒有設定這個名稱的策略，沒有送出任何動作指令。",
+        REASON_POLICY_UNAVAILABLE: (
+            "這台主機無法載入這個策略（找不到模型、缺少 LeRobot 或尚未支援），沒有送出任何動作指令。"),
+        REASON_POLICY_INPUT_MISSING: "手臂的觀測缺少策略需要的相機畫面，沒有送出任何動作指令。",
+        REASON_POLICY_ERROR: "策略推論失敗或輸出無效，已停止送出動作指令。",
+        REASON_TASK_TIME_EXCEEDED: "策略在設定的時間內沒有結束，手臂已被指令保持在目前位置。",
     }
 )
 
@@ -164,6 +180,11 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
             "No kinematic chain usable on this arm (none, or its calibration is unconfirmed on hardware); "
             "nothing was sent"),
         REASON_SIMULATION_ON_HARDWARE: "A simulation config names a port that may be hardware; nothing was sent",
+        REASON_POLICY_UNKNOWN: "The arm config names no policy of that name; nothing was sent",
+        REASON_POLICY_UNAVAILABLE: "The policy cannot be loaded on this host; nothing was sent",
+        REASON_POLICY_INPUT_MISSING: "The robot's observation lacks a camera frame the policy reads; nothing was sent",
+        REASON_POLICY_ERROR: "The policy raised or returned no finite goal; nothing more was sent",
+        REASON_TASK_TIME_EXCEEDED: "The policy did not end within its max_seconds; the arm was told to hold",
     }
 )
 
@@ -212,6 +233,10 @@ __all__ = [
     "REASON_PERCEPTION_DISAGREES",
     "REASON_PERCEPTION_UNAVAILABLE",
     "REASON_PLACEMENT_UNOBSERVED",
+    "REASON_POLICY_ERROR",
+    "REASON_POLICY_INPUT_MISSING",
+    "REASON_POLICY_UNAVAILABLE",
+    "REASON_POLICY_UNKNOWN",
     "REASON_POSE_NOT_TAUGHT",
     "REASON_POSE_TAUGHT",
     "REASON_POSE_UNKNOWN",
@@ -220,6 +245,7 @@ __all__ = [
     "REASON_SLIPPED",
     "REASON_STOP_REQUESTED",
     "REASON_TARGET_PARTLY_SEEN",
+    "REASON_TASK_TIME_EXCEEDED",
     "REASON_UNREACHABLE",
     "REASON_VIEWPOINT_UNSUITABLE",
     "REFUSAL_DETAILS",

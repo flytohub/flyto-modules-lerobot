@@ -334,5 +334,16 @@
     "max_uncertainty_m": 0.04,
     "reuse_within_s": 3.0
   },
-  "survey": {"x": [0.04, 0.32], "y": [-0.22, 0.28], "overlap": 0.25}
+  "survey": {"x": [0.04, 0.32], "y": [-0.22, 0.28], "overlap": 0.25},
+  "policies": {
+    "pick_red_into_blue_bin": {
+      "type": "act",
+      "checkpoint": "~/flyto/policies/am-arm200-pick-place-act/pretrained_model",
+      "task": "Pick up the red cube and put it in the blue bin.",
+      "cameras": ["wrist", "front"],
+      "max_seconds": 60,
+      "fps": 30,
+      "notes": "Not trained or run on this arm yet. The checkpoint is the folder lerobot-train writes. LeRobot must be configured with cameras named wrist and front (lerobot.options.cameras), or the call is refused (policy_input_missing). Goals are LeRobot's unit: degrees for the body joints, 0..100 for the gripper."
+    }
+  }
 }

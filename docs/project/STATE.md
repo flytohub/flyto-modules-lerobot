@@ -96,6 +96,18 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   a block that falls under the arm's base is hidden from a fixed overhead
   camera.
 
+2026-11-06 -- `manipulation.perform_task`, FAKE POLICIES ONLY (branch `claude/perform-task`):
+- The arm config's `policies` section (`policies.py`) and the capability
+  row; offered only by an arm that names a policy (the AM-ARM200 example
+  names one ACT policy whose checkpoint does not exist yet).
+- `arm_policy.py`: the control loop, clamping to limits and step, HOLD on
+  cancel / safe stop / deadline, `task_time_exceeded` past `max_seconds`,
+  refusals before anything is sent. Tested with scripted policies on the
+  fake follower (with camera frames), the in-process simulator and MuJoCo.
+- Not run: a real ACT checkpoint through `policies._LeRobotPolicy` (no
+  LeRobot or torch in the test environment), any real arm, any GR00T server
+  (client not written). Cloud has no `manipulation.perform_task` row yet.
+
 ## Not done
 
 - **No arm.** The AM-ARM200 has not arrived. Nothing has connected, read or moved a real arm, and calibration, motor ids and limits are unverified.
