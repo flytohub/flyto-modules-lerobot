@@ -8,31 +8,19 @@ name. ``modules.py`` hands each row to flyto-core's ``@register_module``,
 and ``lerobot_adapter.py`` routes a call to the handler the row's ``action``
 names.
 
-The capability ids are flyto-cloud's manipulation vocabulary
-(``manipulation.state``, ``manipulation.move_joints``, ``manipulation.grasp``,
-``manipulation.release``, ``manipulation.mark_pose``;
-``services/space_tasks/capabilities.py``), not vendor ids: any arm LeRobot
-drives answers to the same five, and this pack is one provider of them. Their
+The capability ids are flyto-cloud's vocabulary
+(``services/space_tasks/capabilities.py``), not vendor ids: any arm LeRobot
+drives answers to the same ones, and this pack is one provider of them. Their
 safety class, stop requirement, cancellability and permission are Cloud's
 resolved rows, restated here exactly: Cloud's ``declare`` refuses a claim that
-says anything else. ``manipulation.mark_pose`` is the row Cloud is asked to
-add (``docs/project/DECISIONS.md``); until it does, Cloud refuses its
-declaration and the other four are unaffected.
-
-``manipulation.mark_pose`` is how an arm is commissioned through Flyto2: it
-moves nothing, reads where the arm is, and records that as a taught pose in
-the arm's config file. Like ``places.mark`` it is ``controlled`` -- it
-changes where later moves to that name go, and no call puts the old pose back
-except the backup file it keeps.
-
-Nothing here names an arm. Joint names, limits, the gripper's open and closed
-values and taught poses are the arm's configuration (``arm_config.py``).
-
-The sensing closed loop (owner 2026-10-27) adds three rows: ``perception.locate_objects``
-(read only: where objects are on the table, from the arm's camera),
-``manipulation.pick`` and ``manipulation.place`` (Cartesian, planned with the
-arm's declared kinematic chain). Their ids are requested from Cloud's
-vocabulary, as ``manipulation.mark_pose`` was (``docs/project/DECISIONS.md``).
+says anything else. A row this pack asks Cloud for (``docs/project/DECISIONS.md``)
+is refused by Cloud until it ships, and the others are unaffected.
+``manipulation.mark_pose`` commissions an arm through Flyto2 (``controlled``,
+like ``places.mark``); the sensing closed loop (owner 2026-10-27) adds
+``perception.locate_objects``, ``perception.survey``, ``manipulation.pick`` and
+``manipulation.place``; ``manipulation.perform_task`` (owner 2026-11-06) runs
+a trained policy. Nothing here names an arm: joints, limits, gripper values,
+poses and policies are the arm's configuration (``arm_config.py``).
 
 What proves an effect is an observation Cloud judges with core's arithmetic,
 taken by the host before and after the call (``observe``), never the call's
@@ -45,6 +33,10 @@ own outcome:
   nothing from the arm.
 * ``manipulation.release`` / ``manipulation.place`` -- ``object_held`` goes
   from 1 to 0; a place also needs ``objects_in_containers`` to rise by one.
+* ``manipulation.perform_task`` (owner 2026-11-06) -- runs a trained policy
+  named in the arm's config (``policies.py``); like a place, it is proven
+  only by ``objects_in_containers`` rising by one. The policy coming to rest
+  is not proof, and the policy's own word is never taken.
 * ``manipulation.move_joints`` -- flyto-core's evidence arithmetic compares
   the last phase with a *numeric argument* (``distance_to``) or measures a
   change between phases. A move to a named pose has no numeric argument, and
@@ -63,6 +55,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
+
+from .contract_schemas import (
+    _GRIP,
+    _GRIPPER_MOVED,
+    _JOINT_MAP,
+    _LATENCY,
+    _MOVED,
+    _NUMBER,
+    _PHASES,
+    _SOURCE,
+    _TABLE_POSE,
+    ARM_STATE_SCHEMA,
+    EVIDENCE_HELD,
+    EVIDENCE_INTO_CONTAINER,
+    EVIDENCE_LEFT_TABLE,
+    EVIDENCE_RELEASED,
+    OBJECT_SCHEMA,
+    OBSERVED_HELD,
+    OBSERVED_IN_CONTAINERS,
+    OBSERVED_ON_TABLE,
+    _output,
+)
 
 CONTRACT_SCHEMA = "flyto.capability-contract.v1"
 
@@ -97,94 +111,6 @@ ENV_AUTODISCOVER = "FLYTO_LEROBOT_AUTODISCOVER"
 #: ``_FAMILY_PERMISSIONS`` for the manipulation family).
 PERMISSION_EQUIPMENT_MOTION = "equipment.motion"
 
-# -- what a completed call returns (held by the host to ``output_schema``) ---------
-
-_NUMBER = {"type": "number"}
-_JOINT_MAP = {"type": "object", "additionalProperties": _NUMBER, "maxProperties": 16}
-ARM_STATE_SCHEMA: Mapping[str, Any] = MappingProxyType(
-    {
-        "type": "object",
-        "required": ["unit", "joints", "gripper"],
-        "properties": {
-            "unit": {"type": "string", "maxLength": 16},
-            "joints": _JOINT_MAP,
-            "gripper": {
-                "type": "object",
-                "required": ["position", "state"],
-                "properties": {"position": _NUMBER, "state": {"enum": ["open", "closed", "between"]}},
-            },
-        },
-    }
-)
-
-
-def _output(required: tuple[str, ...], **properties: Any) -> Mapping[str, Any]:
-    """A frozen JSON Schema for one capability's returned data."""
-    return MappingProxyType({
-        "type": "object",
-        "required": list(required),
-        "properties": {"arm": dict(ARM_STATE_SCHEMA), **properties},
-    })
-
-
-_MOVED = {"arm_before": dict(ARM_STATE_SCHEMA), "effect_applied": {"const": True}}
-_SOURCE = {"enum": ["hardware", "simulation"]}
-_GRIP = {
-    "type": "object",
-    "required": ["position", "goal", "gap", "held"],
-    "properties": {"position": _NUMBER, "goal": {"type": ["number", "null"]}, "gap": _NUMBER,
-                   "effort": {"type": ["number", "null"]}, "held": {"type": "boolean"}},
-}
-_GRIPPER_MOVED = {**_MOVED, "gripper_target": _NUMBER, "reached_command": {"type": "boolean"},
-                  "object_held": {"type": "boolean"}, "grip": _GRIP, "source": _SOURCE}
-_TABLE_POSE = {
-    "type": "object",
-    "required": ["frame", "x", "y", "z", "yaw"],
-    "properties": {"frame": {"type": "string"}, "x": _NUMBER, "y": _NUMBER, "z": _NUMBER, "yaw": _NUMBER},
-}
-_PHASES = {
-    "type": "array",
-    "maxItems": 16,
-    "items": {"type": "object", "required": ["phase", "started_ms", "ms"],
-              "properties": {"phase": {"type": "string"}, "started_ms": _NUMBER, "ms": _NUMBER}},
-}
-_LATENCY = {"type": "object", "required": ["total"], "additionalProperties": _NUMBER}
-#: One located object (``perception.locate_objects``), the shape Cloud records as a world-model object instance.
-OBJECT_SCHEMA: Mapping[str, Any] = MappingProxyType({
-    "type": "object",
-    "required": ["id", "kind", "label", "pose", "uncertainty", "observed_at", "source"],
-    "properties": {
-        "id": {"type": "string", "maxLength": 64}, "kind": {"enum": ["block", "container"]},
-        "label": {"type": "string", "maxLength": 64}, "pose": _TABLE_POSE,
-        "uncertainty": {"type": "object", "required": ["xy_m", "yaw_rad"],
-                        "properties": {"xy_m": _NUMBER, "yaw_rad": _NUMBER}},
-        "observed_at": {"type": "string"}, "source": _SOURCE,
-    },
-})
-
-
-def _held_change(kind: str, field: str, value: int, observe: str, english: str, chinese: str) -> dict[str, Any]:
-    """An evidence spec: ``field`` changes by exactly ``value`` from before the call to after it."""
-    return {
-        "kind": kind, "observe": observe, "phases": ["before", "after"],
-        "measure": {"op": "delta", "fields": [field]}, "expect": {"value": value},
-        "tolerance": {"absolute": 0.0}, "observer": "self",
-        "label": {"en": english, "zh-TW": chinese}, "unit": "",
-    }
-
-
-#: What the adapter's ``observe`` reports, numerically, for these specs to be judged from.
-OBSERVED_HELD = "object_held"
-OBSERVED_ON_TABLE = "objects_on_table"
-OBSERVED_IN_CONTAINERS = "objects_in_containers"
-EVIDENCE_HELD = _held_change("manipulation.object_held", OBSERVED_HELD, 1, "gripper",
-                             "Gripper holds an object", "夾爪夾住物品")
-EVIDENCE_RELEASED = _held_change("manipulation.object_released", OBSERVED_HELD, -1, "gripper",
-                                 "Gripper let go of the object", "夾爪放開物品")
-EVIDENCE_LEFT_TABLE = _held_change("perception.object_left_table", OBSERVED_ON_TABLE, -1, "table_objects",
-                                   "One object left the table", "桌面上少了一個物品")
-EVIDENCE_INTO_CONTAINER = _held_change("perception.object_in_container", OBSERVED_IN_CONTAINERS, 1, "table_objects",
-                                       "One more object inside a container", "容器內多了一個物品")
 
 #: How long a pose name may be. The declared schema states only what Cloud's argument
 #: engine enforces (its lossless admission refuses any other keyword, and with it the
@@ -665,8 +591,54 @@ PLACE = CapabilitySpec(
     renamed=MappingProxyType({CONTAINER_REF: CONTAINER_REF_ARGUMENTS}),
 )
 
+#: How long a policy name may be (the full rule is the arm config's, ``policies.parse_policies``).
+POLICY_NAME_MAX_LENGTH = 64
+
+PERFORM_TASK = CapabilitySpec(
+    capability_id="manipulation.perform_task",
+    module_id="manipulation.perform_task",
+    action="perform_task",
+    label="Perform a task with a trained policy",
+    display_name="執行學習策略任務",
+    description=(
+        "Run one of the arm's configured trained policies (LeRobot ACT) until it comes to rest, each goal clamped "
+        "to the arm's limits and step; the task is proven by the camera's container count, never the policy's word"
+    ),
+    manifest_description=(
+        "用這支手臂設定好的學習策略（LeRobot ACT）執行一個任務，動作限制在關節範圍與每週期步幅內；"
+        "是否完成由攝影機確認容器內多了一個物品，不採信模型自己回報。"
+        "Run a configured trained policy; proven by the camera, not the policy."
+    ),
+    icon="Bot",
+    color="#FFA16F",
+    tags=("manipulation", "policy", "learned"),
+    params_schema=MappingProxyType({
+        "policy": {"type": "string", "label": "Policy", "description": "A policy by name, from the arm's config",
+                   "required": True},
+    }),
+    contract=_moving("manipulation.task.performed", evidence=(EVIDENCE_INTO_CONTAINER,), idempotent=False),
+    output_schema=_output(
+        ("arm", "arm_before", "policy", "task", "steps", "clamped", "seconds", "ended_by", "effect_applied", "source"),
+        policy={"type": "string", "maxLength": POLICY_NAME_MAX_LENGTH}, task={"type": "string", "maxLength": 500},
+        steps={"type": "integer", "minimum": 0},
+        clamped={"type": "object", "required": ["limit", "step"],
+                 "properties": {"limit": {"type": "integer"}, "step": {"type": "integer"}}},
+        seconds=_NUMBER, ended_by={"enum": ["policy", "still"]}, scene_before={"type": ["object", "null"]},
+        scene_after={"type": ["object", "null"]}, source=_SOURCE, **_MOVED,
+    ),
+    timeout_ms=660_000,
+    required_permissions=(PERMISSION_EQUIPMENT_MOTION,),
+    input_schema=MappingProxyType({
+        "type": "object",
+        "properties": {"policy": {"type": "string", "maxLength": POLICY_NAME_MAX_LENGTH, "minLength": 1,
+                                  "description": "A policy by name, from the arm's config"}},
+        "required": ["policy"],
+        "additionalProperties": False,
+    }),
+)
+
 SPECS: tuple[CapabilitySpec, ...] = (MANIPULATION_STATE, MOVE_JOINTS, GRASP, RELEASE, MARK_POSE, LOCATE_OBJECTS, SURVEY,
-                                     PICK, PLACE)
+                                     PICK, PLACE, PERFORM_TASK)
 SPECS_BY_CAPABILITY: Mapping[str, CapabilitySpec] = MappingProxyType({spec.capability_id: spec for spec in SPECS})
 SPECS_BY_MODULE: Mapping[str, CapabilitySpec] = MappingProxyType({spec.module_id: spec for spec in SPECS})
 CAPABILITY_IDS: tuple[str, ...] = tuple(spec.capability_id for spec in SPECS)
@@ -699,10 +671,12 @@ TELEMETRY_INTERVAL_SECONDS = 1.0
 
 
 def offered_specs(config: Any) -> tuple[CapabilitySpec, ...]:
-    """The capabilities this arm offers: every one, except a survey without a camera on the arm and an area."""
+    """The capabilities this arm offers: every one, except a survey without a camera on the arm and an area,
+    and a task without a configured policy."""
     camera = getattr(getattr(config, "perception", None), "camera", None)
     surveys = getattr(camera, "mount", None) is not None and getattr(config, "survey", None) is not None
-    return tuple(spec for spec in SPECS if spec is not SURVEY or surveys)
+    skipped = {SURVEY.capability_id: not surveys, PERFORM_TASK.capability_id: not getattr(config, "policies", None)}
+    return tuple(spec for spec in SPECS if not skipped.get(spec.capability_id, False))
 
 
 def contract_of(capability_id: str) -> dict[str, Any] | None:
@@ -713,6 +687,7 @@ def contract_of(capability_id: str) -> dict[str, Any] | None:
 
 __all__ = [
     "ADAPTER_ID",
+    "ARM_STATE_SCHEMA",
     "CAPABILITY_IDS",
     "CONTAINER_REF",
     "CONTAINER_REF_ARGUMENTS",
@@ -730,6 +705,10 @@ __all__ = [
     "MODULE_PACK",
     "MOVE_JOINTS",
     "OBJECT_SCHEMA",
+    "OBSERVED_HELD",
+    "OBSERVED_IN_CONTAINERS",
+    "OBSERVED_ON_TABLE",
+    "PERFORM_TASK",
     "PICK",
     "PLACE",
     "RELEASE",

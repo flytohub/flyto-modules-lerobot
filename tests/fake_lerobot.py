@@ -16,8 +16,9 @@ liyiteng/lerobot_alohamini (``src/lerobot/robots/so_follower/so_follower.py``):
   ``sync_write`` of ``Present_Position`` / ``Goal_Position``.
 * ``is_connected`` / ``is_calibrated``.
 * ``get_observation()`` -- ``{"<motor>.pos": float}``, degrees for the body,
-  0..100 for the gripper. An over-current trip disables torque, disconnects
-  and raises ``RuntimeError``, as the fork does.
+  0..100 for the gripper, and a frame under each configured camera's name.
+  An over-current trip disables torque, disconnects and raises
+  ``RuntimeError``, as the fork does.
 * ``send_action({"<motor>.pos": float})`` -- writes ``Goal_Position`` with a
   sync write, which no motor answers. Returns the action actually sent.
 * ``disconnect()`` -- disables torque only when
@@ -134,7 +135,7 @@ class FakeFollowerArm:
         self.connected = True
         self._stepped_at = self.clock()
 
-    def get_observation(self) -> dict[str, float]:
+    def get_observation(self) -> dict[str, Any]:
         self._require_connected()
         with self.lock:
             self.observations += 1
@@ -148,7 +149,10 @@ class FakeFollowerArm:
                 self.drop_reads = max(0, self.drop_reads - 1)
                 raise ConnectionError("Failed to sync read 'Present_Position' on ids=[1, 2, 3, 4, 5, 6, 7]")
             self._step()
-            return {f"{name}.pos": float(value) for name, value in self.positions.items()}
+            observation: dict[str, Any] = {f"{name}.pos": float(value) for name, value in self.positions.items()}
+            # LeRobot puts each configured camera's latest frame under the camera's name.
+            observation.update({name: f"frame {self.observations} of {name}" for name in self.config.cameras})
+            return observation
 
     def send_action(self, action: dict[str, float]) -> dict[str, float]:
         self._require_connected()

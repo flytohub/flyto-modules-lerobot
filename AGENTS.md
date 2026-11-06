@@ -46,6 +46,14 @@ latency, verification honesty and limits never give way to speed. The arm's
 camera is on the arm (eye-in-hand, `perception.camera.mount`): where it is
 comes from the robot description's chain at the joints read for each
 capture, never a calibration constant.
+**Owner addition 2026-11-06 (trained policies, `docs/project/DECISIONS.md`).**
+One more capability, `manipulation.perform_task`: run a trained LeRobot
+policy named in the arm config's `policies` section (ACT in this process; a
+GR00T inference server reserved, its client not written) at the policy's
+`fps`, every goal clamped to the limits and to `max_step` from the reading,
+HOLD on every stop, failed past `max_seconds`. Inference only (`policies.py`,
+`arm_policy.py`); proven by the camera's `objects_in_containers`, never by
+the policy. Still no recording, training, dataset or teleoperation tool.
 Commissioning an arm is done through the capabilities, not beside them (owner
 2026-10-23): the motor check runs on every connect, `manipulation.mark_pose`
 teaches a pose, `manipulation.move_joints` jogs, and every hold-stop of a
@@ -55,8 +63,10 @@ rejected.
 ## Constraints
 
 - **Wrap LeRobot; never re-implement it.** `driver.py` is the only module
-  that calls LeRobot, and only its public `Robot` API (`connect(calibrate=False)`,
-  `is_calibrated`, `action_features`, `get_observation`, `send_action`). No
+  that calls LeRobot's robot, and only its public `Robot` API (`connect(calibrate=False)`,
+  `is_calibrated`, `action_features`, `get_observation`, `send_action`).
+  `policies.py` loads and runs a trained policy with LeRobot's policy API
+  only (owner 2026-11-06), imported when a policy is first run. No
   motor-bus or servo protocol call, with one exception the owner allowed on
   2026-10-30: connecting a LeRobot arm opens its bus and sets every
   `Goal_Position` to the raw `Present_Position` before LeRobot's
@@ -72,7 +82,7 @@ rejected.
   (`tests/test_lerobot_adapter.py` and `tests/test_arm_config.py` hold both).
   A physical 12 V cut-off switch is required for any real run. Measuring a
   stop (`stop_to_still_ms`, `overshoot`) only reads.
-- **An outcome is never proof.** Grasp, release, pick and place declare
+- **An outcome is never proof.** Grasp, release, pick, place and perform_task declare
   evidence specs that Cloud judges from the host's own before/after
   `observe` readings: `object_held` (the gripper signature, read fresh) and,
   from a fresh camera capture alone, `objects_on_table` /
@@ -90,7 +100,9 @@ rejected.
   (`movement`, safe stop required, cancellable, `equipment.motion` for the
   three that move). The rows this pack requested -- `manipulation.mark_pose`,
   `perception.locate_objects`, `manipulation.pick`, `manipulation.place` --
-  shipped in Cloud `205bd52f6` (`docs/project/DECISIONS.md`). Change
+  shipped in Cloud `205bd52f6` (`docs/project/DECISIONS.md`);
+  `perception.survey` and `manipulation.perform_task` (owner 2026-11-06) are
+  requested, not shipped. Change
   `tests/test_capabilities.py`'s copy only together with that file. Never
   invent another id.
 - **LeRobot, torch and flyto-core are optional.** Nothing imports them at

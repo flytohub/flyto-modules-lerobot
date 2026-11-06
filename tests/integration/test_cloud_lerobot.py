@@ -81,10 +81,12 @@ from flyto_modules_lerobot.capabilities import (  # noqa: E402
     MANIPULATION_STATE,
     MARK_POSE,
     MOVE_JOINTS,
+    PERFORM_TASK,
     PICK,
     PLACE,
     SPECS,
     SPECS_BY_CAPABILITY,
+    SURVEY,
 )
 from flyto_modules_lerobot.discovery import build_manifest  # noqa: E402
 from flyto_modules_lerobot.driver import ArmSession  # noqa: E402
@@ -111,7 +113,7 @@ def _binding(capability_id: str) -> dict:
 def _pending_in_cloud() -> set[str]:
     """The pack's ids this Cloud does not ship yet; only the rows the pack requested may be."""
     pending = set(CAPABILITY_IDS) - set(CAPABILITIES)
-    requested = {spec.capability_id for spec in (MARK_POSE, LOCATE_OBJECTS, PICK, PLACE)}
+    requested = {spec.capability_id for spec in (MARK_POSE, LOCATE_OBJECTS, PICK, PLACE, SURVEY, PERFORM_TASK)}
     assert pending <= requested, pending
     return pending
 

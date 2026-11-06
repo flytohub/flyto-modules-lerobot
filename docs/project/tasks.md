@@ -20,3 +20,9 @@
 - [ ] Cloud: decide the "moved" bound with the pack -- Cloud's vocabulary says the larger of the two uncertainties, the pack uses their sum (two honest looks at a still container differ by up to the sum); accept `container_moved` as `failed` (holding) from a camera on the arm, which moves to look.
 - [ ] A pick descends with the block centred between the open jaws (the fixed jaw is 9 mm clear of a 30 mm block at the tool point; servo lag swung 6-7 mm in 1 of 50 eye-in-hand episodes): take the open jaws' geometry from the robot description.
 - [ ] On the arm: confirm `perception.max_uncertainty_m` and the look pose's viewpoint (`capture.viewpoint`) from real frames.
+- [ ] Cloud: add the `manipulation.perform_task` vocabulary row (handoff 2026-11-06-perform-task).
+- [ ] core: a step for `manipulation.perform_task` that passes `policy` (handoff 2026-11-06-perform-task).
+- [ ] Run a real ACT checkpoint through `policies._LeRobotPolicy` with LeRobot 0.4.x + torch (input/output keys, camera names, latency at 30 Hz).
+- [ ] On the arm: configure LeRobot's cameras (`lerobot.options.cameras`) with the names the dataset used (`wrist`, `front`).
+- [ ] On the arm: a first `perform_task` run with a low `max_step` and the 12 V switch in hand.
+- [ ] GR00T inference-server client (`policies._load_gr00t`).

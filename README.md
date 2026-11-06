@@ -118,6 +118,7 @@ Approve the arm's capabilities in the Space:
 | `perception.locate_objects` | optional `kind`, `label` | `objects`, `frame`, `capture` |
 | `manipulation.pick` | `object_id` **or** `x`, `y` (optional `yaw`) | `object_held`, `grip`, `target`, `phases`, `latency_ms`, `perception_after`, ... |
 | `manipulation.place` | `container_id` **or** `x`, `y` | `released`, `object_held`, `grip`, `target`, `phases`, `latency_ms`, `perception_after`, ... |
+| `manipulation.perform_task` | `policy` (a name from the arm config's `policies`) | `arm`, `arm_before`, `policy`, `task`, `steps`, `clamped`, `seconds`, `ended_by`, `scene_before`, `scene_after` |
 
 No outcome proves itself: grasp, release, pick and place declare evidence
 specs that Cloud judges from the host's before/after observations (the
@@ -125,7 +126,16 @@ gripper signature, and the camera's counts of objects on the table and in
 containers). Closing on nothing is a failed grasp. `manipulation.mark_pose`,
 `perception.locate_objects`, `manipulation.pick` and `manipulation.place`
 need rows in Cloud's capability vocabulary before a Space can approve them
-(`docs/project/DECISIONS.md`).
+(`docs/project/DECISIONS.md`); those four shipped, `perception.survey` and
+`manipulation.perform_task` are requested.
+
+`manipulation.perform_task` (owner 2026-11-06) runs a trained LeRobot policy
+(ACT) named in the arm config's `policies` section, at its `fps` (30 Hz by
+default), each goal clamped to the limits and one `max_step` from the
+reading; a stop holds, `max_seconds` fails. It is proven like a place, by
+the camera's container count, never by the policy. Inference needs LeRobot
+with torch on the execution host; nothing here records or trains. Not run on
+a real arm or with a real checkpoint yet.
 
 ### Commissioning an arm
 

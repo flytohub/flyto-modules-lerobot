@@ -49,7 +49,7 @@ _UNSENT_REASONS: Mapping[type, str] = {
 # A latched fault whose code says more than "the arm's protection tripped".
 _FAULT_REASONS: Mapping[str, str] = {FAULT_SIMULATION_ON_HARDWARE: REASON_SIMULATION_ON_HARDWARE}
 # The capabilities that move the gripper (a stop holds it too while one runs).
-_GRIPPER_ACTIONS = frozenset({"grasp", "release", "pick", "place"})
+_GRIPPER_ACTIONS = frozenset({"grasp", "release", "pick", "place", "perform_task"})
 # How an interrupted move ends, by why it was interrupted.
 _STOP_OUTCOMES: Mapping[str, str] = {REASON_STOP_REQUESTED: OUTCOME_CANCELLED, REASON_DEADLINE: OUTCOME_TIMEOUT}
 _DRIVER_ERRORS = (ArmUnreachable, CommandLost, ArmFault, NotCalibrated, MotorsMismatch)

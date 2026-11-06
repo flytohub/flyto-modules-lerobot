@@ -117,6 +117,7 @@ from .arm_config import ArmConfig
 from .arm_looks import _LooksMixin
 from .arm_pick import _PickMixin
 from .arm_place import _PlaceMixin
+from .arm_policy import _PolicyMixin
 from .arm_teach import _TeachMixin
 from .backends import backend_for
 from .capabilities import (
@@ -134,9 +135,7 @@ from .driver import (
     NotCalibrated,
 )
 from .evidence import policy_refusal
-from .perception import (
-    scene_counts,
-)
+from .perception import scene_counts
 from .refusals import (
     POWER_CUTOFF_DETAIL,
     REASON_ARGUMENTS,
@@ -160,7 +159,7 @@ from .trajectory import Trajectory, motion_limits
 from .trajectory import plan as plan_trajectory
 
 
-class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin, _TeachMixin):
+class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin, _TeachMixin, _PolicyMixin):
     """One arm, through its shared LeRobot session."""
 
     # capability row ``action`` -> handler method.
@@ -174,6 +173,7 @@ class LeRobotArmAdapter(_LooksMixin, _PickMixin, _PlaceMixin, _TeachMixin):
         "survey": "_survey",
         "pick": "_pick",
         "place": "_place",
+        "perform_task": "_perform_task",
     }
 
     def __init__(
