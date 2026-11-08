@@ -70,6 +70,22 @@ def test_no_address_literal_but_loopback():
     assert found == []
 
 
+#: Han, kana, hangul and CJK punctuation. The pack ships English only; translations belong to the host.
+CJK_TEXT = re.compile("[\\u3000-\\u303f\\u3040-\\u30ff\\u4e00-\\u9fff\\uac00-\\ud7af\\uff00-\\uffef]")
+
+
+def test_every_shipped_and_test_string_is_english():
+    """Translated READMEs (README.<lang>.md) are the only non-English text the repository keeps."""
+    files = [*_sources(), *sorted((ROOT / "tests").rglob("*.py")), *sorted((ROOT / "examples").glob("*.json"))]
+    found = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in files
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if CJK_TEXT.search(line)
+    ]
+    assert found == []
+
+
 def test_no_credential_literal():
     found = [
         f"{path.relative_to(ROOT)}: {match.group(0)}"

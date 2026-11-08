@@ -114,8 +114,10 @@ rejected.
 - **One declarative table.** Ids, arguments, contracts, output schemas and
   refusal codes live in `capabilities.py`. The adapter routes by the row's
   `action`.
-- All repository text is English; zh-TW appears only as user-facing runtime
-  strings (refusal details, display names).
+- All repository text is English, including what the person sees (display
+  names, refusal details, labels); translation is the host's. Only the
+  translated READMEs (`README.<lang>.md`) hold other languages
+  (owner 2026-11-08, `tests/test_hygiene.py`).
 
 ## Before you edit: search and impact
 

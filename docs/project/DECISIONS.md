@@ -729,3 +729,16 @@ They are written down in `docs/project/handoffs/2026-11-06-perform-task.md`;
 neither repository is changed here. Until Cloud ships the row it refuses
 this declaration as `capability_not_in_vocabulary` and the others are
 unaffected.
+
+## 2026-11-08 -- English only, so the repository can be public (owner)
+
+The owner wants this repository public with no Chinese in it; a translated
+README is the one exception. The zh-TW display names, refusal details and the
+zh-TW keys of the evidence and live-view labels became English, and
+`tests/test_hygiene.py` fails on any CJK text in `src/`, `tests/` or
+`examples/`. This reverses the 2026-10-23 rule that user-facing runtime
+strings are zh-TW: a pack supplies English and the host translates. Cloud
+shows these strings as the pack sends them, so a zh-TW user now reads them in
+English until Cloud localizes pack strings; Cloud's code was searched and
+requires no zh-TW key, but its UI was not run against this change.
+

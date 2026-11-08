@@ -92,49 +92,84 @@ REASON_TASK_TIME_EXCEEDED = "task_time_exceeded"
 # The arm's own words for each, shown to the person verbatim.
 REFUSAL_DETAILS: Mapping[str, str] = MappingProxyType(
     {
-        REASON_UNREACHABLE: "無法連線到機械手臂，沒有送出任何動作指令。",
-        REASON_NOT_CALIBRATED: "機械手臂尚未校正（LeRobot 校正檔不符），沒有送出任何動作指令。",
-        REASON_FAULT: "機械手臂的保護機制已觸發（LeRobot 已切斷扭力並斷線），需要人員檢查後重新啟動。",
-        REASON_ARGUMENTS: "參數不正確，沒有送出任何動作指令。",
-        REASON_OUTSIDE_LIMITS: "目標超出這支手臂設定的關節範圍，沒有送出任何動作指令。",
-        REASON_POSE_UNKNOWN: "這支手臂沒有這個名稱的姿勢，沒有送出任何動作指令。",
-        REASON_POSE_NOT_TAUGHT: "這個姿勢還沒有在這支手臂上教過，沒有送出任何動作指令。",
-        REASON_MOTORS_MISMATCH: (
-            "LeRobot 回報的馬達與這支手臂設定檔的關節不符，沒有送出任何動作指令；請修正設定檔後重新啟動。"
+        REASON_UNREACHABLE: "The arm could not be reached; no motion command was sent.",
+        REASON_NOT_CALIBRATED: (
+            "The arm is not calibrated (its LeRobot calibration file does not match); no motion command was sent."
         ),
-        REASON_POSE_TAUGHT: "這個姿勢已經教過了；要覆蓋請指定 replace，沒有寫入任何資料。",
-        REASON_CONFIG_NOT_WRITABLE: "無法把姿勢寫入手臂設定檔，沒有寫入任何資料。",
-        REASON_EFFECT_UNKNOWN: "已送出動作指令，但沒有收到回覆或讀回位置，無法確定手臂目前的位置。",
-        REASON_NOT_REACHED: "手臂停在目標之前，已保持在目前位置。",
-        REASON_STOP_REQUESTED: "已要求停止：手臂被指令保持在目前位置（扭力未關閉），並非已確認的實體停止。",
-        REASON_DEADLINE: "超過時限，手臂被指令保持在目前位置。",
-        REASON_NO_OBJECT: "夾爪完全閉合，沒有夾到任何物品。",
-        REASON_SLIPPED: "夾爪碰到物品後又繼續閉合：物品已滑落。",
-        REASON_NOT_RELEASED: "夾爪張開後仍判定為夾著物品，放開未被確認。",
-        REASON_OBJECT_NOT_FOUND: "攝影機沒有看到指定的物品，沒有送出任何動作指令。",
+        REASON_FAULT: (
+            "The arm's protection tripped (LeRobot cut torque and disconnected); a person must check it and restart it."
+        ),
+        REASON_ARGUMENTS: "The arguments are not valid; no motion command was sent.",
+        REASON_OUTSIDE_LIMITS: "The target is outside this arm's configured joint limits; no motion command was sent.",
+        REASON_POSE_UNKNOWN: "This arm has no pose by that name; no motion command was sent.",
+        REASON_POSE_NOT_TAUGHT: "That pose has not been taught on this arm yet; no motion command was sent.",
+        REASON_MOTORS_MISMATCH: (
+            "The motors LeRobot reports do not match the joints in this arm's config file; no motion command was "
+            "sent. Fix the config file and restart."
+        ),
+        REASON_POSE_TAUGHT: "That pose is already taught; pass replace to overwrite it. Nothing was written.",
+        REASON_CONFIG_NOT_WRITABLE: "The pose could not be written to the arm's config file; nothing was written.",
+        REASON_EFFECT_UNKNOWN: (
+            "A motion command was sent, but no reply or position readback came back; where the arm is now is not known."
+        ),
+        REASON_NOT_REACHED: "The arm stopped short of the target and is holding where it is.",
+        REASON_STOP_REQUESTED: (
+            "Stop requested: the arm was commanded to hold where it is (torque stays on). This is not a confirmed "
+            "physical stop."
+        ),
+        REASON_DEADLINE: "The deadline passed; the arm was commanded to hold where it is.",
+        REASON_NO_OBJECT: "The gripper closed fully without holding anything.",
+        REASON_SLIPPED: "The gripper touched the object and then kept closing: the object slipped out.",
+        REASON_NOT_RELEASED: (
+            "After opening, the gripper still reads as holding the object; the release is not confirmed."
+        ),
+        REASON_OBJECT_NOT_FOUND: "The camera did not see the named object; no motion command was sent.",
         REASON_TARGET_PARTLY_SEEN: (
-            "攝影機只看到目標的一部分（被手臂遮住），無法確定它的位置與方向，沒有送出任何動作指令。"),
-        REASON_CONTAINER_NOT_FOUND: "攝影機沒有看到指定的容器，沒有送出任何動作指令。",
+            "The camera saw only part of the target (the arm hides the rest), so its position and heading are not "
+            "known; no motion command was sent."),
+        REASON_CONTAINER_NOT_FOUND: "The camera did not see the named container; no motion command was sent.",
         REASON_CONTAINER_MOVED: (
-            "容器已經不在先前看到的位置（超出兩次觀測不確定度的總和），沒有放下物品，物品仍夾在夾爪中。"),
-        REASON_VIEWPOINT_UNSUITABLE: "手臂上的攝影機從目前位置看不清楚桌面（不在畫面中或解析度不足），沒有移動手臂。",
-        REASON_POSE_UNREACHABLE: "手臂在關節範圍內到不了這個位置，沒有送出任何動作指令。",
-        REASON_NOTHING_HELD: "夾爪目前沒有夾著物品，沒有可放置的東西，沒有送出任何動作指令。",
-        REASON_NOT_IN_CONTAINER: "放開後攝影機沒有看到物品在容器內。",
-        REASON_PERCEPTION_DISAGREES: "夾爪判定夾住，但攝影機看到物品仍在桌面上。",
-        REASON_NOT_SEEN_IN_JAWS: "夾爪判定夾住，但手臂上的攝影機沒有看到夾爪之間有物品。",
-        REASON_PLACEMENT_UNOBSERVED: "放開後攝影機沒有看到物品，無法確認是否放進容器。",
-        REASON_PERCEPTION_UNAVAILABLE: "沒有可用的攝影機畫面，沒有送出任何動作指令。",
+            "The container is no longer where it was seen (it moved more than both looks' uncertainty together); "
+            "nothing was put down and the object is still in the gripper."),
+        REASON_VIEWPOINT_UNSUITABLE: (
+            "From where it is, the camera on the arm cannot see that part of the table clearly (out of frame or too few"
+            " pixels); the arm was not moved."
+        ),
+        REASON_POSE_UNREACHABLE: (
+            "The arm cannot reach that position within its joint limits; no motion command was sent."
+        ),
+        REASON_NOTHING_HELD: (
+            "The gripper is not holding anything, so there is nothing to place; no motion command was sent."
+        ),
+        REASON_NOT_IN_CONTAINER: "After the release, the camera did not see the object inside the container.",
+        REASON_PERCEPTION_DISAGREES: "The gripper reads as holding, but the camera sees the object still on the table.",
+        REASON_NOT_SEEN_IN_JAWS: (
+            "The gripper reads as holding, but the camera on the arm sees nothing between the jaws."
+        ),
+        REASON_PLACEMENT_UNOBSERVED: (
+            "After the release, the camera did not see the object, so whether it went into the container is not "
+            "confirmed."
+        ),
+        REASON_PERCEPTION_UNAVAILABLE: "No camera frame is available; no motion command was sent.",
         REASON_KINEMATICS_UNAVAILABLE: (
-            "這支手臂沒有可用的運動學鏈（未設定，或關節校準尚未在實機確認），"
-            "無法規劃座標目標，沒有送出任何動作指令。"),
-        REASON_SIMULATION_ON_HARDWARE: "模擬設定指向的不是模擬埠（可能是實體手臂），拒絕執行，沒有送出任何動作指令。",
-        REASON_POLICY_UNKNOWN: "這支手臂沒有設定這個名稱的策略，沒有送出任何動作指令。",
+            "This arm has no usable kinematic chain (none is configured, or its joint calibration is not confirmed "
+            "on the hardware), "
+            "so a position target cannot be planned; no motion command was sent."),
+        REASON_SIMULATION_ON_HARDWARE: (
+            "The simulation config names a port that is not a simulation port (it may be a real arm); refused, and no "
+            "motion command was sent."
+        ),
+        REASON_POLICY_UNKNOWN: "This arm has no policy configured by that name; no motion command was sent.",
         REASON_POLICY_UNAVAILABLE: (
-            "這台主機無法載入這個策略（找不到模型、缺少 LeRobot 或尚未支援），沒有送出任何動作指令。"),
-        REASON_POLICY_INPUT_MISSING: "手臂的觀測缺少策略需要的相機畫面，沒有送出任何動作指令。",
-        REASON_POLICY_ERROR: "策略推論失敗或輸出無效，已停止送出動作指令。",
-        REASON_TASK_TIME_EXCEEDED: "策略在設定的時間內沒有結束，手臂已被指令保持在目前位置。",
+            "This host cannot load the policy (no checkpoint, no LeRobot, or a type not supported yet); no motion "
+            "command was sent."),
+        REASON_POLICY_INPUT_MISSING: (
+            "The arm's observation lacks a camera frame the policy reads; no motion command was sent."
+        ),
+        REASON_POLICY_ERROR: "The policy failed or returned no valid goal; no more motion commands were sent.",
+        REASON_TASK_TIME_EXCEEDED: (
+            "The policy did not finish within its configured time; the arm was commanded to hold where it is."
+        ),
     }
 )
 
@@ -189,22 +224,22 @@ REFUSAL_LINES: Mapping[str, str] = MappingProxyType(
 )
 
 #: A mark_pose cancelled before it wrote anything.
-MARK_CANCELLED_DETAIL = "已取消，沒有寫入任何姿勢。Cancelled before anything was written."
+MARK_CANCELLED_DETAIL = "Cancelled before anything was written."
 
 #: Said with every stop that could not command the hold.
 POWER_CUTOFF_DETAIL = (
-    "無法指令手臂保持位置：請立即切斷手臂的 12 V 電源開關。"
     "The hold could not be commanded: cut the arm's 12 V supply with its physical switch."
 )
 
 
 #: A place whose jaws lost what the pick proved held: it moved to look, and released nothing.
 DROPPED_IN_TRANSIT_DETAIL = (
-    "夾爪已經沒有夾著先前夾起的物品（搬運途中掉落）；手臂已移到觀察位置重新拍照，沒有放下任何東西。")
+    "The gripper no longer holds the object it picked (it dropped on the way); the arm moved to its observe pose to"
+    " look again and put nothing down.")
 
 
 def refusal_detail(code: str) -> str:
-    """The zh-TW sentence shown to the person for a refusal code."""
+    """The sentence shown to the person for a refusal code."""
     return REFUSAL_DETAILS.get(code, "")
 
 
