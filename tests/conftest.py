@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from fake_lerobot import FakeFollowerArm, fake_factory
-from flyto_modules_lerobot import mujoco_sim, plugin, simulation
+from flyto_modules_lerobot import mujoco_sim, perception, plugin, simulation
 from flyto_modules_lerobot.arm_config import ArmConfig, parse_arm_config
 from flyto_modules_lerobot.driver import ArmSession
 from flyto_modules_lerobot.lerobot_adapter import LeRobotArmAdapter
@@ -76,6 +76,18 @@ def make_adapter(session) -> Callable[..., LeRobotArmAdapter]:
         return LeRobotArmAdapter(**kwargs)
 
     return build
+
+
+@pytest.fixture(autouse=True)
+def _no_real_camera(monkeypatch):
+    """No test opens a real camera. With OpenCV installed, a USB-camera arm config would otherwise capture
+    from whatever device the machine has (a laptop webcam sees no block between the jaws), so a test's
+    outcome would depend on the host. Opening one behaves as it does without OpenCV."""
+
+    def unavailable(_settings):
+        raise ModuleNotFoundError("cv2 is blocked in tests: no test may open a real camera", name="cv2")
+
+    monkeypatch.setattr(perception, "opencv_frames", unavailable)
 
 
 @pytest.fixture(autouse=True)

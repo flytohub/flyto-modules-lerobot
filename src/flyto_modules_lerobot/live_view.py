@@ -57,8 +57,8 @@ class View:
 
 
 VIEWS: tuple[View, ...] = (
-    View("sim-overhead", {"en": "Overhead camera (simulation)", "zh-TW": "俯視攝影機（模擬）"}, "overhead"),
-    View("sim-scene", {"en": "Scene view (simulation)", "zh-TW": "場景視角（模擬）"}, None),
+    View("sim-overhead", {"en": "Overhead camera (simulation)"}, "overhead"),
+    View("sim-scene", {"en": "Scene view (simulation)"}, None),
 )
 _BY_ID = {view.channel_id: view for view in VIEWS}
 

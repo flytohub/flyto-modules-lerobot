@@ -78,13 +78,13 @@ OBJECT_SCHEMA: Mapping[str, Any] = MappingProxyType({
 })
 
 
-def _held_change(kind: str, field: str, value: int, observe: str, english: str, chinese: str) -> dict[str, Any]:
+def _held_change(kind: str, field: str, value: int, observe: str, english: str) -> dict[str, Any]:
     """An evidence spec: ``field`` changes by exactly ``value`` from before the call to after it."""
     return {
         "kind": kind, "observe": observe, "phases": ["before", "after"],
         "measure": {"op": "delta", "fields": [field]}, "expect": {"value": value},
         "tolerance": {"absolute": 0.0}, "observer": "self",
-        "label": {"en": english, "zh-TW": chinese}, "unit": "",
+        "label": {"en": english}, "unit": "",
     }
 
 
@@ -93,10 +93,10 @@ OBSERVED_HELD = "object_held"
 OBSERVED_ON_TABLE = "objects_on_table"
 OBSERVED_IN_CONTAINERS = "objects_in_containers"
 EVIDENCE_HELD = _held_change("manipulation.object_held", OBSERVED_HELD, 1, "gripper",
-                             "Gripper holds an object", "夾爪夾住物品")
+                             "Gripper holds an object")
 EVIDENCE_RELEASED = _held_change("manipulation.object_released", OBSERVED_HELD, -1, "gripper",
-                                 "Gripper let go of the object", "夾爪放開物品")
+                                 "Gripper let go of the object")
 EVIDENCE_LEFT_TABLE = _held_change("perception.object_left_table", OBSERVED_ON_TABLE, -1, "table_objects",
-                                   "One object left the table", "桌面上少了一個物品")
+                                   "One object left the table")
 EVIDENCE_INTO_CONTAINER = _held_change("perception.object_in_container", OBSERVED_IN_CONTAINERS, 1, "table_objects",
-                                       "One more object inside a container", "容器內多了一個物品")
+                                       "One more object inside a container")

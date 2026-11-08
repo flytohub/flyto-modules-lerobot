@@ -126,3 +126,4 @@ published to PyPI. License: Flyto2 Source Available License 1.1.
   one that moves with time and runs on after a new goal); no real stop has
   been measured.
 - No execution-host run with a paired Cloud.
+- English only (2026-11-08): every string the pack ships is English; translation is the host's.

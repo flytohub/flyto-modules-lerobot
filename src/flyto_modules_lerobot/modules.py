@@ -221,7 +221,7 @@ async def dispatch_or_declare(context: Mapping[str, Any], request: dict[str, Any
         return {"ok": True, **result}
     return {
         "ok": False,
-        # The arm's own words (zh-TW) for a refusal reach the person verbatim.
+        # The arm's own words for a refusal reach the person verbatim.
         "error": str(record.get("detail") or outcome or "external capability failed")[:300],
         "error_code": _OUTCOME_ERRORS.get(outcome, "EXTERNAL_CAPABILITY_FAILED"),
         **result,

@@ -44,8 +44,8 @@ own outcome:
   no evidence either; the adapter completes a move only when its own
   readback is within tolerance, and returns before/after readings as data.
 
-User-facing runtime strings (display names, refusal details) are zh-TW;
-everything else is English.
+Every string here is English, including what is shown to the person; translation
+belongs to the host's locale files, never to this pack.
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ ADAPTER_ID = "lerobot.arm"
 MODULE_PACK = "lerobot"
 RESOURCE_TYPE = "manipulator"
 DEPLOYMENT_MODE = "real"
-DEFAULT_DISPLAY_NAME = "機械手臂"
+DEFAULT_DISPLAY_NAME = "Robot arm"
 PROVIDER_NAME = "Flyto2 LeRobot (wraps LeRobot's Robot API)"
 PACK_VERSION = "0.1.0"
 
@@ -215,10 +215,9 @@ MANIPULATION_STATE = CapabilitySpec(
     module_id="manipulation.read_state",
     action="read_state",
     label="Read arm state",
-    display_name="讀取手臂狀態",
+    display_name="Read arm state",
     description="Read where the arm's joints and gripper are now, as the arm reports them",
     manifest_description=(
-        "讀取手臂各關節與夾爪目前的位置（手臂自己的讀數）。"
         "Read the arm's joint and gripper positions."
     ),
     icon="Activity",
@@ -244,10 +243,9 @@ MOVE_JOINTS = CapabilitySpec(
     module_id="manipulation.move_joints",
     action="move_joints",
     label="Move arm joints",
-    display_name="移動手臂關節",
+    display_name="Move arm joints",
     description="Move the arm to a taught pose by name, or to joint targets within its configured limits",
     manifest_description=(
-        "把手臂移到已教過的姿勢，或移到設定範圍內的關節角度。"
         "Move the arm to a taught pose, or to joint targets within its limits."
     ),
     icon="Move",
@@ -288,13 +286,12 @@ GRASP = CapabilitySpec(
     module_id="manipulation.grasp",
     action="grasp",
     label="Close gripper",
-    display_name="夾取",
+    display_name="Grasp",
     description=(
         "Close the gripper where it is; completed only when the gripper signature shows an object held "
         "(closing on nothing is a failed grasp)"
     ),
     manifest_description=(
-        "在目前位置閉合夾爪；只有夾爪讀數顯示夾住物品才算完成（閉合到底代表沒夾到）。"
         "Close the gripper; completed only when its readings show an object held."
     ),
     icon="Grab",
@@ -313,9 +310,9 @@ RELEASE = CapabilitySpec(
     module_id="manipulation.release",
     action="release",
     label="Open gripper",
-    display_name="放開",
+    display_name="Release",
     description="Open the gripper to its configured open value where it is",
-    manifest_description="在目前位置張開夾爪。Open the gripper where it is.",
+    manifest_description="Open the gripper where it is.",
     icon="Hand",
     color="#FFA16F",
     tags=("manipulation", "gripper", "release"),
@@ -332,12 +329,11 @@ MARK_POSE = CapabilitySpec(
     module_id="manipulation.mark_pose",
     action="mark_pose",
     label="Mark arm pose",
-    display_name="記錄手臂姿勢",
+    display_name="Record arm pose",
     description=(
         "Record where the arm's joints are now as a taught pose in the arm's config file; moves nothing"
     ),
     manifest_description=(
-        "把手臂各關節目前的位置記錄成已教過的姿勢（寫入手臂設定檔），不會移動手臂。"
         "Record the arm's current joint positions as a taught pose; moves nothing."
     ),
     icon="BookmarkPlus",
@@ -407,10 +403,9 @@ LOCATE_OBJECTS = CapabilitySpec(
     module_id="perception.locate_objects",
     action="locate_objects",
     label="Locate objects",
-    display_name="辨識桌面物品",
+    display_name="Locate table objects",
     description="Locate the objects on the table in the table frame, as the arm's camera sees them now",
     manifest_description=(
-        "用手臂的攝影機找出桌面上的物品（積木、容器）在桌面座標中的位置與不確定度。"
         "Locate the objects on the table, in the table frame, from the arm's camera."
     ),
     icon="ScanSearch",
@@ -449,11 +444,10 @@ SURVEY = CapabilitySpec(
     module_id="perception.survey",
     action="survey",
     label="Survey the work area",
-    display_name="巡視工作區",
+    display_name="Survey work area",
     description=("Move the camera on the arm over the declared work area, looking down from a few points, "
                  "and list every object on it"),
     manifest_description=(
-        "移動手臂，用手臂上的攝影機從幾個點俯拍整個工作區，列出上面所有的物品與位置。"
         "Move the arm so its camera covers the whole work area, and list every object on it."
     ),
     icon="ScanSearch",
@@ -482,13 +476,12 @@ PICK = CapabilitySpec(
     module_id="manipulation.pick",
     action="pick",
     label="Pick an object",
-    display_name="拾取物品",
+    display_name="Pick object",
     description=(
         "Pick a located object (by id) or whatever is at a table position: approach, descend, grasp, lift, "
         "and verify it is held by the gripper signature and the camera"
     ),
     manifest_description=(
-        "拾取指定物品（物品 ID 或桌面座標）：接近、下降、夾取、抬起，並以夾爪讀數與攝影機確認夾住。"
         "Pick an object by id or table position, verified by gripper and camera."
     ),
     icon="Grab",
@@ -546,13 +539,12 @@ PLACE = CapabilitySpec(
     module_id="manipulation.place",
     action="place",
     label="Place the held object",
-    display_name="放置物品",
+    display_name="Place object",
     description=(
         "Place the held object into a located container (by id) or at a table position: move, descend, release, "
         "retreat, and verify it was let go and, for a container, that the camera sees it inside"
     ),
     manifest_description=(
-        "把夾著的物品放進指定容器（容器 ID）或桌面座標：移動、下降、放開、退回，並確認已放開且物品在容器內。"
         "Place the held object into a container or at a table position, verified."
     ),
     icon="Hand",
@@ -599,14 +591,12 @@ PERFORM_TASK = CapabilitySpec(
     module_id="manipulation.perform_task",
     action="perform_task",
     label="Perform a task with a trained policy",
-    display_name="執行學習策略任務",
+    display_name="Run trained policy task",
     description=(
         "Run one of the arm's configured trained policies (LeRobot ACT) until it comes to rest, each goal clamped "
         "to the arm's limits and step; the task is proven by the camera's container count, never the policy's word"
     ),
     manifest_description=(
-        "用這支手臂設定好的學習策略（LeRobot ACT）執行一個任務，動作限制在關節範圍與每週期步幅內；"
-        "是否完成由攝影機確認容器內多了一個物品，不採信模型自己回報。"
         "Run a configured trained policy; proven by the camera, not the policy."
     ),
     icon="Bot",

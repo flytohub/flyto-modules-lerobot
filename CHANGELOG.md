@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- English only (owner 2026-11-08): capability display names, refusal details
+  and evidence / live-view labels are English; the zh-TW label keys are gone
+  and `_held_change` takes no Chinese label. A hygiene test fails on CJK text
+  in `src/`, `tests/` or `examples/`; ruff's RUF001-003 checks are back on.
 - `manipulation.perform_task` (owner 2026-11-06): runs a trained LeRobot
   policy (ACT) named in the arm config's new `policies` section at its `fps`,
   each goal clamped to the limits and one `max_step` from the reading; HOLD
